@@ -1,0 +1,54 @@
+# Build artifacts
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# PyInstaller
+*.spec
+!360FrameTools_MINIMAL.spec
+*.exe
+
+# Large folders
+360ToolkitGS-FULL/
+
+# Virtual environments
+venv/
+venv_cpu_build/
+venv_*
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test outputs
+test_*.py
+test_masking_output/
+test_masking_batch/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Original projects (reference only)
+Original_Projects/
+
+# Dependencies
+node_modules/

@@ -1,0 +1,30 @@
+# 360FrameTools - Requirements
+# Complete photogrammetry preprocessing pipeline
+
+# Core dependencies
+numpy>=1.24.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# PyQt6 for GUI
+PyQt6>=6.5.0
+PyQt6-Qt6>=6.5.0
+
+# AI/ML for masking
+ultralytics>=8.0.200  # YOLOv8
+torch>=2.0.0  # PyTorch (install with CUDA support separately)
+torchvision>=0.15.0
+
+# Metadata handling
+piexif>=1.1.3
+
+# Optional but recommended
+# FFmpeg (install separately via system package manager or download binary)
+# Insta360 SDK (Windows only, copy from Original_Projects)
+
+# Development dependencies (optional)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Note: For GPU acceleration, install PyTorch with CUDA support:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118

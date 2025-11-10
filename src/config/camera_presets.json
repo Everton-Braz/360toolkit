@@ -1,0 +1,169 @@
+{
+  "presets": [
+    {
+      "name": "8-Camera Horizontal",
+      "description": "Default horizontal ring with 8 cameras at 110° FOV",
+      "rings": [
+        {
+          "name": "main",
+          "pitch": 0,
+          "cameras": [
+            {"yaw": 0, "fov": 110, "roll": 0},
+            {"yaw": 45, "fov": 110, "roll": 0},
+            {"yaw": 90, "fov": 110, "roll": 0},
+            {"yaw": 135, "fov": 110, "roll": 0},
+            {"yaw": 180, "fov": 110, "roll": 0},
+            {"yaw": -135, "fov": 110, "roll": 0},
+            {"yaw": -90, "fov": 110, "roll": 0},
+            {"yaw": -45, "fov": 110, "roll": 0}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "16-Camera Dome",
+      "description": "Dome configuration with 8 main + 4 look-up + 4 look-down cameras",
+      "rings": [
+        {
+          "name": "main",
+          "pitch": 0,
+          "cameras": [
+            {"yaw": 0, "fov": 110, "roll": 0},
+            {"yaw": 45, "fov": 110, "roll": 0},
+            {"yaw": 90, "fov": 110, "roll": 0},
+            {"yaw": 135, "fov": 110, "roll": 0},
+            {"yaw": 180, "fov": 110, "roll": 0},
+            {"yaw": -135, "fov": 110, "roll": 0},
+            {"yaw": -90, "fov": 110, "roll": 0},
+            {"yaw": -45, "fov": 110, "roll": 0}
+          ]
+        },
+        {
+          "name": "look_up",
+          "pitch": 45,
+          "cameras": [
+            {"yaw": 0, "fov": 110, "roll": 0},
+            {"yaw": 90, "fov": 110, "roll": 0},
+            {"yaw": 180, "fov": 110, "roll": 0},
+            {"yaw": -90, "fov": 110, "roll": 0}
+          ]
+        },
+        {
+          "name": "look_down",
+          "pitch": -45,
+          "cameras": [
+            {"yaw": 0, "fov": 110, "roll": 0},
+            {"yaw": 90, "fov": 110, "roll": 0},
+            {"yaw": 180, "fov": 110, "roll": 0},
+            {"yaw": -90, "fov": 110, "roll": 0}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4-Cardinal",
+      "description": "Four cardinal directions (N/S/E/W) at 90° FOV",
+      "rings": [
+        {
+          "name": "main",
+          "pitch": 0,
+          "cameras": [
+            {"yaw": 0, "fov": 90, "roll": 0},
+            {"yaw": 90, "fov": 90, "roll": 0},
+            {"yaw": 180, "fov": 90, "roll": 0},
+            {"yaw": -90, "fov": 90, "roll": 0}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "6-Cube Faces",
+      "description": "Six cube faces (front, back, left, right, top, bottom) at 90° FOV",
+      "rings": [
+        {
+          "name": "horizontal",
+          "pitch": 0,
+          "cameras": [
+            {"yaw": 0, "fov": 90, "roll": 0},
+            {"yaw": 90, "fov": 90, "roll": 0},
+            {"yaw": 180, "fov": 90, "roll": 0},
+            {"yaw": -90, "fov": 90, "roll": 0}
+          ]
+        },
+        {
+          "name": "vertical",
+          "pitch": 0,
+          "cameras": [
+            {"yaw": 0, "pitch": 90, "fov": 90, "roll": 0},
+            {"yaw": 0, "pitch": -90, "fov": 90, "roll": 0}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "12-Camera Full Sphere",
+      "description": "Maximum coverage with 12 cameras in horizontal ring",
+      "rings": [
+        {
+          "name": "main",
+          "pitch": 0,
+          "cameras": [
+            {"yaw": 0, "fov": 110, "roll": 0},
+            {"yaw": 30, "fov": 110, "roll": 0},
+            {"yaw": 60, "fov": 110, "roll": 0},
+            {"yaw": 90, "fov": 110, "roll": 0},
+            {"yaw": 120, "fov": 110, "roll": 0},
+            {"yaw": 150, "fov": 110, "roll": 0},
+            {"yaw": 180, "fov": 110, "roll": 0},
+            {"yaw": -150, "fov": 110, "roll": 0},
+            {"yaw": -120, "fov": 110, "roll": 0},
+            {"yaw": -90, "fov": 110, "roll": 0},
+            {"yaw": -60, "fov": 110, "roll": 0},
+            {"yaw": -30, "fov": 110, "roll": 0}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Photogrammetry Dense",
+      "description": "Dense coverage optimized for photogrammetry with overlap",
+      "rings": [
+        {
+          "name": "main",
+          "pitch": 0,
+          "cameras": [
+            {"yaw": 0, "fov": 120, "roll": 0},
+            {"yaw": 40, "fov": 120, "roll": 0},
+            {"yaw": 80, "fov": 120, "roll": 0},
+            {"yaw": 120, "fov": 120, "roll": 0},
+            {"yaw": 160, "fov": 120, "roll": 0},
+            {"yaw": -160, "fov": 120, "roll": 0},
+            {"yaw": -120, "fov": 120, "roll": 0},
+            {"yaw": -80, "fov": 120, "roll": 0},
+            {"yaw": -40, "fov": 120, "roll": 0}
+          ]
+        },
+        {
+          "name": "look_up",
+          "pitch": 30,
+          "cameras": [
+            {"yaw": 0, "fov": 120, "roll": 0},
+            {"yaw": 90, "fov": 120, "roll": 0},
+            {"yaw": 180, "fov": 120, "roll": 0},
+            {"yaw": -90, "fov": 120, "roll": 0}
+          ]
+        },
+        {
+          "name": "look_down",
+          "pitch": -30,
+          "cameras": [
+            {"yaw": 0, "fov": 120, "roll": 0},
+            {"yaw": 90, "fov": 120, "roll": 0},
+            {"yaw": 180, "fov": 120, "roll": 0},
+            {"yaw": -90, "fov": 120, "roll": 0}
+          ]
+        }
+      ]
+    }
+  ]
+}
