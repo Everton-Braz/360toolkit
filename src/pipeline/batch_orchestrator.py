@@ -6,6 +6,7 @@ Uses QThread for non-blocking UI execution with progress signals.
 """
 
 import logging
+import subprocess
 from pathlib import Path
 from typing import Dict, Optional, List, Callable
 import cv2
@@ -42,6 +43,7 @@ class PipelineWorker(QThread):
         super().__init__()
         self.config = config
         self.is_cancelled = False
+        self.is_paused = False
         
         # Initialize components
         self.frame_extractor = FrameExtractor()
@@ -50,6 +52,65 @@ class PipelineWorker(QThread):
         self.e2c_transform = E2CTransform()
         self.metadata_handler = MetadataHandler()
         self.masker = None  # Initialize only if masking enabled
+    
+    def discover_stage_input_folder(self, stage: int, output_dir: str) -> Optional[Path]:
+        """
+        Smart folder discovery for individual stage processing.
+        
+        Stage 1: Looks for input file (returns None - user must select)
+        Stage 2: Looks for stage1_frames folder with equirectangular images
+        Stage 3: Looks for stage2_perspectives folder with perspective images
+        
+        Returns Path to folder if found, None if not found (user must select manually)
+        """
+        output_path = Path(output_dir)
+        
+        if stage == 1:
+            # Stage 1 requires input file - user must select
+            return None
+        
+        elif stage == 2:
+            # Look for stage1_frames folder
+            stage1_folder = output_path / 'stage1_frames'
+            if stage1_folder.exists() and list(stage1_folder.glob('*.png')) or list(stage1_folder.glob('*.jpg')):
+                logger.info(f"[OK] Auto-discovered Stage 1 output: {stage1_folder}")
+                return stage1_folder
+            return None
+        
+        elif stage == 3:
+            # Look for stage2_perspectives folder
+            stage2_folder = output_path / 'stage2_perspectives'
+            if stage2_folder.exists() and list(stage2_folder.glob('*.png')) or list(stage2_folder.glob('*.jpg')):
+                logger.info(f"[OK] Auto-discovered Stage 2 output: {stage2_folder}")
+                return stage2_folder
+            return None
+        
+        return None
+    
+    def set_stage_input_folder(self, stage: int, folder_path: Path):
+        """
+        Manually set input folder for individual stage processing.
+        Updates config to process only that stage with the provided input.
+        """
+        folder_path = Path(folder_path)
+        
+        if stage == 2:
+            # Stage 2 input is equirectangular images from Stage 1
+            self.config['stage2_input_dir'] = str(folder_path)
+            # Disable Stage 1, enable Stage 2
+            self.config['enable_stage1'] = False
+            self.config['enable_stage2'] = True
+            self.config['enable_stage3'] = False
+            logger.info(f"[OK] Set Stage 2 input: {folder_path}")
+        
+        elif stage == 3:
+            # Stage 3 input is perspective images from Stage 2
+            self.config['stage3_input_dir'] = str(folder_path)
+            # Disable Stages 1 & 2, enable Stage 3
+            self.config['enable_stage1'] = False
+            self.config['enable_stage2'] = False
+            self.config['enable_stage3'] = True
+            logger.info(f"[OK] Set Stage 3 input: {folder_path}")
     
     def run(self):
         """Execute the pipeline"""
@@ -197,8 +258,45 @@ class PipelineWorker(QThread):
                             'count': len(frame_paths)
                         }
                     
+                    except subprocess.TimeoutExpired as timeout_error:
+                        # SDK timeout - check if frames were actually extracted
+                        logger.warning(f"[WARNING] SDK extraction timeout: {timeout_error}")
+                        extracted_dir = Path(output_dir)
+                        frame_files = list(extracted_dir.glob('*.*'))  # Find any extracted files
+                        
+                        if frame_files:
+                            # SDK did extract frames before timing out - use them!
+                            logger.info(f"[OK] SDK partially completed: {len(frame_files)} frames extracted before timeout")
+                            frame_paths = [str(f) for f in sorted(frame_files)]
+                            return {
+                                'success': True,
+                                'frames': frame_paths,
+                                'method': 'sdk_stitching',
+                                'count': len(frame_paths),
+                                'warning': f'Timeout after {len(frame_files)} frames'
+                            }
+                        else:
+                            # No frames produced - fallback to FFmpeg
+                            logger.warning("INFO: No frames extracted by SDK timeout - Falling back to FFmpeg method")
+                            method = 'ffmpeg'
+                    
                     except Exception as sdk_error:
+                        # Other SDK errors - check if any frames were created anyway
                         logger.error(f"[ERROR] SDK extraction failed: {sdk_error}")
+                        extracted_dir = Path(output_dir)
+                        frame_files = list(extracted_dir.glob('*.*'))
+                        
+                        if frame_files and len(frame_files) > 10:  # At least 10 frames produced
+                            logger.warning(f"[WARNING] SDK error but {len(frame_files)} frames were extracted - using them")
+                            frame_paths = [str(f) for f in sorted(frame_files)]
+                            return {
+                                'success': True,
+                                'frames': frame_paths,
+                                'method': 'sdk_stitching',
+                                'count': len(frame_paths),
+                                'warning': f'SDK error but {len(frame_files)} frames recovered'
+                            }
+                        
                         logger.warning("INFO: Falling back to FFmpeg method")
                         method = 'ffmpeg'
             
@@ -311,10 +409,17 @@ class PipelineWorker(QThread):
                         output_height=output_height
                     )
                     
-                    # Save perspective image
-                    output_filename = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.png"
+                    # Save perspective image with configured format
+                    image_format = self.config.get('stage2_format', 'png')
+                    extension = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
+                    output_filename = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{extension}"
                     output_path = output_dir / output_filename
-                    cv2.imwrite(str(output_path), perspective_img)
+                    
+                    # Handle JPEG encoding with quality
+                    if extension in ['jpg', 'jpeg']:
+                        cv2.imwrite(str(output_path), perspective_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    else:
+                        cv2.imwrite(str(output_path), perspective_img)
                     
                     # Embed camera orientation in EXIF
                     self.metadata_handler.embed_camera_orientation(
@@ -422,10 +527,17 @@ class PipelineWorker(QThread):
                             output_height=face_size
                         )
                         
-                        # Save face
-                        output_filename = f"frame_{frame_idx:05d}_{face_config['name']}.png"
+                        # Save face with configured format
+                        image_format = self.config.get('stage2_format', 'png')
+                        extension = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
+                        output_filename = f"frame_{frame_idx:05d}_{face_config['name']}.{extension}"
                         output_path = output_dir / output_filename
-                        cv2.imwrite(str(output_path), face_img)
+                        
+                        # Handle JPEG encoding with quality
+                        if extension in ['jpg', 'jpeg']:
+                            cv2.imwrite(str(output_path), face_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        else:
+                            cv2.imwrite(str(output_path), face_img)
                         
                         # Embed camera orientation in EXIF
                         self.metadata_handler.embed_camera_orientation(
@@ -451,10 +563,17 @@ class PipelineWorker(QThread):
                             output_height=face_size
                         )
                         
-                        # Save tile
-                        output_filename = f"frame_{frame_idx:05d}_{tile['name']}.png"
+                        # Save tile with configured format
+                        image_format = self.config.get('stage2_format', 'png')
+                        extension = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
+                        output_filename = f"frame_{frame_idx:05d}_{tile['name']}.{extension}"
                         output_path = output_dir / output_filename
-                        cv2.imwrite(str(output_path), tile_img)
+                        
+                        # Handle JPEG encoding with quality
+                        if extension in ['jpg', 'jpeg']:
+                            cv2.imwrite(str(output_path), tile_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        else:
+                            cv2.imwrite(str(output_path), tile_img)
                         
                         # Embed camera orientation
                         self.metadata_handler.embed_camera_orientation(
@@ -527,12 +646,23 @@ class PipelineWorker(QThread):
             def progress_callback(current, total, message):
                 self.progress.emit(current, total, f"Stage 3: {message}")
             
+            def cancellation_check():
+                """Check for cancellation or pause"""
+                if self.is_cancelled:
+                    return True
+                # Wait if paused
+                while self.is_paused:
+                    import time
+                    time.sleep(0.5)
+                return self.is_cancelled
+            
             # Batch process
             result = self.masker.process_batch(
                 input_dir=str(input_dir),
                 output_dir=str(output_dir),
                 save_visualization=save_visualization,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                cancellation_check=cancellation_check
             )
             
             result['success'] = True
@@ -564,6 +694,16 @@ class PipelineWorker(QThread):
         if self.sdk_extractor:
             self.sdk_extractor.cancel()
         logger.info("Pipeline cancellation requested")
+    
+    def pause(self):
+        """Pause pipeline execution (can be resumed)"""
+        self.is_paused = True
+        logger.info("Pipeline pause requested")
+    
+    def resume(self):
+        """Resume paused pipeline"""
+        self.is_paused = False
+        logger.info("Pipeline resume requested")
 
 
 class BatchOrchestrator:
@@ -616,3 +756,13 @@ class BatchOrchestrator:
         """Cancel running pipeline"""
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
+    
+    def pause(self):
+        """Pause running pipeline"""
+        if self.worker and self.worker.isRunning():
+            self.worker.pause()
+    
+    def resume(self):
+        """Resume paused pipeline"""
+        if self.worker and self.worker.isRunning():
+            self.worker.resume()

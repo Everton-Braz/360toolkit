@@ -89,6 +89,7 @@ class MultiCategoryMasker:
         self.confidence_threshold = confidence_threshold
         self.batch_size = batch_size
         self.model = None
+        self.cancelled = False  # Cancellation flag for batch processing
         
         # Initialize enabled categories (all enabled by default)
         self.enabled_categories = {
@@ -106,14 +107,30 @@ class MultiCategoryMasker:
         
     def _select_device(self, use_gpu: bool) -> str:
         """Select compute device (CUDA or CPU)"""
-        if use_gpu and TORCH_AVAILABLE and torch.cuda.is_available():
-            return 'cuda:0'
-        else:
+        if not TORCH_AVAILABLE:
             if use_gpu:
-                if not TORCH_AVAILABLE:
-                    logger.warning("GPU requested but PyTorch not available. Using CPU.")
+                logger.warning("GPU requested but PyTorch not available. Using CPU.")
+            return 'cpu'
+        
+        if use_gpu:
+            try:
+                cuda_available = torch.cuda.is_available()
+                cuda_version = torch.version.cuda if hasattr(torch.version, 'cuda') else 'unknown'
+                device_count = torch.cuda.device_count() if cuda_available else 0
+                
+                logger.info(f"CUDA detection: available={cuda_available}, version={cuda_version}, devices={device_count}")
+                
+                if cuda_available and device_count > 0:
+                    device_name = torch.cuda.get_device_name(0)
+                    logger.info(f"Using CUDA device: {device_name}")
+                    return 'cuda:0'
                 else:
-                    logger.warning("GPU requested but CUDA not available. Using CPU.")
+                    logger.warning(f"GPU requested but CUDA not available (version={cuda_version}, devices={device_count}). Using CPU.")
+                    return 'cpu'
+            except Exception as e:
+                logger.warning(f"Error detecting CUDA: {e}. Falling back to CPU.")
+                return 'cpu'
+        else:
             return 'cpu'
     
     def _initialize_model(self):
@@ -144,6 +161,15 @@ class MultiCategoryMasker:
         """
         Configure which categories to mask.
         
+        IMPORTANT: All images are processed ONCE. All enabled categories are detected in a 
+        SINGLE pass through the YOLOv8 model. The model detects all enabled object types
+        simultaneously and creates a SINGLE binary mask combining all detections.
+        
+        Example: If persons AND personal_objects are enabled:
+        - App processes each image ONE time through YOLOv8
+        - Model detects BOTH persons AND backpacks/phones in that single pass
+        - One mask file is created with BOTH persons and objects masked
+        
         Args:
             persons: Mask persons (COCO class 0)
             personal_objects: Mask personal objects (backpacks, phones, etc.)
@@ -155,6 +181,11 @@ class MultiCategoryMasker:
         
         enabled = [k for k, v in self.enabled_categories.items() if v]
         logger.info(f"Enabled masking categories: {', '.join(enabled)}")
+    
+    def request_cancellation(self):
+        """Request cancellation of current batch processing"""
+        self.cancelled = True
+        logger.info("Masking cancellation requested")
     
     def get_target_classes(self) -> List[int]:
         """
@@ -331,7 +362,8 @@ class MultiCategoryMasker:
     
     def process_batch(self, input_dir: str, output_dir: str, 
                      save_visualization: bool = False,
-                     progress_callback = None) -> Dict:
+                     progress_callback = None,
+                     cancellation_check = None) -> Dict:
         """
         Process all images in a directory and generate masks.
         
@@ -340,6 +372,7 @@ class MultiCategoryMasker:
             output_dir: Directory to save masks
             save_visualization: If True, save visualization overlays
             progress_callback: Optional callback(current, total, message)
+            cancellation_check: Optional callback() that returns True if cancelled
             
         Returns:
             Dictionary with results: {successful, failed, total, skipped}
@@ -364,6 +397,11 @@ class MultiCategoryMasker:
         logger.info(f"Processing {total} images for multi-category masking...")
         
         for idx, img_path in enumerate(image_files):
+            # Check cancellation before processing each image
+            if cancellation_check and cancellation_check():
+                logger.info("Masking batch processing cancelled by user")
+                break
+            
             try:
                 if progress_callback:
                     progress_callback(idx + 1, total, f"Processing {img_path.name}")

@@ -8,7 +8,7 @@ Central location for all default settings across the pipeline.
 # ============================================================================
 
 # Extraction parameters
-DEFAULT_FPS = 1.0  # Frames per second extraction rate
+DEFAULT_FPS = 2.0  # Frames per second extraction rate (CHANGED: 2 FPS)
 FPS_MIN = 0.1
 FPS_MAX = 30.0
 
@@ -54,7 +54,7 @@ SPLIT_COUNT_MIN = 1
 SPLIT_COUNT_MAX = 12
 
 # Field of view
-DEFAULT_H_FOV = 110  # Horizontal field of view in degrees
+DEFAULT_H_FOV = 110  # Horizontal field of view in degrees (CHANGED: 110°)
 H_FOV_MIN = 30
 H_FOV_MAX = 150
 
@@ -69,7 +69,7 @@ TRANSFORM_TYPES = {
     'cubemap_6face': 'Cubemap (6-face)',
     'cubemap_8tile': 'Cubemap (8-tile)'
 }
-DEFAULT_TRANSFORM_TYPE = 'perspective'
+DEFAULT_TRANSFORM_TYPE = 'cubemap_8tile'  # CHANGED: Default is now 8-tile cubemap
 
 # Output dimensions (SQUARE for photogrammetry)
 DEFAULT_OUTPUT_WIDTH = 1440
@@ -148,17 +148,17 @@ MASKING_CATEGORIES = {
     'persons': {
         'name': 'Persons',
         'classes': [0],  # person
-        'enabled': True
+        'enabled': True  # CHANGED: Persons enabled by default
     },
     'personal_objects': {
         'name': 'Personal Objects',
         'classes': [24, 26, 28, 67],  # backpack, handbag, suitcase, cell phone
-        'enabled': True
+        'enabled': True  # CHANGED: Personal objects enabled by default
     },
     'animals': {
         'name': 'Animals',
         'classes': [14, 15, 16, 17, 18, 19, 20, 21, 22, 23],  # bird through giraffe
-        'enabled': True
+        'enabled': False  # CHANGED: Animals disabled by default
     }
 }
 
@@ -196,8 +196,8 @@ YOLOV8_MODELS = {
     }
 }
 
-DEFAULT_MODEL_SIZE = 'medium'
-DEFAULT_CONFIDENCE_THRESHOLD = 0.6
+DEFAULT_MODEL_SIZE = 'medium'  # CHANGED: Default model is medium
+DEFAULT_CONFIDENCE_THRESHOLD = 0.6  # CHANGED: Confidence threshold is 0.60
 CONFIDENCE_MIN = 0.0
 CONFIDENCE_MAX = 1.0
 

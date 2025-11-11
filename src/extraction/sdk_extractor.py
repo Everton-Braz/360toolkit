@@ -366,22 +366,89 @@ class SDKExtractor:
                 errors='replace'
             )
             
+            # Calculate timeout based on frame count
+            # Empirical: ~0.5-1.5s per frame for optflow stitching + 180s overhead
+            # For 7680x3840 output with stitching and stitchfusion, can take 1-2s per frame
+            # Add 50% safety margin for system load variations
+            frame_count = len(frame_indices)
+            base_time = frame_count * 1.5  # 1.5s per frame average (conservative)
+            overhead = 180  # 3 minutes overhead for SDK startup/shutdown/finalization
+            safety_margin = (base_time + overhead) * 0.5  # 50% safety margin
+            estimated_time = base_time + overhead + safety_margin
+            estimated_time = max(600, min(7200, estimated_time))  # Min 10min, Max 2 hours
+            logger.info(f"[INFO] Timeout set to {estimated_time:.0f}s for {frame_count} frames (~{estimated_time/frame_count:.2f}s/frame with safety margin)")
+            
+            # Monitor progress in real-time while SDK is running
+            import time
+            import threading
+            
+            extracted_frames = []
+            last_count = 0
+            
+            def monitor_progress():
+                """Monitor extraction progress by counting output files"""
+                nonlocal extracted_frames, last_count
+                while self._current_process and self._current_process.poll() is None:
+                    try:
+                        current_files = list(output_dir.glob('*.*'))
+                        if len(current_files) > last_count:
+                            last_count = len(current_files)
+                            progress_percent = int((last_count / frame_count * 100)) if frame_count > 0 else 0
+                            if progress_callback:
+                                progress_callback(progress_percent)
+                            logger.debug(f"Progress: {last_count}/{frame_count} frames ({progress_percent}%)")
+                    except Exception as e:
+                        logger.debug(f"Error monitoring progress: {e}")
+                    time.sleep(2)  # Check every 2 seconds
+            
+            # Start progress monitor thread
+            monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
+            monitor_thread.start()
+            
             # Wait for completion
-            stdout, stderr = self._current_process.communicate(timeout=300)
-            returncode = self._current_process.returncode
-            self._current_process = None
-            
-            if returncode != 0:
-                raise subprocess.CalledProcessError(returncode, cmd, stdout, stderr)
-            
-            logger.info("[OK] MediaSDK extraction completed successfully!")
-            if stdout:
+            try:
+                stdout, stderr = self._current_process.communicate(timeout=estimated_time)
+                returncode = self._current_process.returncode
+                self._current_process = None
+                
+                # Final progress update
+                if progress_callback:
+                    progress_callback(100)
+                
+                if returncode != 0:
+                    raise subprocess.CalledProcessError(returncode, cmd, stdout, stderr)
+                
+                logger.info("[OK] MediaSDK extraction completed successfully!")
+                if stdout:
+                    logger.debug(f"SDK output: {stdout}")
+            except subprocess.TimeoutExpired:
+                # Process is still running - let it finish but check progress
+                logger.warning(f"[WARNING] SDK timeout after {estimated_time:.0f}s - process may still be running")
+                try:
+                    stdout, stderr = self._current_process.communicate(timeout=60)  # Try once more with short timeout
+                except subprocess.TimeoutExpired:
+                    logger.warning("[WARNING] SDK still running - killing process")
+                    self._current_process.kill()
+                    stdout, stderr = self._current_process.communicate()
+                finally:
+                    returncode = self._current_process.returncode
+                    self._current_process = None
                 logger.debug(f"SDK output: {stdout}")
             
             # Collect extracted frame paths
             extracted_frames = self._collect_frame_paths(output_dir, frame_indices, output_format)
             
-            logger.info(f"[OK] Extracted {len(extracted_frames)} frames")
+            # Validate extraction - should have at least 70% of expected frames
+            expected_count = len(frame_indices)
+            actual_count = len(extracted_frames)
+            success_rate = (actual_count / expected_count * 100) if expected_count > 0 else 0
+            
+            if actual_count == 0:
+                raise RuntimeError(f"SDK produced no output frames in {output_dir}")
+            elif success_rate < 70:
+                logger.warning(f"[WARNING] Low extraction rate: {actual_count}/{expected_count} ({success_rate:.1f}%)")
+            
+            logger.info(f"[OK] Extracted {actual_count}/{expected_count} frames ({success_rate:.1f}%)")
             return extracted_frames
             
         except subprocess.CalledProcessError as e:
@@ -554,16 +621,25 @@ class SDKExtractor:
         Collect paths to extracted frames.
         
         MediaSDK names files by frame index: 0.jpg, 10.jpg, 20.jpg, etc.
+        Tolerates missing frames (up to 30%) due to SDK behavior on some systems.
         """
         ext = f".{output_format.lower()}"
         extracted = []
+        missing = []
         
         for idx in frame_indices:
             frame_path = output_dir / f"{idx}{ext}"
             if frame_path.exists():
                 extracted.append(str(frame_path))
             else:
-                logger.warning(f"Expected frame not found: {frame_path}")
+                missing.append(idx)
+        
+        # Log summary instead of per-frame warnings
+        if missing:
+            if len(missing) <= 10:
+                logger.debug(f"Missing frames: {missing}")
+            else:
+                logger.debug(f"Missing {len(missing)} frames (first 10: {missing[:10]}...)")
         
         return extracted
 

@@ -223,6 +223,14 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_pipeline)
         action_layout.addWidget(self.stop_button, stretch=0)
         
+        self.pause_button = QPushButton("⏸ Pause")
+        self.pause_button.setMinimumSize(90, 40)
+        self.pause_button.setMaximumSize(120, 50)
+        self.pause_button.setObjectName("pauseButton")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.toggle_pause)
+        action_layout.addWidget(self.pause_button, stretch=0)
+        
         action_layout.addSpacing(20)
         
         # Progress bar (expands to fill space)
@@ -858,25 +866,53 @@ class MainWindow(QMainWindow):
         self.stage3_enable.setChecked(stage3_state)
     
     def run_stage_2_only(self):
-        """Run only Stage 2 (Split Views)"""
+        """Run only Stage 2 (Split Views) - Auto-discovers input from Stage 1 output"""
         self.log_message("Running Stage 2 only: Split Perspectives/Cubemap")
         
-        # Check if stage1 output exists
-        input_file = self.input_file_edit.text()
         output_dir = self.output_dir_edit.text()
         
-        if not input_file or not output_dir:
-            QMessageBox.warning(self, "Missing Input", "Please configure input/output first")
+        if not output_dir:
+            QMessageBox.warning(self, "Missing Output Dir", "Please configure output directory first")
             return
         
-        # Temporarily disable other stages
+        # Auto-discover Stage 1 output
+        from src.pipeline.batch_orchestrator import PipelineWorker
+        worker = PipelineWorker({})  # Dummy worker just for discovery method
+        
+        stage1_folder = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
+        
+        if not stage1_folder:
+            # Not found - ask user to select manually
+            self.log_message("[!] Stage 1 output folder not found. Selecting manually...")
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                "Select Stage 1 Output Folder (equirectangular images)",
+                str(Path(output_dir))
+            )
+            if not folder:
+                self.log_message("Stage 2 cancelled - no input folder selected")
+                return
+            stage1_folder = Path(folder)
+        else:
+            self.log_message(f"[OK] Auto-discovered Stage 1 output: {stage1_folder}")
+        
+        # Verify folder has images
+        images = list(stage1_folder.glob('*.png')) + list(stage1_folder.glob('*.jpg'))
+        if not images:
+            QMessageBox.warning(self, "No Images Found", f"No images in: {stage1_folder}")
+            return
+        
+        self.log_message(f"[OK] Found {len(images)} equirectangular images")
+        
+        # Temporarily disable other stages and set input
         stage1_state = self.stage1_enable.isChecked()
         stage3_state = self.stage3_enable.isChecked()
         
         self.stage1_enable.setChecked(False)
         self.stage3_enable.setChecked(False)
         
-        # Run pipeline
+        # Set Stage 2 input and run
+        self.pipeline_config['stage2_input_dir'] = str(stage1_folder)
         self.start_pipeline()
         
         # Restore states
@@ -884,17 +920,53 @@ class MainWindow(QMainWindow):
         self.stage3_enable.setChecked(stage3_state)
     
     def run_stage_3_only(self):
-        """Run only Stage 3 (Masking)"""
+        """Run only Stage 3 (Masking) - Auto-discovers input from Stage 2 output"""
         self.log_message("Running Stage 3 only: Generate Masks")
         
-        # Temporarily disable other stages
+        output_dir = self.output_dir_edit.text()
+        
+        if not output_dir:
+            QMessageBox.warning(self, "Missing Output Dir", "Please configure output directory first")
+            return
+        
+        # Auto-discover Stage 2 output
+        from src.pipeline.batch_orchestrator import PipelineWorker
+        worker = PipelineWorker({})  # Dummy worker just for discovery method
+        
+        stage2_folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
+        
+        if not stage2_folder:
+            # Not found - ask user to select manually
+            self.log_message("[!] Stage 2 output folder not found. Selecting manually...")
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                "Select Stage 2 Output Folder (perspective images)",
+                str(Path(output_dir))
+            )
+            if not folder:
+                self.log_message("Stage 3 cancelled - no input folder selected")
+                return
+            stage2_folder = Path(folder)
+        else:
+            self.log_message(f"[OK] Auto-discovered Stage 2 output: {stage2_folder}")
+        
+        # Verify folder has images
+        images = list(stage2_folder.glob('*.png')) + list(stage2_folder.glob('*.jpg'))
+        if not images:
+            QMessageBox.warning(self, "No Images Found", f"No images in: {stage2_folder}")
+            return
+        
+        self.log_message(f"[OK] Found {len(images)} perspective images")
+        
+        # Temporarily disable other stages and set input
         stage1_state = self.stage1_enable.isChecked()
         stage2_state = self.stage2_enable.isChecked()
         
         self.stage1_enable.setChecked(False)
         self.stage2_enable.setChecked(False)
         
-        # Run pipeline
+        # Set Stage 3 input and run
+        self.pipeline_config['stage3_input_dir'] = str(stage2_folder)
         self.start_pipeline()
         
         # Restore states
@@ -1008,6 +1080,9 @@ class MainWindow(QMainWindow):
         # Disable start button
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.pause_button.setEnabled(True)
+        self._is_paused = False
+        self.pause_button.setText("⏸ Pause")
         
         # Clear log
         self.log_text.clear()
@@ -1028,6 +1103,22 @@ class MainWindow(QMainWindow):
         self.log_message("Pipeline stopped by user")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
+    
+    def toggle_pause(self):
+        """Toggle pause/resume pipeline"""
+        if hasattr(self, '_is_paused') and self._is_paused:
+            # Resume
+            self.orchestrator.resume()
+            self.pause_button.setText("⏸ Pause")
+            self.log_message("Pipeline resumed")
+            self._is_paused = False
+        else:
+            # Pause
+            self.orchestrator.pause()
+            self.pause_button.setText("▶ Resume")
+            self.log_message("Pipeline paused")
+            self._is_paused = True
     
     def on_progress(self, current: int, total: int, message: str):
         """Handle progress updates"""
@@ -1039,16 +1130,31 @@ class MainWindow(QMainWindow):
         self.log_message(message)
     
     def on_stage_complete(self, stage_number: int, results: dict):
-        """Handle stage completion"""
+        """Handle stage completion and auto-advance to next stage"""
         if results.get('success'):
             self.log_message(f"✓ Stage {stage_number} complete")
+            
+            # Auto-advance to next stage if enabled
+            if stage_number == 1 and self.stage2_enable.isChecked():
+                self.log_message("→ Auto-advancing to Stage 2...")
+                QTimer.singleShot(500, self.run_stage_2_only)
+            
+            elif stage_number == 2 and self.stage3_enable.isChecked():
+                self.log_message("→ Auto-advancing to Stage 3...")
+                QTimer.singleShot(500, self.run_stage_3_only)
+            
+            elif stage_number == 3:
+                self.log_message("✓ All stages complete!")
+        
         else:
             self.log_message(f"✗ Stage {stage_number} failed: {results.get('error')}")
+            # Stop auto-advance on error
     
     def on_finished(self, results: dict):
         """Handle pipeline completion"""
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
         self.progress_bar.setValue(100)
         
         if results.get('success'):
@@ -1063,6 +1169,7 @@ class MainWindow(QMainWindow):
         self.log_message(f"✗ Error: {error_message}")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
     
     def log_message(self, message: str):
         """Add message to log panel"""
@@ -1156,6 +1263,10 @@ class MainWindow(QMainWindow):
             }
             QPushButton#stopButton {
                 background-color: #dc143c;
+                border: none;
+            }
+            QPushButton#pauseButton {
+                background-color: #ff8c00;
                 border: none;
             }
             QWidget#controlPanel {
