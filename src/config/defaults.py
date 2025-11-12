@@ -72,12 +72,13 @@ TRANSFORM_TYPES = {
 DEFAULT_TRANSFORM_TYPE = 'cubemap_8tile'  # CHANGED: Default is now 8-tile cubemap
 
 # Output dimensions (SQUARE for photogrammetry)
-DEFAULT_OUTPUT_WIDTH = 1440
-DEFAULT_OUTPUT_HEIGHT = 1440
+DEFAULT_OUTPUT_WIDTH = 1920  # CHANGED: 1920×1920 for Stage 2 Perspective
+DEFAULT_OUTPUT_HEIGHT = 1920
 
 # Cubemap settings
-DEFAULT_CUBEMAP_FACE_SIZE = 1024
+DEFAULT_CUBEMAP_FACE_SIZE = 1920  # CHANGED: Calculated as input_height / 2 + 33% (e.g., 1440 / 2 * 1.33 ≈ 1920)
 DEFAULT_CUBEMAP_OVERLAP = 10  # Overlap percentage (0-50)
+DEFAULT_CUBEMAP_FOV = 110  # CHANGED: Default FOV for 8-tile cubemap
 
 # Camera ring presets
 DEFAULT_COMPASS_RINGS = [

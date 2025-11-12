@@ -12,6 +12,7 @@ from PIL import Image
 import json
 import logging
 from pathlib import Path
+import os
 from typing import Dict, Optional, Any
 from datetime import datetime
 
@@ -136,12 +137,29 @@ class MetadataHandler:
             True if successful
         """
         try:
-            img = Image.open(image_path)
-            
+            # Open image with retry - handle transient incomplete writes
+            last_exc = None
+            for attempt in range(5):
+                try:
+                    img = Image.open(image_path)
+                    img.verify()  # verify integrity
+                    # Re-open after verify because verify() leaves the file closed
+                    img = Image.open(image_path)
+                    break
+                except Exception as e:
+                    last_exc = e
+                    logger.debug(f"Attempt {attempt+1}/5: image not ready: {e}")
+                    import time
+                    time.sleep(0.5)
+            else:
+                logger.error(f"Image file unreadable after retries: {image_path}: {last_exc}")
+                raise last_exc
+
             # Load existing EXIF or create new
             try:
-                exif_dict = piexif.load(img.info.get('exif', b''))
-            except:
+                exif_bytes = img.info.get('exif', b'')
+                exif_dict = piexif.load(exif_bytes) if exif_bytes else {'0th': {}, 'Exif': {}, '1st': {}, 'GPS': {}}
+            except Exception:
                 exif_dict = {'0th': {}, 'Exif': {}, '1st': {}, 'GPS': {}}
             
             # Embed orientation in UserComment (JSON format)
@@ -165,12 +183,38 @@ class MetadataHandler:
             
             # Convert to bytes
             exif_bytes = piexif.dump(exif_dict)
-            
-            # Save image with new EXIF
+
+            # Save image with new EXIF (format-specific parameters)
             output = output_path or image_path
-            img.save(output, exif=exif_bytes, quality=95)
+            output_format = img.format or 'PNG'  # Default to PNG if format unknown
+
+            # Use format-specific save parameters to avoid corruption
+            if output_format.upper() in ['JPEG', 'JPG']:
+                # JPEG supports quality parameter
+                img.save(output, exif=exif_bytes, quality=95)
+            elif output_format.upper() == 'PNG':
+                # PNG: write atomically to avoid partially-written files being read by other threads
+                from tempfile import NamedTemporaryFile
+                with NamedTemporaryFile(delete=False, suffix='.png', dir=Path(output).parent) as tmpf:
+                    tmp_name = tmpf.name
+                try:
+                    img.save(tmp_name, exif=exif_bytes, compress_level=6)
+                    os.replace(tmp_name, output)
+                except Exception:
+                    # Cleanup temp file if something goes wrong
+                    try:
+                        Path(tmp_name).unlink()
+                    except Exception:
+                        pass
+                    raise
+            elif output_format.upper() in ['TIFF', 'TIF']:
+                # TIFF uses compression parameter
+                img.save(output, exif=exif_bytes, compression='tiff_deflate')
+            else:
+                # Fallback: save without format-specific params
+                img.save(output, exif=exif_bytes)
             
-            logger.debug(f"Embedded camera orientation: yaw={yaw:.1f}, pitch={pitch:.1f}, roll={roll:.1f}")
+            logger.debug(f"Embedded camera orientation: yaw={yaw:.1f}, pitch={pitch:.1f}, roll={roll:.1f}, format={output_format}")
             return True
         
         except Exception as e:

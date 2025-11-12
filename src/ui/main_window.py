@@ -208,28 +208,31 @@ class MainWindow(QMainWindow):
         # === ACTION BUTTONS + PROGRESS ===
         action_layout = QHBoxLayout()
         
+        # Start button - green with play icon
         self.start_button = QPushButton("▶ Start Pipeline")
-        self.start_button.setMinimumSize(140, 40)
-        self.start_button.setMaximumSize(180, 50)
+        self.start_button.setMinimumSize(150, 45)
+        self.start_button.setMaximumSize(200, 55)
         self.start_button.setObjectName("startButton")
         self.start_button.clicked.connect(self.start_pipeline)
         action_layout.addWidget(self.start_button, stretch=0)
         
-        self.stop_button = QPushButton("⏹ Stop")
-        self.stop_button.setMinimumSize(90, 40)
-        self.stop_button.setMaximumSize(120, 50)
-        self.stop_button.setObjectName("stopButton")
-        self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self.stop_pipeline)
-        action_layout.addWidget(self.stop_button, stretch=0)
-        
+        # Pause button - yellow/orange with pause icon
         self.pause_button = QPushButton("⏸ Pause")
-        self.pause_button.setMinimumSize(90, 40)
-        self.pause_button.setMaximumSize(120, 50)
+        self.pause_button.setMinimumSize(100, 45)
+        self.pause_button.setMaximumSize(140, 55)
         self.pause_button.setObjectName("pauseButton")
         self.pause_button.setEnabled(False)
         self.pause_button.clicked.connect(self.toggle_pause)
         action_layout.addWidget(self.pause_button, stretch=0)
+        
+        # Stop button - red with stop icon
+        self.stop_button = QPushButton("⏹ Stop")
+        self.stop_button.setMinimumSize(100, 45)
+        self.stop_button.setMaximumSize(140, 55)
+        self.stop_button.setObjectName("stopButton")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_pipeline)
+        action_layout.addWidget(self.stop_button, stretch=0)
         
         action_layout.addSpacing(20)
         
@@ -435,13 +438,13 @@ class MainWindow(QMainWindow):
         res_layout.addWidget(QLabel("Width:"))
         self.stage2_width_spin = QSpinBox()
         self.stage2_width_spin.setRange(640, 7680)
-        self.stage2_width_spin.setValue(1920)
+        self.stage2_width_spin.setValue(1920)  # CHANGED: Default 1920 for square images
         self.stage2_width_spin.setSingleStep(128)
         res_layout.addWidget(self.stage2_width_spin)
         res_layout.addWidget(QLabel("Height:"))
         self.stage2_height_spin = QSpinBox()
         self.stage2_height_spin.setRange(480, 3840)
-        self.stage2_height_spin.setValue(1080)
+        self.stage2_height_spin.setValue(1920)  # CHANGED: Default 1920 for square images
         self.stage2_height_spin.setSingleStep(128)
         res_layout.addWidget(self.stage2_height_spin)
         res_layout.addStretch()
@@ -556,6 +559,7 @@ class MainWindow(QMainWindow):
         self.cubemap_type_combo = QComboBox()
         self.cubemap_type_combo.addItem("6-Tile Standard Cubemap (90° FOV, Separate Files)", "6-face")
         self.cubemap_type_combo.addItem("8-Tile Grid (Photogrammetry/Gaussian Splatting)", "8-tile")
+        self.cubemap_type_combo.setCurrentIndex(1)  # CHANGED: Default to 8-tile
         self.cubemap_type_combo.currentIndexChanged.connect(self.on_cubemap_type_changed)
         cubemap_type_layout.addWidget(self.cubemap_type_combo)
         cubemap_type_layout.addStretch()
@@ -584,10 +588,10 @@ class MainWindow(QMainWindow):
         fov_control_layout.addWidget(QLabel("Horizontal FOV (°):"))
         self.cubemap_fov_spin = QSpinBox()
         self.cubemap_fov_spin.setRange(45, 150)
-        self.cubemap_fov_spin.setValue(100)
+        self.cubemap_fov_spin.setValue(110)  # CHANGED: Default 110° FOV
         self.cubemap_fov_spin.valueChanged.connect(self.on_fov_changed)
         fov_control_layout.addWidget(self.cubemap_fov_spin)
-        self.fov_overlap_label = QLabel("→ Overlap: ~55%")
+        self.fov_overlap_label = QLabel("→ Overlap: ~55%")  # Will update dynamically
         self.fov_overlap_label.setStyleSheet("color: gray;")
         fov_control_layout.addWidget(self.fov_overlap_label)
         fov_control_layout.addStretch()
@@ -614,8 +618,8 @@ class MainWindow(QMainWindow):
         
         cubemap_params_layout.addWidget(self.tile_8_controls_widget)
         
-        # Initially hide 8-tile controls (6-tile is default)
-        self.tile_8_controls_widget.setVisible(False)
+        # CHANGED: Show 8-tile controls by default (8-tile is now default)
+        self.tile_8_controls_widget.setVisible(True)
         
         cubemap_params_group.setLayout(cubemap_params_layout)
         layout.addWidget(cubemap_params_group)
@@ -648,7 +652,7 @@ class MainWindow(QMainWindow):
         categories_layout.addWidget(self.objects_check)
         
         self.animals_check = QCheckBox("Animals")
-        self.animals_check.setChecked(True)
+        self.animals_check.setChecked(False)  # CHANGED: Animals unchecked by default
         categories_layout.addWidget(self.animals_check)
         
         categories_group.setLayout(categories_layout)
@@ -665,7 +669,7 @@ class MainWindow(QMainWindow):
         for size, info in YOLOV8_MODELS.items():
             label = f"{size.capitalize()} ({info['size_mb']}MB, ~{info['speed_seconds']}s)"
             self.model_size_combo.addItem(label, size)
-        self.model_size_combo.setCurrentIndex(1)  # Default to 'small'
+        self.model_size_combo.setCurrentIndex(2)  # CHANGED: Default to 'medium' (index 2)
         size_layout.addWidget(self.model_size_combo)
         size_layout.addStretch()
         model_layout.addLayout(size_layout)
@@ -675,7 +679,7 @@ class MainWindow(QMainWindow):
         conf_layout.addWidget(QLabel("Confidence Threshold:"))
         self.confidence_spin = QDoubleSpinBox()
         self.confidence_spin.setRange(0.0, 1.0)
-        self.confidence_spin.setValue(0.5)
+        self.confidence_spin.setValue(0.6)  # CHANGED: Default confidence 0.6
         self.confidence_spin.setSingleStep(0.05)
         conf_layout.addWidget(self.confidence_spin)
         conf_layout.addStretch()
@@ -896,8 +900,10 @@ class MainWindow(QMainWindow):
         else:
             self.log_message(f"[OK] Auto-discovered Stage 1 output: {stage1_folder}")
         
-        # Verify folder has images
-        images = list(stage1_folder.glob('*.png')) + list(stage1_folder.glob('*.jpg'))
+        # Verify folder has images (case-insensitive)
+        images = []
+        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
+            images.extend(stage1_folder.glob(ext))
         if not images:
             QMessageBox.warning(self, "No Images Found", f"No images in: {stage1_folder}")
             return
@@ -950,8 +956,10 @@ class MainWindow(QMainWindow):
         else:
             self.log_message(f"[OK] Auto-discovered Stage 2 output: {stage2_folder}")
         
-        # Verify folder has images
-        images = list(stage2_folder.glob('*.png')) + list(stage2_folder.glob('*.jpg'))
+        # Verify folder has images (case-insensitive)
+        images = []
+        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
+            images.extend(stage2_folder.glob(ext))
         if not images:
             QMessageBox.warning(self, "No Images Found", f"No images in: {stage2_folder}")
             return
@@ -1257,17 +1265,46 @@ class MainWindow(QMainWindow):
                 color: #a0a0a0;
             }
             QPushButton#startButton {
-                background-color: #32cd32;
-                border: none;
+                background-color: #28a745;
+                border: 2px solid #1e7e34;
                 font-weight: bold;
+                font-size: 14px;
+                color: white;
             }
-            QPushButton#stopButton {
-                background-color: #dc143c;
-                border: none;
+            QPushButton#startButton:hover {
+                background-color: #34ce57;
+                border: 2px solid #28a745;
+            }
+            QPushButton#startButton:pressed {
+                background-color: #1e7e34;
             }
             QPushButton#pauseButton {
-                background-color: #ff8c00;
-                border: none;
+                background-color: #ffc107;
+                border: 2px solid #e0a800;
+                font-weight: bold;
+                font-size: 13px;
+                color: #212529;
+            }
+            QPushButton#pauseButton:hover {
+                background-color: #ffca2c;
+                border: 2px solid #ffc107;
+            }
+            QPushButton#pauseButton:pressed {
+                background-color: #e0a800;
+            }
+            QPushButton#stopButton {
+                background-color: #dc3545;
+                border: 2px solid #bd2130;
+                font-weight: bold;
+                font-size: 13px;
+                color: white;
+            }
+            QPushButton#stopButton:hover {
+                background-color: #e4606d;
+                border: 2px solid #dc3545;
+            }
+            QPushButton#stopButton:pressed {
+                background-color: #bd2130;
             }
             QWidget#controlPanel {
                 background-color: #3c3c3c;

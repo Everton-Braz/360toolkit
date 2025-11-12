@@ -378,34 +378,77 @@ class SDKExtractor:
             estimated_time = max(600, min(7200, estimated_time))  # Min 10min, Max 2 hours
             logger.info(f"[INFO] Timeout set to {estimated_time:.0f}s for {frame_count} frames (~{estimated_time/frame_count:.2f}s/frame with safety margin)")
             
-            # Monitor progress in real-time while SDK is running
+            # Monitor progress in real-time with smart completion detection
             import time
             import threading
             
             extracted_frames = []
             last_count = 0
+            completion_detected = False
+            no_change_duration = 0
             
             def monitor_progress():
-                """Monitor extraction progress by counting output files"""
-                nonlocal extracted_frames, last_count
+                """Monitor extraction progress by counting output files and detect completion"""
+                nonlocal extracted_frames, last_count, completion_detected, no_change_duration
+                consecutive_no_change = 0
+                
                 while self._current_process and self._current_process.poll() is None:
                     try:
                         current_files = list(output_dir.glob('*.*'))
-                        if len(current_files) > last_count:
-                            last_count = len(current_files)
+                        current_count = len(current_files)
+                        
+                        if current_count > last_count:
+                            # Progress detected
+                            last_count = current_count
+                            consecutive_no_change = 0
+                            no_change_duration = 0
                             progress_percent = int((last_count / frame_count * 100)) if frame_count > 0 else 0
                             if progress_callback:
                                 progress_callback(progress_percent)
                             logger.debug(f"Progress: {last_count}/{frame_count} frames ({progress_percent}%)")
+                        else:
+                            # No new files - check for completion
+                            consecutive_no_change += 1
+                            no_change_duration += 2  # 2 seconds per check
+                            
+                            # If we have all expected frames and no changes for 10+ seconds → completed
+                            if current_count >= frame_count and consecutive_no_change >= 5:
+                                logger.info(f"[DETECTION] All {current_count} frames extracted, no changes for {no_change_duration}s")
+                                completion_detected = True
+                                # Terminate the waiting process
+                                if self._current_process and self._current_process.poll() is None:
+                                    logger.info("[DETECTION] SDK appears complete - terminating wait")
+                                    try:
+                                        self._current_process.terminate()
+                                    except:
+                                        pass
+                                break
+                            
+                            # If we have substantial frames (>90%) and no changes for 30s → likely completed
+                            elif current_count > 0 and current_count >= frame_count * 0.9 and consecutive_no_change >= 15:
+                                logger.info(f"[DETECTION] {current_count}/{frame_count} frames extracted, no changes for {no_change_duration}s")
+                                completion_detected = True
+                                if self._current_process and self._current_process.poll() is None:
+                                    logger.info("[DETECTION] SDK appears complete - terminating wait")
+                                    try:
+                                        self._current_process.terminate()
+                                    except:
+                                        pass
+                                break
                     except Exception as e:
                         logger.debug(f"Error monitoring progress: {e}")
+                    
                     time.sleep(2)  # Check every 2 seconds
             
             # Start progress monitor thread
             monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
             monitor_thread.start()
             
-            # Wait for completion
+            # Wait for completion with timeout
+            stdout = ""
+            stderr = ""
+            returncode = 0
+            
             try:
                 stdout, stderr = self._current_process.communicate(timeout=estimated_time)
                 returncode = self._current_process.returncode
@@ -415,24 +458,55 @@ class SDKExtractor:
                 if progress_callback:
                     progress_callback(100)
                 
-                if returncode != 0:
+                if returncode != 0 and not completion_detected:
                     raise subprocess.CalledProcessError(returncode, cmd, stdout, stderr)
                 
                 logger.info("[OK] MediaSDK extraction completed successfully!")
                 if stdout:
                     logger.debug(f"SDK output: {stdout}")
+                    
             except subprocess.TimeoutExpired:
-                # Process is still running - let it finish but check progress
-                logger.warning(f"[WARNING] SDK timeout after {estimated_time:.0f}s - process may still be running")
-                try:
-                    stdout, stderr = self._current_process.communicate(timeout=60)  # Try once more with short timeout
-                except subprocess.TimeoutExpired:
-                    logger.warning("[WARNING] SDK still running - killing process")
-                    self._current_process.kill()
-                    stdout, stderr = self._current_process.communicate()
-                finally:
-                    returncode = self._current_process.returncode
-                    self._current_process = None
+                # Timeout - check if extraction actually completed
+                logger.warning(f"[WARNING] SDK timeout after {estimated_time:.0f}s")
+                
+                # Check current file count
+                current_files = list(output_dir.glob('*.*'))
+                current_count = len(current_files)
+                
+                if current_count >= frame_count:
+                    logger.info(f"[OK] All {current_count} frames extracted - SDK completed despite timeout")
+                    completion_detected = True
+                    # Kill the waiting process
+                    try:
+                        self._current_process.terminate()
+                        self._current_process.wait(timeout=5)
+                    except:
+                        self._current_process.kill()
+                        self._current_process.wait()
+                    finally:
+                        self._current_process = None
+                elif current_count >= frame_count * 0.9:
+                    logger.warning(f"[WARNING] {current_count}/{frame_count} frames extracted - accepting partial result")
+                    completion_detected = True
+                    try:
+                        self._current_process.terminate()
+                        self._current_process.wait(timeout=5)
+                    except:
+                        self._current_process.kill()
+                        self._current_process.wait()
+                    finally:
+                        self._current_process = None
+                else:
+                    logger.error(f"[ERROR] Only {current_count}/{frame_count} frames extracted before timeout")
+                    try:
+                        self._current_process.kill()
+                        self._current_process.wait()
+                    except:
+                        pass
+                    finally:
+                        self._current_process = None
+                    raise RuntimeError(f"SDK timeout with insufficient frames: {current_count}/{frame_count}")
+                
                 logger.debug(f"SDK output: {stdout}")
             
             # Collect extracted frame paths
@@ -626,21 +700,31 @@ class SDKExtractor:
         ext = f".{output_format.lower()}"
         extracted = []
         missing = []
-        
+
+        # First try exact index-based filenames (0.jpg, 12.jpg, ...)
         for idx in frame_indices:
             frame_path = output_dir / f"{idx}{ext}"
             if frame_path.exists():
                 extracted.append(str(frame_path))
             else:
                 missing.append(idx)
-        
+
+        # If no files were collected by index, try a more permissive discovery
+        if len(extracted) == 0:
+            logger.debug("No index-named frames found - trying permissive image discovery")
+            image_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+            permissive = sorted([str(p) for p in output_dir.iterdir() if p.is_file() and p.suffix.lower() in image_exts])
+            if permissive:
+                logger.info(f"Found {len(permissive)} image files via permissive discovery")
+                return permissive
+
         # Log summary instead of per-frame warnings
         if missing:
             if len(missing) <= 10:
                 logger.debug(f"Missing frames: {missing}")
             else:
                 logger.debug(f"Missing {len(missing)} frames (first 10: {missing[:10]}...)")
-        
+
         return extracted
 
 

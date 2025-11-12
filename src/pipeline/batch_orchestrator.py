@@ -12,6 +12,8 @@ from typing import Dict, Optional, List, Callable
 import cv2
 import json
 from datetime import datetime
+from PIL import Image
+import numpy as np
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -70,17 +72,19 @@ class PipelineWorker(QThread):
             return None
         
         elif stage == 2:
-            # Look for stage1_frames folder
+            # Look for stage1_frames folder (match common image extensions, case-insensitive)
             stage1_folder = output_path / 'stage1_frames'
-            if stage1_folder.exists() and list(stage1_folder.glob('*.png')) or list(stage1_folder.glob('*.jpg')):
+            image_patterns = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
+            if stage1_folder.exists() and any(stage1_folder.glob(p) for p in image_patterns):
                 logger.info(f"[OK] Auto-discovered Stage 1 output: {stage1_folder}")
                 return stage1_folder
             return None
         
         elif stage == 3:
-            # Look for stage2_perspectives folder
+            # Look for stage2_perspectives folder (match common image extensions)
             stage2_folder = output_path / 'stage2_perspectives'
-            if stage2_folder.exists() and list(stage2_folder.glob('*.png')) or list(stage2_folder.glob('*.jpg')):
+            image_patterns = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
+            if stage2_folder.exists() and any(stage2_folder.glob(p) for p in image_patterns):
                 logger.info(f"[OK] Auto-discovered Stage 2 output: {stage2_folder}")
                 return stage2_folder
             return None
@@ -123,6 +127,9 @@ class PipelineWorker(QThread):
                 'start_time': datetime.now().isoformat()
             }
             
+            # Track which stages were executed
+            stages_executed = []
+            
             # Stage 1: Extract Frames
             if self.config.get('enable_stage1', True):
                 if self.is_cancelled:
@@ -133,11 +140,13 @@ class PipelineWorker(QThread):
                 logger.info("=== Starting Stage 1: Frame Extraction ===")
                 stage1_result = self._execute_stage1()
                 results['stage1'] = stage1_result
+                stages_executed.append(1)
                 self.stage_complete.emit(1, stage1_result)
                 
                 if not stage1_result.get('success'):
                     self.error.emit(f"Stage 1 failed: {stage1_result.get('error')}")
                     results['success'] = False
+                    results['stages_executed'] = stages_executed
                     self.finished.emit(results)
                     return
             
@@ -145,17 +154,20 @@ class PipelineWorker(QThread):
             if self.config.get('enable_stage2', True):
                 if self.is_cancelled:
                     logger.info("Pipeline cancelled before Stage 2")
+                    results['stages_executed'] = stages_executed
                     self.finished.emit({'success': False, 'error': 'Cancelled by user'})
                     return
                 
                 logger.info("=== Starting Stage 2: Perspective Splitting ===")
                 stage2_result = self._execute_stage2()
                 results['stage2'] = stage2_result
+                stages_executed.append(2)
                 self.stage_complete.emit(2, stage2_result)
                 
                 if not stage2_result.get('success'):
                     self.error.emit(f"Stage 2 failed: {stage2_result.get('error')}")
                     results['success'] = False
+                    results['stages_executed'] = stages_executed
                     self.finished.emit(results)
                     return
             
@@ -163,24 +175,30 @@ class PipelineWorker(QThread):
             if self.config.get('enable_stage3', True):
                 if self.is_cancelled:
                     logger.info("Pipeline cancelled before Stage 3")
+                    results['stages_executed'] = stages_executed
                     self.finished.emit({'success': False, 'error': 'Cancelled by user'})
                     return
                 
                 logger.info("=== Starting Stage 3: Mask Generation ===")
                 stage3_result = self._execute_stage3()
                 results['stage3'] = stage3_result
+                stages_executed.append(3)
                 self.stage_complete.emit(3, stage3_result)
                 
                 if not stage3_result.get('success'):
                     self.error.emit(f"Stage 3 failed: {stage3_result.get('error')}")
                     results['success'] = False
+                    results['stages_executed'] = stages_executed
                     self.finished.emit(results)
                     return
             
-            # Success
+            # Success - ALL stages completed
             results['success'] = True
+            results['stages_executed'] = stages_executed
             results['end_time'] = datetime.now().isoformat()
-            logger.info("=== Pipeline Complete ===")
+            
+            # Log completion ONLY after all stages finish
+            logger.info(f"=== Pipeline Complete === (Executed stages: {stages_executed})")
             self.finished.emit(results)
         
         except Exception as e:
@@ -320,19 +338,26 @@ class PipelineWorker(QThread):
     def _execute_stage2(self) -> Dict:
         """Execute Stage 2: Perspective Splitting"""
         try:
-            # Get input frames
+            # Get input frames (auto-discovery runs ONLY ONCE)
             if self.config.get('enable_stage1', True):
+                # Stage 1 was enabled - use its output directly
                 input_dir = Path(self.config['output_dir']) / 'stage1_frames'
             else:
-                # Stage 1 disabled - need to provide input directory
+                # Stage 1 disabled - check for explicit input or auto-discover ONCE
                 stage2_input = self.config.get('stage2_input_dir')
                 if not stage2_input:
-                    return {
-                        'success': False,
-                        'error': 'Stage 2 input directory not specified (Stage 1 is disabled)',
-                        'output_files': []
-                    }
-                input_dir = Path(stage2_input)
+                    # Single auto-discovery attempt
+                    discovered = self.discover_stage_input_folder(2, self.config['output_dir'])
+                    if discovered:
+                        input_dir = discovered
+                    else:
+                        return {
+                            'success': False,
+                            'error': 'Stage 2 input directory not specified and auto-discovery failed (Stage 1 is disabled)',
+                            'output_files': []
+                        }
+                else:
+                    input_dir = Path(stage2_input)
             
             if not input_dir.exists():
                 return {
@@ -349,8 +374,9 @@ class PipelineWorker(QThread):
             output_width = self.config.get('output_width', DEFAULT_OUTPUT_WIDTH)
             output_height = self.config.get('output_height', DEFAULT_OUTPUT_HEIGHT)
             
-            # Get all input frames
-            input_frames = sorted(input_dir.glob('*.png')) + sorted(input_dir.glob('*.jpg'))
+            # Get all input frames (support many extensions, case-insensitive)
+            image_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+            input_frames = sorted([p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in image_exts])
             total_frames = len(input_frames)
             
             # Route based on transform type
@@ -378,6 +404,11 @@ class PipelineWorker(QThread):
             
             
             for frame_idx, frame_path in enumerate(input_frames):
+                # Check for cancellation between frames
+                if self.is_cancelled:
+                    logger.info(f"Pipeline cancelled during perspective generation")
+                    return {'success': False, 'error': 'Cancelled by user'}
+                
                 # Load equirectangular image
                 equirect_img = cv2.imread(str(frame_path))
                 
@@ -415,23 +446,60 @@ class PipelineWorker(QThread):
                     output_filename = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{extension}"
                     output_path = output_dir / output_filename
                     
-                    # Handle JPEG encoding with quality
-                    if extension in ['jpg', 'jpeg']:
-                        cv2.imwrite(str(output_path), perspective_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    # Save image - use PIL for PNG (prevents corruption), cv2 for JPEG
+                    success = False
+                    if extension == 'png':
+                        # Use PIL for PNG to prevent chunk corruption
+                        try:
+                            # Convert BGR to RGB
+                            perspective_rgb = cv2.cvtColor(perspective_img, cv2.COLOR_BGR2RGB)
+                            pil_img = Image.fromarray(perspective_rgb)
+                            pil_img.save(str(output_path), 'PNG', compress_level=6)
+                            success = True
+                        except Exception as e:
+                            logger.warning(f"PIL PNG save failed for {output_filename}: {e}, falling back to cv2")
+                            success = cv2.imwrite(str(output_path), perspective_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+                    elif extension in ['jpg', 'jpeg']:
+                        # JPEG: Use quality parameter
+                        success = cv2.imwrite(str(output_path), perspective_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                     else:
-                        cv2.imwrite(str(output_path), perspective_img)
+                        success = cv2.imwrite(str(output_path), perspective_img)
                     
-                    # Embed camera orientation in EXIF
-                    self.metadata_handler.embed_camera_orientation(
-                        str(output_path),
-                        yaw=yaw,
-                        pitch=pitch,
-                        roll=roll,
-                        h_fov=fov
-                    )
+                    if not success:
+                        logger.warning(f"Failed to save {output_filename}")
+                        continue
+                    
+                    # Verify file was written correctly before embedding metadata
+                    if not output_path.exists() or output_path.stat().st_size == 0:
+                        logger.warning(f"Saved file is empty or missing: {output_filename}")
+                        continue
+                    
+                    # Embed camera orientation in EXIF (skip if embedding fails)
+                    try:
+                        self.metadata_handler.embed_camera_orientation(
+                            str(output_path),
+                            yaw=yaw,
+                            pitch=pitch,
+                            roll=roll,
+                            h_fov=fov
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to embed metadata in {output_filename}: {e}")
+                        # Continue anyway - file is saved, just without metadata
                     
                     output_files.append(str(output_path))
                     operation_count += 1
+                    
+                    # Check for cancellation between cameras
+                    if self.is_cancelled:
+                        logger.info(f"Pipeline cancelled during perspective generation")
+                        return
+                    
+                    # Check for pause
+                    while self.is_paused:
+                        if self.is_cancelled:
+                            return
+                        self.msleep(100)
                     
                     # Progress update
                     if operation_count % 10 == 0:
@@ -527,28 +595,56 @@ class PipelineWorker(QThread):
                             output_height=face_size
                         )
                         
-                        # Save face with configured format
+                        # Save face with configured format - use PIL for PNG, cv2 for JPEG
                         image_format = self.config.get('stage2_format', 'png')
                         extension = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
                         output_filename = f"frame_{frame_idx:05d}_{face_config['name']}.{extension}"
                         output_path = output_dir / output_filename
                         
-                        # Handle JPEG encoding with quality
-                        if extension in ['jpg', 'jpeg']:
-                            cv2.imwrite(str(output_path), face_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        # Save image - use PIL for PNG (prevents corruption), cv2 for JPEG
+                        success = False
+                        if extension == 'png':
+                            try:
+                                face_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
+                                pil_img = Image.fromarray(face_rgb)
+                                pil_img.save(str(output_path), 'PNG', compress_level=6)
+                                success = True
+                            except Exception as e:
+                                logger.warning(f"PIL PNG save failed for {output_filename}: {e}, falling back to cv2")
+                                success = cv2.imwrite(str(output_path), face_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+                        elif extension in ['jpg', 'jpeg']:
+                            success = cv2.imwrite(str(output_path), face_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                         else:
-                            cv2.imwrite(str(output_path), face_img)
+                            success = cv2.imwrite(str(output_path), face_img)
                         
-                        # Embed camera orientation in EXIF
-                        self.metadata_handler.embed_camera_orientation(
-                            str(output_path),
-                            yaw=face_config['yaw'],
-                            pitch=face_config['pitch'],
-                            roll=0,
-                            h_fov=90
-                        )
+                        if not success:
+                            logger.warning(f"Failed to save {output_filename}")
+                            continue
+                        
+                        # Embed camera orientation in EXIF (skip if fails)
+                        try:
+                            self.metadata_handler.embed_camera_orientation(
+                                str(output_path),
+                                yaw=face_config['yaw'],
+                                pitch=face_config['pitch'],
+                                roll=0,
+                                h_fov=90
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to embed metadata in {output_filename}: {e}")
                         
                         output_files.append(str(output_path))
+                        
+                        # Check for cancellation between faces
+                        if self.is_cancelled:
+                            logger.info(f"Pipeline cancelled during cubemap generation")
+                            return {'success': False, 'error': 'Cancelled by user'}
+                        
+                        # Check for pause
+                        while self.is_paused:
+                            if self.is_cancelled:
+                                return {'success': False, 'error': 'Cancelled by user'}
+                            self.msleep(100)
                 
                 else:  # 8-tile grid
                     # Generate 8 tiles with custom FOV/overlap
@@ -563,28 +659,56 @@ class PipelineWorker(QThread):
                             output_height=face_size
                         )
                         
-                        # Save tile with configured format
+                        # Save tile with configured format - use PIL for PNG, cv2 for JPEG
                         image_format = self.config.get('stage2_format', 'png')
                         extension = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
                         output_filename = f"frame_{frame_idx:05d}_{tile['name']}.{extension}"
                         output_path = output_dir / output_filename
                         
-                        # Handle JPEG encoding with quality
-                        if extension in ['jpg', 'jpeg']:
-                            cv2.imwrite(str(output_path), tile_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        # Save image - use PIL for PNG (prevents corruption), cv2 for JPEG
+                        success = False
+                        if extension == 'png':
+                            try:
+                                tile_rgb = cv2.cvtColor(tile_img, cv2.COLOR_BGR2RGB)
+                                pil_img = Image.fromarray(tile_rgb)
+                                pil_img.save(str(output_path), 'PNG', compress_level=6)
+                                success = True
+                            except Exception as e:
+                                logger.warning(f"PIL PNG save failed for {output_filename}: {e}, falling back to cv2")
+                                success = cv2.imwrite(str(output_path), tile_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+                        elif extension in ['jpg', 'jpeg']:
+                            success = cv2.imwrite(str(output_path), tile_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                         else:
-                            cv2.imwrite(str(output_path), tile_img)
+                            success = cv2.imwrite(str(output_path), tile_img)
                         
-                        # Embed camera orientation
-                        self.metadata_handler.embed_camera_orientation(
-                            str(output_path),
-                            yaw=tile['yaw'],
-                            pitch=tile['pitch'],
-                            roll=0,
-                            h_fov=tile['fov']
-                        )
+                        if not success:
+                            logger.warning(f"Failed to save {output_filename}")
+                            continue
+                        
+                        # Embed camera orientation (skip if fails)
+                        try:
+                            self.metadata_handler.embed_camera_orientation(
+                                str(output_path),
+                                yaw=tile['yaw'],
+                                pitch=tile['pitch'],
+                                roll=0,
+                                h_fov=tile['fov']
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to embed metadata in {output_filename}: {e}")
                         
                         output_files.append(str(output_path))
+                        
+                        # Check for cancellation between tiles
+                        if self.is_cancelled:
+                            logger.info(f"Pipeline cancelled during 8-tile generation")
+                            return {'success': False, 'error': 'Cancelled by user'}
+                        
+                        # Check for pause
+                        while self.is_paused:
+                            if self.is_cancelled:
+                                return {'success': False, 'error': 'Cancelled by user'}
+                            self.msleep(100)
                 
                 # Progress update
                 self.progress.emit(
@@ -634,11 +758,28 @@ class PipelineWorker(QThread):
                     animals=categories.get('animals', True)
                 )
             
-            # Get input images
+            # Get input images (auto-discovery runs ONLY ONCE)
             if self.config.get('enable_stage2', True):
+                # Stage 2 was enabled - use its output directly
                 input_dir = Path(self.config['output_dir']) / 'stage2_perspectives'
             else:
-                input_dir = Path(self.config.get('stage3_input_dir'))
+                # Stage 2 disabled - check for explicit input or auto-discover ONCE
+                stage3_input = self.config.get('stage3_input_dir')
+                if not stage3_input:
+                    # Single auto-discovery attempt
+                    discovered = self.discover_stage_input_folder(3, self.config['output_dir'])
+                    if discovered:
+                        input_dir = discovered
+                    else:
+                        return {
+                            'success': False,
+                            'error': 'Stage 3 input directory not specified and auto-discovery failed',
+                            'masks_created': 0,
+                            'skipped': 0,
+                            'failed': 0
+                        }
+                else:
+                    input_dir = Path(stage3_input)
             
             output_dir = Path(self.config['output_dir']) / 'stage3_masks'
             save_visualization = self.config.get('save_visualization', False)
