@@ -168,7 +168,7 @@ class MetadataHandler:
                 'pitch': pitch,
                 'roll': roll,
                 'h_fov': h_fov,
-                'generated_by': '360FrameTools',
+                'generated_by': '360toolkit',
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -179,7 +179,7 @@ class MetadataHandler:
             exif_dict['0th'][piexif.ImageIFD.ImageDescription] = f"Yaw:{yaw:.1f} Pitch:{pitch:.1f} Roll:{roll:.1f} FOV:{h_fov:.1f}".encode('utf-8')
             
             # Update software tag
-            exif_dict['0th'][piexif.ImageIFD.Software] = b'360FrameTools v1.0'
+            exif_dict['0th'][piexif.ImageIFD.Software] = b'360toolkit v1.0'
             
             # Convert to bytes
             exif_bytes = piexif.dump(exif_dict)

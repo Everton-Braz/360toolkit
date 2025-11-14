@@ -1,5 +1,5 @@
 """
-360FrameTools - Main Application Entry Point
+360toolkit - Main Application Entry Point
 Unified photogrammetry preprocessing pipeline.
 """
 
@@ -12,7 +12,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('360frametools.log'),
+        logging.FileHandler('360toolkit.log'),
         logging.StreamHandler()
     ]
 )
@@ -23,7 +23,7 @@ def main():
     """Main application entry point"""
     
     logger.info("=" * 60)
-    logger.info("Starting 360FrameTools v1.0.0")
+    logger.info("Starting 360toolkit v1.0.0")
     logger.info("=" * 60)
     
     try:
@@ -32,8 +32,8 @@ def main():
         
         # Create Qt application
         app = QApplication(sys.argv)
-        app.setApplicationName("360FrameTools")
-        app.setOrganizationName("360FrameTools Development Team")
+        app.setApplicationName("360toolkit")
+        app.setOrganizationName("360toolkit Development Team")
         
         # Create and show main window
         window = MainWindow()

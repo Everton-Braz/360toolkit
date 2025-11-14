@@ -1,21 +1,20 @@
-# 360FrameTools - Unified Photogrammetry Preprocessing Pipeline# 360FrameTools
+# 360toolkit
+
+**Unified photogrammetry preprocessing pipeline**: Extract frames from Insta360 cameras → Split to perspective views → Generate AI masks
+
+**360toolkit** is a fully portable desktop application that combines frame extraction from Insta360 cameras with advanced perspective splitting and AI masking for professional photogrammetry workflows.
 
 
 
-**360FrameTools** is a fully portable desktop application that combines frame extraction from Insta360 cameras with advanced perspective splitting and AI masking for professional photogrammetry workflows.**Unified photogrammetry preprocessing pipeline**: Extract frames from Insta360 cameras → Split to perspective views → Generate AI masks
+## 🎯 Three-Stage Pipeline
 
-
-
-## 🎯 Three-Stage Pipeline## Overview
-
-
-
-```360FrameTools combines two specialized applications into one streamlined workflow:
+```
+360toolkit combines two specialized applications into one streamlined workflow:
 
 EXTRACT FRAMES (Insta360 SDK) → SPLIT PERSPECTIVES (Equirectangular to Pinhole) → AI MASKING (YOLOv8)
+```
 
-```1. **Insta360toFrames**: Extract frames from dual-fisheye `.INSV` files using official SDK
-
+1. **Insta360toFrames**: Extract frames from dual-fisheye `.INSV` files using official SDK
 2. **360toFrame**: Convert equirectangular images to perspective views with compass-based positioning
 
 ### **Stage 1: Frame Extraction** 🎬
@@ -116,9 +115,9 @@ EXTRACT FRAMES (Insta360 SDK) → SPLIT PERSPECTIVES (Equirectangular to Pinhole
 
    ```powershell
 
-### Option 1: Portable Executable (Recommended)   pip install -r requirements.txt
+### Option 1: Portable Executable (Recommended)
 
-**No installation required!** Download `360FrameTools-FULL-v1.0.zip` and extract. Works on any Windows 10/11 machine with NVIDIA GPU.   ```
+**No installation required!** Download `360toolkit-FULL-v1.0.zip` and extract. Works on any Windows 10/11 machine with NVIDIA GPU.
 
 
 
@@ -194,21 +193,24 @@ python src/main.py
 
 
 
-## 🚀 Quick Start## Project Structure
+## 🚀 Quick Start
 
+### Using the Portable Application
 
+1. Launch `360ToolkitGS-FULL.exe`
+2. **Stage 1**: Select `.INSV`/`.mp4` file, configure extraction settings, click "Extract"
+3. **Stage 2**: Adjust compass settings, preview splits, click "Split"
+4. **Stage 3**: Enable masking categories, click "Generate Masks"
+5. Output saved to configured output folder
 
-### Using the Portable Application```
+## Project Structure
 
-1. Launch `360ToolkitGS-FULL.exe`360FrameTools/
-
-2. **Stage 1**: Select `.INSV`/`.mp4` file, configure extraction settings, click "Extract"├── src/
-
-3. **Stage 2**: Adjust compass settings, preview splits, click "Split"│   ├── extraction/      # Stage 1: Frame extraction
-
-4. **Stage 3**: Enable masking categories, click "Generate Masks"│   ├── transforms/      # Stage 2: E2P, E2C engines
-
-5. Output saved to configured output folder│   ├── masking/         # Stage 3: Multi-category detection
+```
+360toolkit/
+├── src/
+│   ├── extraction/      # Stage 1: Frame extraction
+│   ├── transforms/      # Stage 2: E2P, E2C engines
+│   ├── masking/         # Stage 3: Multi-category detection
 
 │   ├── ui/             # PyQt6 interface
 
@@ -307,24 +309,26 @@ worker.start()### Masking Categories
 │   │   └── camera_presets.json```
 
 │   └── main.py              # Application entry point
-
-├── specs/                    # Specification documents### Batch Processing via CLI
-
-├── tests/                    # Unit and integration tests```python
-
-├── runtime_hook_pytorch.py   # PyInstaller runtime hook (DLL pre-loading)from src.pipeline import BatchOrchestrator
-
+├── specs/                    # Specification documents
+├── tests/                    # Unit and integration tests
+├── runtime_hook_pytorch.py   # PyInstaller runtime hook (DLL pre-loading)
 ├── runtime_hook_sdk.py       # SDK environment setup
+├── 360toolkit_FULL.spec      # PyInstaller spec (build config)
+├── requirements.txt
+├── README.md
+└── .gitignore
+```
 
-├── 360FrameTools_MINIMAL.spec # PyInstaller spec (build config)orchestrator = BatchOrchestrator()
+### Batch Processing via CLI
 
-├── requirements.txtorchestrator.run_full_pipeline(
+```python
+from src.pipeline import BatchOrchestrator
 
-├── README.md    input_file='path/to/video.insv',
-
-└── .gitignore    output_dir='path/to/output',
-
-```    fps=1.0,
+orchestrator = BatchOrchestrator()
+orchestrator.run_full_pipeline(
+    input_file='path/to/video.insv',
+    output_dir='path/to/output',
+    fps=1.0,
 
     camera_preset='8-Camera Horizontal',
 
@@ -378,21 +382,26 @@ DEFAULT_USE_GPU = True         # GPU acceleration- **GPU**: Small model = 0.5s/i
 
 ### Prerequisites
 
-- Python 3.10.11## Troubleshooting
-
+- Python 3.10.11
 - PyTorch 2.7.1+cu118 with CUDA 11.8
+- PyInstaller 6.16.0
+- Insta360 MediaSDK 3.0.5
 
-- PyInstaller 6.16.0### GPU Not Detected
-
-- Insta360 MediaSDK 3.0.5```powershell
-
-# Check CUDA availability
-
-### Build Commandpython -c "import torch; print(torch.cuda.is_available())"
+### Build Command
 
 ```powershell
+pyinstaller 360toolkit_FULL.spec --clean
+```
 
-pyinstaller 360FrameTools_MINIMAL.spec --clean# Reinstall PyTorch with CUDA
+## Troubleshooting
+
+### GPU Not Detected
+
+```powershell
+# Check CUDA availability
+python -c "import torch; print(torch.cuda.is_available())"
+
+# Reinstall PyTorch with CUDA
 
 ```pip uninstall torch torchvision
 
@@ -560,19 +569,23 @@ Solution: Reduce batch size in config or use smaller YOLOv8 model (nano/small)- 
 
 ### SDK Not Found
 
-```---
-
+```
 Error: Insta360 MediaSDK not detected
 
-Solution: Included in portable build; if building from source, ensure SDK at:## Support
-
+Solution: Included in portable build; if building from source, ensure SDK at:
 C:\Users\[User]\Windows_CameraSDK-2.0.2-build1+MediaSDK-3.0.5-build1\
+```
 
-```**Documentation**: See `specs/` folder
+---
 
+## 🧪 Testing
+
+**Contact**: 360toolkit Development Team
+
+## Support
+
+**Documentation**: See `specs/` folder
 **Issues**: Check logs in application
-
-## 🧪 Testing**Contact**: 360FrameTools Development Team
 
 
 

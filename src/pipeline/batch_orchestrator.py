@@ -7,6 +7,7 @@ Uses QThread for non-blocking UI execution with progress signals.
 
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import Dict, Optional, List, Callable
 import cv2
@@ -455,6 +456,10 @@ class PipelineWorker(QThread):
                             perspective_rgb = cv2.cvtColor(perspective_img, cv2.COLOR_BGR2RGB)
                             pil_img = Image.fromarray(perspective_rgb)
                             pil_img.save(str(output_path), 'PNG', compress_level=6)
+                            # Explicitly close file handle to prevent WinError 32 on metadata embedding
+                            pil_img.close()
+                            del pil_img
+                            time.sleep(0.01)  # 10ms delay for Windows file lock release
                             success = True
                         except Exception as e:
                             logger.warning(f"PIL PNG save failed for {output_filename}: {e}, falling back to cv2")
@@ -608,6 +613,10 @@ class PipelineWorker(QThread):
                                 face_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
                                 pil_img = Image.fromarray(face_rgb)
                                 pil_img.save(str(output_path), 'PNG', compress_level=6)
+                                # Explicitly close file handle to prevent WinError 32 on metadata embedding
+                                pil_img.close()
+                                del pil_img
+                                time.sleep(0.01)  # 10ms delay for Windows file lock release
                                 success = True
                             except Exception as e:
                                 logger.warning(f"PIL PNG save failed for {output_filename}: {e}, falling back to cv2")
@@ -672,6 +681,10 @@ class PipelineWorker(QThread):
                                 tile_rgb = cv2.cvtColor(tile_img, cv2.COLOR_BGR2RGB)
                                 pil_img = Image.fromarray(tile_rgb)
                                 pil_img.save(str(output_path), 'PNG', compress_level=6)
+                                # Explicitly close file handle to prevent WinError 32 on metadata embedding
+                                pil_img.close()
+                                del pil_img
+                                time.sleep(0.01)  # 10ms delay for Windows file lock release
                                 success = True
                             except Exception as e:
                                 logger.warning(f"PIL PNG save failed for {output_filename}: {e}, falling back to cv2")

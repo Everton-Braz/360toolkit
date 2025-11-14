@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """Main application window for 360FrameTools"""
+    """Main application window for 360toolkit"""
     
     def __init__(self):
         super().__init__()
@@ -855,6 +855,9 @@ class MainWindow(QMainWindow):
         """Run only Stage 1 (Extraction)"""
         self.log_message("Running Stage 1 only: Frame Extraction")
         
+        # Set flag to enable auto-advance after stage completes
+        self._auto_advance_enabled = True
+        
         # Temporarily disable other stages
         stage2_state = self.stage2_enable.isChecked()
         stage3_state = self.stage3_enable.isChecked()
@@ -909,6 +912,9 @@ class MainWindow(QMainWindow):
             return
         
         self.log_message(f"[OK] Found {len(images)} equirectangular images")
+        
+        # Set flag to enable auto-advance after stage completes
+        self._auto_advance_enabled = True
         
         # Temporarily disable other stages and set input
         stage1_state = self.stage1_enable.isChecked()
@@ -966,6 +972,9 @@ class MainWindow(QMainWindow):
         
         self.log_message(f"[OK] Found {len(images)} perspective images")
         
+        # Set flag to enable auto-advance (though Stage 3 is final, this keeps consistency)
+        self._auto_advance_enabled = True
+        
         # Temporarily disable other stages and set input
         stage1_state = self.stage1_enable.isChecked()
         stage2_state = self.stage2_enable.isChecked()
@@ -983,6 +992,11 @@ class MainWindow(QMainWindow):
     
     def start_pipeline(self):
         """Start the pipeline execution"""
+        
+        # Disable auto-advance for Full Pipeline mode (user clicked "Start Pipeline" button)
+        # Auto-advance is only enabled when running stage-only methods (run_stage_X_only)
+        if not hasattr(self, '_auto_advance_enabled') or not self._auto_advance_enabled:
+            self._auto_advance_enabled = False
         
         # Validate inputs
         input_file = self.input_file_edit.text()
@@ -1142,20 +1156,24 @@ class MainWindow(QMainWindow):
         if results.get('success'):
             self.log_message(f"✓ Stage {stage_number} complete")
             
-            # Auto-advance to next stage if enabled
-            if stage_number == 1 and self.stage2_enable.isChecked():
-                self.log_message("→ Auto-advancing to Stage 2...")
-                QTimer.singleShot(500, self.run_stage_2_only)
-            
-            elif stage_number == 2 and self.stage3_enable.isChecked():
-                self.log_message("→ Auto-advancing to Stage 3...")
-                QTimer.singleShot(500, self.run_stage_3_only)
-            
-            elif stage_number == 3:
-                self.log_message("✓ All stages complete!")
+            # Auto-advance ONLY if running in stage-only mode (not Full Pipeline)
+            # Full Pipeline runs all stages sequentially without needing auto-advance
+            if hasattr(self, '_auto_advance_enabled') and self._auto_advance_enabled:
+                if stage_number == 1 and self.stage2_enable.isChecked():
+                    self.log_message("→ Auto-advancing to Stage 2...")
+                    QTimer.singleShot(500, self.run_stage_2_only)
+                
+                elif stage_number == 2 and self.stage3_enable.isChecked():
+                    self.log_message("→ Auto-advancing to Stage 3...")
+                    QTimer.singleShot(500, self.run_stage_3_only)
+                
+                elif stage_number == 3:
+                    self.log_message("✓ All stages complete!")
+                    self._auto_advance_enabled = False  # Reset flag
         
         else:
             self.log_message(f"✗ Stage {stage_number} failed: {results.get('error')}")
+            self._auto_advance_enabled = False  # Reset flag on error
             # Stop auto-advance on error
     
     def on_finished(self, results: dict):

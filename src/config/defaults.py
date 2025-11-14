@@ -228,7 +228,7 @@ DEFAULT_THREAD_COUNT = 'auto'  # Auto-detect optimal thread count
 
 # Temp folder
 import os
-DEFAULT_TEMP_FOLDER = os.path.join(os.environ.get('TEMP', 'C:\\Temp'), '360FrameTools')
+DEFAULT_TEMP_FOLDER = os.path.join(os.environ.get('TEMP', 'C:\\Temp'), '360toolkit')
 
 # Logging
 LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR']
@@ -297,7 +297,7 @@ PROJECT_FILE_VERSION = '1.0'
 # VERSION INFO
 # ============================================================================
 
-APP_NAME = '360FrameTools'
+APP_NAME = '360toolkit'
 APP_VERSION = '1.0.0'
-APP_AUTHOR = '360FrameTools Development Team'
+APP_AUTHOR = '360toolkit Development Team'
 APP_DESCRIPTION = 'Unified photogrammetry preprocessing pipeline: Extract → Split → Mask'
