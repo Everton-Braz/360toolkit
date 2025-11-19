@@ -3,6 +3,14 @@ Multi-Category Masking Module using YOLOv8 Instance Segmentation
 Generates binary masks for multiple object categories (persons, personal objects, animals)
 suitable for RealityScan and photogrammetry workflows.
 
+OPTIMIZATION NOTES:
+- PyTorch is ONLY used for YOLOv8 inference (Stage 3)
+- torch imports are lazy-loaded to avoid PyInstaller build issues
+- CPU-only torch recommended (saves ~1.5GB in binary size)
+- torchvision REMOVED (not used - saves ~500MB)
+- OpenCV cv2.resize() used ONLY for mask resizing (fast, essential)
+- PIL/Pillow used for basic image I/O (lighter than cv2.imread)
+
 Extended from 360toFrame PersonMasker with GPU acceleration and batch processing.
 
 Mask Format (RealityScan Compatible):
@@ -10,12 +18,13 @@ Mask Format (RealityScan Compatible):
 - 255 (White) = Keep this region (background/valid points)
 """
 
-import cv2
+import cv2  # REQUIRED: cv2.resize() for mask resizing (INTER_NEAREST)
 import numpy as np
 from pathlib import Path
 import logging
 from typing import Optional, Tuple, List, Dict
 import sys
+from PIL import Image  # OPTIMIZATION: Use PIL for image I/O instead of cv2
 
 # Defer torch/ultralytics imports to avoid PyInstaller analysis issues
 # These will be imported at runtime when actually needed
@@ -228,8 +237,15 @@ class MultiCategoryMasker:
             Binary mask as numpy array (uint8, 0 or 255), or None if failed
         """
         try:
-            # Read image
-            image = cv2.imread(image_path)
+            # OPTIMIZATION: Use PIL for image loading (lighter than cv2.imread)
+            # YOLOv8 expects BGR format, so convert from RGB
+            pil_image = Image.open(image_path)
+            image = np.array(pil_image)
+            
+            # Convert RGB to BGR for YOLOv8 compatibility
+            if len(image.shape) == 3 and image.shape[2] == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            
             if image is None:
                 logger.error(f"Failed to load image: {image_path}")
                 return None
@@ -416,7 +432,14 @@ class MultiCategoryMasker:
                     continue
                 
                 # SMART MASK SKIPPING: Check if image has any target objects first
-                image = cv2.imread(str(img_path))
+                # OPTIMIZATION: Use PIL for image loading
+                pil_image = Image.open(str(img_path))
+                image = np.array(pil_image)
+                
+                # Convert RGB to BGR for YOLOv8 compatibility
+                if len(image.shape) == 3 and image.shape[2] == 3:
+                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                
                 if image is None:
                     failed += 1
                     logger.error(f"Failed to load image: {img_path.name}")
@@ -435,8 +458,9 @@ class MultiCategoryMasker:
                 mask = self.generate_mask_from_array(image)
                 
                 if mask is not None:
-                    # Save mask
-                    cv2.imwrite(str(mask_path), mask)
+                    # OPTIMIZATION: Use PIL for mask saving (lighter than cv2.imwrite)
+                    mask_image = Image.fromarray(mask, mode='L')  # 'L' mode for grayscale
+                    mask_image.save(str(mask_path), 'PNG')
                     
                     # Optionally save visualization
                     if save_visualization:

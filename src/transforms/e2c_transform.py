@@ -2,6 +2,11 @@
 Equirectangular to Cube Map (E2C) Transformation Engine
 Converts 360-degree equirectangular images to cube map faces with adjustable overlap.
 
+OPTIMIZATION NOTES:
+- OpenCV cv2.remap() is ESSENTIAL for cubemap generation
+- Used for fast perspective projection of each cube face
+- No lightweight alternative exists with comparable performance
+
 Supports TWO distinct modes:
 1. **6-Face Cubemap** (for VR/rendering):
    - Standard cubemap: Front, Back, Left, Right, Top, Bottom (90° FOV each)
@@ -19,7 +24,7 @@ Ported from 360toFrame for 360FrameTools unified application.
 """
 
 import numpy as np
-import cv2
+import cv2  # REQUIRED: cv2.remap() for cubemap face generation
 import math
 import logging
 from enum import Enum

@@ -3,11 +3,17 @@ Equirectangular to Pinhole (E2P) Transformation Engine
 Converts 360-degree equirectangular images to perspective pinhole camera views.
 Based on spherical coordinate mapping and camera projection mathematics.
 
+OPTIMIZATION NOTES:
+- OpenCV cv2.remap() is ESSENTIAL and CANNOT be replaced
+- It performs fast bilinear interpolation for geometric transforms
+- No pure Python/NumPy alternative exists with comparable performance
+- This is the CORE function for perspective projection in Stage 2
+
 Ported from 360toFrame for 360FrameTools unified application.
 """
 
 import numpy as np
-import cv2
+import cv2  # REQUIRED: cv2.remap() for fast geometric transformation
 import math
 import logging
 

@@ -1,12 +1,20 @@
 """
 Frame Extraction Module for 360FrameTools
-Simplified extractor supporting FFmpeg and OpenCV methods.
-SDK integration can be added later.
+Supports FFmpeg (primary) and OpenCV (fallback) methods.
+
+OPTIMIZATION NOTES:
+- FFmpeg is PRIMARY method (subprocess-based, no memory overhead)
+- OpenCV is FALLBACK when FFmpeg unavailable
+- OpenCV (cv2) is REQUIRED for:
+  1. VideoCapture: Getting video metadata (duration, fps, resolution, codec)
+  2. Frame extraction fallback when FFmpeg not available
+  3. Dual-lens frame splitting
+- Cannot remove OpenCV entirely due to metadata extraction needs
 
 Based on Insta360toFrames but adapted for unified pipeline.
 """
 
-import cv2
+import cv2  # REQUIRED: VideoCapture for metadata, fallback extraction
 import subprocess
 import logging
 from pathlib import Path
