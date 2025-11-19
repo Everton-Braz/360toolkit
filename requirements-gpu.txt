@@ -1,0 +1,61 @@
+# 360FrameTools - Requirements (GPU VERSION)
+# Complete photogrammetry preprocessing pipeline with GPU-accelerated masking
+# 
+# USE THIS FILE FOR GPU-ACCELERATED BUILDS
+# - PyTorch with CUDA support (~2.0 GB)
+# - Faster masking: ~5 minutes for 1000 images (vs 10 minutes on CPU)
+# - Requires NVIDIA GPU with CUDA support
+#
+# For CPU-only build (smaller, ~780 MB), use requirements.txt instead
+
+# Core dependencies
+numpy>=1.24.0
+opencv-python>=4.8.0  # Required for cv2.remap (transforms) and VideoCapture (metadata)
+Pillow>=10.0.0  # Lighter image I/O alternative
+
+# PyQt6 for GUI
+PyQt6>=6.5.0
+PyQt6-Qt6>=6.5.0
+
+# AI/ML for masking (Stage 3 only)
+ultralytics>=8.0.200  # YOLOv8 instance segmentation
+
+# PyTorch - GPU VERSION with CUDA support
+# Install with CUDA 11.8 support (change version as needed for your GPU):
+torch>=2.0.0
+torchvision>=0.15.0
+
+# NOTE: Install PyTorch GPU version with:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+# For other CUDA versions:
+# CUDA 11.8: https://download.pytorch.org/whl/cu118
+# CUDA 12.1: https://download.pytorch.org/whl/cu121
+# Check your CUDA version: nvidia-smi
+
+# Metadata handling
+piexif>=1.1.3
+
+# Required external tools (not Python packages):
+# - FFmpeg: Required for Stage 1 (frame extraction). Install separately.
+#   Windows: Download from ffmpeg.org
+#   Linux: apt install ffmpeg
+#   macOS: brew install ffmpeg
+# - Insta360 SDK: Windows only, required for .insv stitching (Stage 1)
+#   Copy from Original_Projects folder
+# - NVIDIA GPU Driver: Required for CUDA support
+#   Download from nvidia.com
+# - CUDA Toolkit: Required for GPU acceleration
+#   Download from developer.nvidia.com/cuda-downloads
+
+# Development dependencies (optional)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Size Comparison:
+# CPU version (requirements.txt):     ~780 MB binary
+# GPU version (requirements-gpu.txt): ~2.3 GB binary
+#
+# Performance Comparison (1000 images):
+# CPU version: ~10 minutes for masking
+# GPU version: ~5 minutes for masking (2× faster)
