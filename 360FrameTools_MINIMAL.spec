@@ -1,6 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# 360FrameTools - MINIMAL SPEC (PyTorch GPU Bundled)
+# 360FrameTools - MINIMAL SPEC (Optimized for Size)
+# 
+# OPTIMIZATIONS:
+# - CPU-only PyTorch recommended (saves ~1.5GB vs GPU version)
+# - Excluded unused torch modules (saves ~500MB)
+# - Removed torchvision (not used, saves ~500MB)
+# - Total potential savings: ~2.5GB
+#
+# For CPU-only build (RECOMMENDED):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# For GPU build (larger binary):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu118
+#
 # Community solutions for PyTorch bundling:
 # - GitHub pytorch/pytorch#56362
 # - GitHub pyinstaller/pyinstaller#8348
@@ -118,28 +131,46 @@ for dll_name in msvc_dll_names:
 
 print(f"[OK] Bundled {msvc_dlls_found} MSVC Runtime DLLs (CRITICAL for PyTorch)")
 
-# CRITICAL FIX #2: Bundle CUDA DLLs from system (required for GPU support)
-cuda_paths = [
-    Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin"),
-    Path(r"C:\Users\User\miniconda3\Library\bin"),
-]
-
-cuda_dll_names = [
-    'cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll',
-    'cufft64_*.dll', 'curand64_*.dll', 'cusparse64_*.dll',
-    'cusolver64_*.dll', 'cudnn64_*.dll', 'cudnn_*64_*.dll',
-    'nvrtc64_*.dll', 'nvrtc-builtins64_*.dll',
-]
+# CRITICAL FIX #2: Bundle CUDA DLLs from system (only for GPU builds)
+# OPTIMIZATION: Skip CUDA bundling if using CPU-only PyTorch
+try:
+    import torch
+    has_cuda = torch.cuda.is_available()
+    torch_version_has_cuda = '+cu' in torch.__version__ or 'cuda' in torch.__version__
+    print(f"[INFO] PyTorch version: {torch.__version__}")
+    print(f"[INFO] CUDA available: {has_cuda}")
+    print(f"[INFO] CUDA in version string: {torch_version_has_cuda}")
+except:
+    has_cuda = False
+    torch_version_has_cuda = False
+    print("[INFO] Could not detect PyTorch CUDA status")
 
 cuda_dlls_found = 0
-for cuda_path in cuda_paths:
-    if cuda_path.exists():
-        for pattern in cuda_dll_names:
-            for dll in cuda_path.glob(pattern):
-                binaries.append((str(dll), 'torch/lib'))  # Put in torch/lib so runtime hook finds them
-                cuda_dlls_found += 1
 
-print(f"[OK] Bundled {cuda_dlls_found} CUDA DLLs (required for GPU masking)")
+if has_cuda or torch_version_has_cuda:
+    print("[INFO] GPU-enabled PyTorch detected - bundling CUDA DLLs")
+    cuda_paths = [
+        Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin"),
+        Path(r"C:\Users\User\miniconda3\Library\bin"),
+    ]
+    
+    cuda_dll_names = [
+        'cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll',
+        'cufft64_*.dll', 'curand64_*.dll', 'cusparse64_*.dll',
+        'cusolver64_*.dll', 'cudnn64_*.dll', 'cudnn_*64_*.dll',
+        'nvrtc64_*.dll', 'nvrtc-builtins64_*.dll',
+    ]
+    
+    for cuda_path in cuda_paths:
+        if cuda_path.exists():
+            for pattern in cuda_dll_names:
+                for dll in cuda_path.glob(pattern):
+                    binaries.append((str(dll), 'torch/lib'))  # Put in torch/lib so runtime hook finds them
+                    cuda_dlls_found += 1
+    
+    print(f"[OK] Bundled {cuda_dlls_found} CUDA DLLs (required for GPU masking)")
+else:
+    print("[INFO] CPU-only PyTorch detected - skipping CUDA DLL bundling (saves ~1GB)")
 
 # Collect other binaries
 torch_binaries = collect_dynamic_libs('torch')
@@ -200,6 +231,23 @@ excludes = [
     'gradio', 'streamlit', 'fastapi', 'uvicorn',
     'test', 'tests', 'pytest',  # Remove 'unittest' - we NEED it!
     'tkinter', 'PySide2', 'PySide6', 'wx',
+    
+    # OPTIMIZATION: Exclude unused PyTorch modules (reduces binary by ~500MB)
+    'torch.distributed',  # Distributed training (not used)
+    'torch.jit',  # JIT compilation (not used)
+    'torch.nn.quantized',  # Quantization (not used)
+    'torch.onnx',  # ONNX export (not used)
+    'torch.autograd.profiler',  # Profiling (not used)
+    'torch.utils.tensorboard',  # TensorBoard (not used)
+    'torch.cuda.amp',  # Automatic mixed precision (not used)
+    'torch.distributed.rpc',  # RPC framework (not used)
+    'torch.distributed.pipeline',  # Pipeline parallelism (not used)
+    
+    # OPTIMIZATION: Exclude torchvision (removed from requirements)
+    'torchvision',
+    'torchvision.models',
+    'torchvision.datasets',
+    'torchvision.transforms',
 ]
 
 print(f"[OK] Configured {len(hiddenimports)} hidden imports")
