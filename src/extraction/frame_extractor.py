@@ -1,9 +1,9 @@
 """
 Frame Extraction Module for 360FrameTools
-Simplified extractor supporting FFmpeg and OpenCV methods.
-SDK integration can be added later.
+Simplified extractor supporting FFmpeg method.
+OpenCV fallback methods removed for size optimization - use FFmpeg or SDK.
 
-Based on Insta360toFrames but adapted for unified pipeline.
+Based on Extraction Module but adapted for unified pipeline.
 """
 
 import cv2
@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 class FrameExtractor:
     """
     Extract frames from video files (.INSV, .mp4, etc.)
-    Supports FFmpeg and OpenCV methods.
+    Requires FFmpeg for frame extraction.
+    OpenCV only used for video metadata reading.
     """
     
     def __init__(self, ffmpeg_path: Optional[str] = None):
@@ -36,7 +37,7 @@ class FrameExtractor:
         if self.has_ffmpeg:
             logger.info(f"FFmpeg found at: {self.ffmpeg_path}")
         else:
-            logger.warning("FFmpeg not found - only OpenCV extraction available")
+            logger.error("FFmpeg not found - FFmpeg is REQUIRED for frame extraction")
     
     def _find_ffmpeg(self) -> Optional[str]:
         """Auto-detect FFmpeg installation"""
@@ -93,8 +94,18 @@ class FrameExtractor:
         logger.info(f"Extracting frames from {input_path.name} at {fps} FPS{time_range_msg} (method: {method}, lens: {lens_mode})")
         
         try:
-            # Route to appropriate extraction method based on method type
-            if method.startswith('ffmpeg_') and self.has_ffmpeg:
+            # Check FFmpeg availability
+            if not self.has_ffmpeg:
+                return {
+                    'success': False,
+                    'error': 'FFmpeg is required but not found. Please install FFmpeg.',
+                    'frame_count': 0,
+                    'output_files': [],
+                    'lens_outputs': {}
+                }
+            
+            # Route to appropriate FFmpeg extraction method
+            if method.startswith('ffmpeg_'):
                 if method == 'ffmpeg_stitched':
                     return self._extract_with_ffmpeg_stitched(input_path, output_path, fps, start_time, end_time, progress_callback)
                 elif method == 'ffmpeg_dual_lens':
@@ -104,19 +115,19 @@ class FrameExtractor:
                 elif method == 'ffmpeg_lens2':
                     return self._extract_dual_lens_ffmpeg(input_path, output_path, fps, start_time, end_time, 'lens2', progress_callback)
             elif method.startswith('opencv_'):
-                if method == 'opencv_dual_lens':
-                    return self._extract_dual_lens_opencv(input_path, output_path, fps, start_time, end_time, 'both', progress_callback)
-                elif method == 'opencv_lens1':
-                    return self._extract_dual_lens_opencv(input_path, output_path, fps, start_time, end_time, 'lens1', progress_callback)
-                elif method == 'opencv_lens2':
-                    return self._extract_dual_lens_opencv(input_path, output_path, fps, start_time, end_time, 'lens2', progress_callback)
+                # OpenCV methods removed for size optimization
+                logger.error(f"OpenCV extraction methods have been removed. Use FFmpeg or SDK instead.")
+                return {
+                    'success': False,
+                    'error': 'OpenCV extraction methods removed. Use FFmpeg or SDK methods.',
+                    'frame_count': 0,
+                    'output_files': [],
+                    'lens_outputs': {}
+                }
             
-            # Fallback to stitched FFmpeg or OpenCV
-            logger.warning(f"Unknown method '{method}', falling back to default")
-            if self.has_ffmpeg:
-                return self._extract_with_ffmpeg_stitched(input_path, output_path, fps, start_time, end_time, progress_callback)
-            else:
-                return self._extract_dual_lens_opencv(input_path, output_path, fps, start_time, end_time, 'both', progress_callback)
+            # Fallback to stitched FFmpeg
+            logger.warning(f"Unknown method '{method}', falling back to FFmpeg stitched")
+            return self._extract_with_ffmpeg_stitched(input_path, output_path, fps, start_time, end_time, progress_callback)
         
         except Exception as e:
             logger.error(f"Frame extraction failed: {e}")
@@ -199,97 +210,6 @@ class FrameExtractor:
             'success': True,
             'frame_count': frame_count,
             'output_files': [str(f) for f in output_files],
-            'error': None
-        }
-    
-    def _extract_with_opencv(self, input_path: Path, output_path: Path,
-                            fps: float, start_time: float, end_time: Optional[float],
-                            progress_callback: Optional[Callable]) -> Dict:
-        """
-        Extract frames using OpenCV with time range support.
-        WARNING: OpenCV extracts RAW dual-fisheye frames (not stitched).
-        Use FFmpeg method for proper equirectangular stitching.
-        """
-        
-        logger.warning(f"OpenCV extracts RAW fisheye frames (not stitched). Use FFmpeg for stitching.")
-        logger.info(f"Using OpenCV extraction method at {fps} FPS")
-        
-        # Open video
-        cap = cv2.VideoCapture(str(input_path))
-        
-        if not cap.isOpened():
-            return {
-                'success': False,
-                'error': "Failed to open video with OpenCV",
-                'frame_count': 0,
-                'output_files': []
-            }
-        
-        # Get video properties
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = total_frames / video_fps if video_fps > 0 else 0
-        
-        # Calculate frame range based on time range
-        start_frame = int(start_time * video_fps) if start_time > 0 else 0
-        end_frame = int(end_time * video_fps) if end_time is not None else total_frames
-        
-        # Ensure valid range
-        start_frame = max(0, min(start_frame, total_frames - 1))
-        end_frame = max(start_frame + 1, min(end_frame, total_frames))
-        
-        logger.info(f"Video: {video_fps:.2f} FPS, {total_frames} frames, {duration:.1f}s")
-        logger.info(f"Extracting frames {start_frame} to {end_frame}")
-        
-        # Set starting position
-        if start_frame > 0:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        
-        # Calculate frame interval
-        frame_interval = int(video_fps / fps) if fps < video_fps else 1
-        
-        frame_count = 0
-        output_files = []
-        frame_idx = start_frame
-        
-        while frame_idx < end_frame:
-            # Check for cancellation
-            if hasattr(self, 'is_cancelled') and self.is_cancelled:
-                logger.info("Extraction cancelled by user")
-                cap.release()
-                return {
-                    'success': False,
-                    'frame_count': frame_count,
-                    'output_files': output_files,
-                    'error': 'Cancelled by user'
-                }
-            
-            ret, frame = cap.read()
-            
-            if not ret:
-                break
-            
-            # Extract frame at interval
-            if (frame_idx - start_frame) % frame_interval == 0:
-                output_file = output_path / f"frame_{frame_count:05d}.png"
-                cv2.imwrite(str(output_file), frame)
-                output_files.append(str(output_file))
-                frame_count += 1
-                
-                if progress_callback and frame_count % 10 == 0:
-                    progress = int(((frame_idx - start_frame) / (end_frame - start_frame)) * 100)
-                    progress_callback(frame_idx, end_frame, f"Extracted {frame_count} frames")
-            
-            frame_idx += 1
-        
-        cap.release()
-        
-        logger.info(f"Successfully extracted {frame_count} frames")
-        
-        return {
-            'success': True,
-            'frame_count': frame_count,
-            'output_files': output_files,
             'error': None
         }
     
@@ -523,183 +443,6 @@ class FrameExtractor:
                 'output_files': [],
                 'lens_outputs': {}
             }
-        
-        return {
-            'success': True,
-            'frame_count': total_frames,
-            'output_files': all_output_files,
-            'lens_outputs': lens_outputs,
-            'error': None
-        }
-    
-    def _extract_dual_lens_opencv(self, input_path: Path, output_path: Path,
-                                   fps: float, start_time: float, end_time: Optional[float],
-                                   lens_mode: str, progress_callback: Optional[Callable]) -> Dict:
-        """
-        Extract frames from dual-lens video using OpenCV.
-        
-        CRITICAL: This method is ONLY for raw .insv files with dual-fisheye lenses!
-        Do NOT use on pre-stitched equirectangular .mp4 files (will split into hemispheres instead of lenses).
-        
-        NOTE: OpenCV opens .insv files as a single video stream with horizontally stacked lenses.
-        We split the frame into left (lens 1) and right (lens 2) halves.
-        
-        Args:
-            lens_mode: 'both', 'lens1', or 'lens2'
-        """
-        logger.info(f"Extracting dual-lens frames with OpenCV (mode: {lens_mode})")
-        
-        # CRITICAL VALIDATION: Check if this is actually a dual-stream file
-        # Equirectangular files (already stitched) should NOT use dual-lens methods
-        file_ext = input_path.suffix.lower()
-        if file_ext == '.mp4':
-            error_msg = ('ERROR: Dual-lens extraction attempted on .mp4 file (likely already stitched equirectangular).\n\n'
-                        'PROBLEM: Splitting a stitched equirectangular image gives you TOP/BOTTOM HEMISPHERES, not lens 1/lens 2!\n\n'
-                        'SOLUTION: Use "FFmpeg Stitched" or "SDK Stitching" method for .mp4 files.\n'
-                        'Dual-lens methods are ONLY for raw .insv files with dual-fisheye streams.')
-            logger.error(error_msg)
-            return {
-                'success': False,
-                'error': error_msg,
-                'frame_count': 0,
-                'output_files': [],
-                'lens_outputs': {}
-            }
-        
-        # Open video
-        cap = cv2.VideoCapture(str(input_path))
-        
-        if not cap.isOpened():
-            return {
-                'success': False,
-                'error': "Failed to open video with OpenCV",
-                'frame_count': 0,
-                'output_files': [],
-                'lens_outputs': {}
-            }
-        
-        # Get video properties
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # Calculate frame range
-        start_frame = int(start_time * video_fps) if start_time > 0 else 0
-        end_frame = int(end_time * video_fps) if end_time is not None else total_frames
-        start_frame = max(0, min(start_frame, total_frames - 1))
-        end_frame = max(start_frame + 1, min(end_frame, total_frames))
-        
-        logger.info(f"Video: {video_fps:.2f} FPS, {frame_width}×{frame_height}, frames {start_frame}-{end_frame}")
-        
-        # Determine lens split orientation
-        # Insta360 files can be:
-        # - Side-by-side (width > height): 3840×1920 = 1920×1920 per lens
-        # - Vertically stacked (height >= width): 3840×3840 = 3840×1920 per lens (top/bottom)
-        is_vertical_stack = frame_height >= frame_width
-        
-        # Initialize both variables
-        lens_width = frame_width // 2
-        lens_height = frame_height // 2
-        
-        if is_vertical_stack:
-            # Vertically stacked (top = lens1, bottom = lens2)
-            logger.info(f"Detected vertically stacked lenses: {frame_width}×{lens_height} per lens")
-        else:
-            # Side-by-side (left = lens1, right = lens2)
-            logger.info(f"Detected side-by-side lenses: {lens_width}×{frame_height} per lens")
-        
-        # Create output directories
-        lens_outputs = {}
-        extract_lens1 = lens_mode in ['both', 'lens1']
-        extract_lens2 = lens_mode in ['both', 'lens2']
-        
-        if extract_lens1:
-            (output_path / 'lens_1').mkdir(parents=True, exist_ok=True)
-            lens_outputs['lens_1'] = {'frame_count': 0, 'output_files': [], 'output_dir': str(output_path / 'lens_1')}
-        if extract_lens2:
-            (output_path / 'lens_2').mkdir(parents=True, exist_ok=True)
-            lens_outputs['lens_2'] = {'frame_count': 0, 'output_files': [], 'output_dir': str(output_path / 'lens_2')}
-        
-        # Set starting position
-        if start_frame > 0:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        
-        # Calculate frame interval
-        frame_interval = int(video_fps / fps) if fps < video_fps else 1
-        
-        frame_idx = start_frame
-        extracted_count = 0
-        
-        while frame_idx < end_frame:
-            # Check for cancellation
-            if hasattr(self, 'is_cancelled') and self.is_cancelled:
-                logger.info("Extraction cancelled by user")
-                cap.release()
-                return {
-                    'success': False,
-                    'frame_count': extracted_count,
-                    'output_files': [],
-                    'error': 'Cancelled by user'
-                }
-            
-            ret, frame = cap.read()
-            
-            if not ret:
-                break
-            
-            # Extract at interval
-            if (frame_idx - start_frame) % frame_interval == 0:
-                # Split frame into lenses based on orientation
-                if is_vertical_stack:
-                    # Vertical split: top = lens1, bottom = lens2
-                    if extract_lens1:
-                        lens1_frame = frame[:lens_height, :]
-                        lens1_path = output_path / 'lens_1' / f"frame_{extracted_count:05d}.png"
-                        cv2.imwrite(str(lens1_path), lens1_frame)
-                        lens_outputs['lens_1']['output_files'].append(str(lens1_path))
-                        lens_outputs['lens_1']['frame_count'] += 1
-                    
-                    if extract_lens2:
-                        lens2_frame = frame[lens_height:, :]
-                        lens2_path = output_path / 'lens_2' / f"frame_{extracted_count:05d}.png"
-                        cv2.imwrite(str(lens2_path), lens2_frame)
-                        lens_outputs['lens_2']['output_files'].append(str(lens2_path))
-                        lens_outputs['lens_2']['frame_count'] += 1
-                else:
-                    # Horizontal split: left = lens1, right = lens2
-                    if extract_lens1:
-                        lens1_frame = frame[:, :lens_width]
-                        lens1_path = output_path / 'lens_1' / f"frame_{extracted_count:05d}.png"
-                        cv2.imwrite(str(lens1_path), lens1_frame)
-                        lens_outputs['lens_1']['output_files'].append(str(lens1_path))
-                        lens_outputs['lens_1']['frame_count'] += 1
-                    
-                    if extract_lens2:
-                        lens2_frame = frame[:, lens_width:]
-                        lens2_path = output_path / 'lens_2' / f"frame_{extracted_count:05d}.png"
-                        cv2.imwrite(str(lens2_path), lens2_frame)
-                        lens_outputs['lens_2']['output_files'].append(str(lens2_path))
-                        lens_outputs['lens_2']['frame_count'] += 1
-                
-                extracted_count += 1
-                
-                if progress_callback:
-                    progress = int((frame_idx - start_frame) / (end_frame - start_frame) * 100)
-                    progress_callback(frame_idx - start_frame, end_frame - start_frame, 
-                                    f"Extracting frames: {extracted_count}")
-            
-            frame_idx += 1
-        
-        cap.release()
-        
-        total_frames = sum(lens_outputs[lens]['frame_count'] for lens in lens_outputs)
-        all_output_files = []
-        for lens in lens_outputs.values():
-            all_output_files.extend(lens['output_files'])
-        
-        logger.info(f"Successfully extracted {total_frames} total frames (lens 1: {lens_outputs.get('lens_1', {}).get('frame_count', 0)}, "
-                   f"lens 2: {lens_outputs.get('lens_2', {}).get('frame_count', 0)})")
         
         return {
             'success': True,

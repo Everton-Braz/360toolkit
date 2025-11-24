@@ -22,6 +22,7 @@ from ..extraction import FrameExtractor
 from ..extraction.sdk_extractor import SDKExtractor
 from ..transforms import E2PTransform, E2CTransform
 from .metadata_handler import MetadataHandler
+from ..utils.resource_path import get_resource_path
 from ..config.defaults import (
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
     DEFAULT_OUTPUT_WIDTH, DEFAULT_OUTPUT_HEIGHT
@@ -750,18 +751,102 @@ class PipelineWorker(QThread):
         try:
             # Initialize masker if not done
             if self.masker is None:
-                # Lazy import to avoid loading torch during PyInstaller analysis
-                from ..masking import MultiCategoryMasker
-                
                 model_size = self.config.get('model_size', 'small')
                 confidence = self.config.get('confidence_threshold', 0.5)
                 use_gpu = self.config.get('use_gpu', True)
                 
-                self.masker = MultiCategoryMasker(
-                    model_size=model_size,
-                    confidence_threshold=confidence,
-                    use_gpu=use_gpu
-                )
+                # Check for ONNX model availability
+                model_map = {
+                    'nano': 'yolov8n-seg.onnx',
+                    'small': 'yolov8s-seg.onnx',
+                    'medium': 'yolov8m-seg.onnx',
+                    'large': 'yolov8l-seg.onnx',
+                    'xlarge': 'yolov8x-seg.onnx'
+                }
+                onnx_model_name = model_map.get(model_size, 'yolov8s-seg.onnx')
+                
+                # Use get_resource_path to find the model (handles bundled exe case)
+                onnx_path = get_resource_path(onnx_model_name)
+                
+                use_onnx = False
+                onnx_error = "Unknown error"
+                
+                if onnx_path.exists():
+                    try:
+                        # CRITICAL FIX: Add DLL directory for ONNX Runtime in frozen app
+                        import sys
+                        import os
+                        
+                        # Determine base path for frozen app (onedir mode)
+                        if getattr(sys, 'frozen', False):
+                            # In onedir mode, sys.executable is the .exe
+                            # The _internal folder is usually next to it (PyInstaller 6+)
+                            # or dependencies are in the same folder
+                            exe_dir = Path(sys.executable).parent
+                            internal_dir = exe_dir / '_internal'
+                            
+                            # Add _internal/onnxruntime/capi to DLL search path
+                            ort_capi_path = internal_dir / 'onnxruntime' / 'capi'
+                            if ort_capi_path.exists():
+                                logger.info(f"Adding ONNX DLL path: {ort_capi_path}")
+                                os.add_dll_directory(str(ort_capi_path))
+                            
+                            # Add _internal root (for msvcp140.dll etc)
+                            if internal_dir.exists():
+                                logger.info(f"Adding Internal DLL path: {internal_dir}")
+                                os.add_dll_directory(str(internal_dir))
+                                
+                            # Add exe dir (just in case)
+                            logger.info(f"Adding Exe DLL path: {exe_dir}")
+                            os.add_dll_directory(str(exe_dir))
+
+                        import onnxruntime
+                        from ..masking.onnx_masker import OnnxMasker
+                        logger.info(f"Found ONNX model {onnx_path}, using OnnxMasker")
+                        self.masker = OnnxMasker(
+                            model_path=str(onnx_path),
+                            confidence_threshold=confidence,
+                            use_gpu=use_gpu
+                        )
+                        use_onnx = True
+                    except ImportError as e:
+                        onnx_error = f"ImportError: {e}"
+                        logger.warning(f"ONNX model found but onnxruntime not installed/working. Error: {e}")
+                    except Exception as e:
+                        onnx_error = f"InitError: {e}"
+                        logger.warning(f"Failed to initialize OnnxMasker: {e}. Falling back to PyTorch.")
+                else:
+                    onnx_error = f"File not found at {onnx_path}"
+                    logger.warning(f"ONNX model file not found at: {onnx_path}")
+
+                if not use_onnx:
+                    logger.info(f"ONNX initialization failed ({onnx_error}). Attempting PyTorch fallback.")
+                    
+                    # Lazy import to avoid loading torch during PyInstaller analysis
+                    try:
+                        from ..masking import MultiCategoryMasker
+                        
+                        self.masker = MultiCategoryMasker(
+                            model_size=model_size,
+                            confidence_threshold=confidence,
+                            use_gpu=use_gpu
+                        )
+                    except ImportError as e:
+                        # If we are here, it means we failed to use ONNX AND failed to use PyTorch
+                        error_msg = (
+                            f"Stage 3 Initialization Failed: Could not load masking engine.\n"
+                            f"1. ONNX Model check: Failed ({onnx_error})\n"
+                            f"2. PyTorch fallback: Failed ({str(e)})\n"
+                            f"Ensure '{onnx_model_name}' is present in the application folder."
+                        )
+                        logger.error(error_msg)
+                        return {
+                            'success': False,
+                            'error': error_msg,
+                            'masks_created': 0,
+                            'skipped': 0,
+                            'failed': 0
+                        }
                 
                 # Set enabled categories
                 categories = self.config.get('masking_categories', {})

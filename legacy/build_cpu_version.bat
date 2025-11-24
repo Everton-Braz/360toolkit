@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 REM ============================================================================
 REM Build Script for 360ToolkitGS - CPU Version
 REM ============================================================================
@@ -9,70 +10,64 @@ echo Building 360ToolkitGS - CPU Version
 echo ========================================================================
 echo.
 echo This version:
-echo   - Includes PyTorch CPU (fully bundled)
+echo   - Uses PyTorch CPU (fully bundled)
 echo   - Bundles SDK and FFmpeg
-echo   - Expected size: ~800 MB
-echo   - Works out-of-box (no user setup required)
+echo   - Expected size: ~6-8 GB (CPU inference)
+echo   - Works on any PC (no GPU required)
 echo.
 
-REM Check if PyInstaller is installed
-python -c "import PyInstaller" 2>nul
+REM Activate the 360toolkit-cpu conda environment
+echo Activating 360toolkit-cpu conda environment...
+call C:\Users\User\miniconda3\Scripts\activate.bat 360toolkit-cpu
 if errorlevel 1 (
-    echo PyInstaller not found. Installing...
-    pip install pyinstaller
-    if errorlevel 1 (
-        echo ERROR: Failed to install PyInstaller
-        pause
-        exit /b 1
-    )
+    echo ERROR: Failed to activate 360toolkit-cpu environment
+    echo Please ensure the environment exists: conda create -n 360toolkit-cpu python=3.10
+    pause
+    exit /b 1
 )
 
-REM Check if PyTorch CPU is installed
+echo Environment activated: 360toolkit-cpu
+echo.
+
+REM Verify PyTorch CPU is installed
 echo Checking PyTorch installation...
-python -c "import torch; print(f'PyTorch {torch.__version__} installed')" 2>nul
+python -c "import torch; print(f'PyTorch {torch.__version__} installed')"
 if errorlevel 1 (
     echo.
-    echo ERROR: PyTorch not found!
+    echo ERROR: PyTorch not found in 360toolkit-cpu environment!
     echo.
-    echo For CPU version, you need PyTorch CPU installed:
-    echo   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    echo Please install PyTorch CPU:
+    echo   conda activate 360toolkit-cpu
+    echo   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
     echo.
-    echo Would you like to install it now? (Y/N)
-    set /p install_pytorch="Install PyTorch CPU? "
-    if /i "%install_pytorch%"=="Y" (
-        echo Installing PyTorch CPU...
-        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-        if errorlevel 1 (
-            echo ERROR: Failed to install PyTorch CPU
-            pause
-            exit /b 1
-        )
-    ) else (
-        echo Build cancelled. Please install PyTorch CPU first.
-        pause
-        exit /b 1
-    )
+    echo Build cancelled. Please install PyTorch CPU first.
+    pause
+    exit /b 1
 )
 
 REM Verify PyTorch is CPU version (not CUDA)
-python -c "import torch; exit(0 if '+cpu' in torch.__version__ or not torch.cuda.is_available() else 1)" 2>nul
-if errorlevel 1 (
+echo Verifying PyTorch CPU version...
+python -c "import torch, sys; print('DEBUG: Version =', torch.__version__); print('DEBUG: Has +cpu =', '+cpu' in torch.__version__); sys.exit(1 if '+cpu' not in torch.__version__ else 0)"
+echo DEBUG: ERRORLEVEL after Python = !ERRORLEVEL!
+if !ERRORLEVEL! NEQ 0 (
     echo.
     echo WARNING: PyTorch CUDA version detected!
-    echo This will bundle the large CUDA version (~2.8 GB)
+    echo This will bundle the large CUDA version (~8 GB)
     echo.
-    echo For CPU version, please install PyTorch CPU:
-    echo   pip uninstall torch torchvision torchaudio -y
-    echo   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    echo For CPU version, the environment should have PyTorch CPU.
+    echo Please check: pip list ^| findstr torch
     echo.
     echo Continue anyway? (Y/N)
     set /p continue_cuda="Continue with CUDA PyTorch? "
-    if /i not "%continue_cuda%"=="Y" (
+    if /i not "!continue_cuda!"=="Y" (
         echo Build cancelled.
         pause
         exit /b 1
     )
 )
+
+echo PyTorch CPU detected - Proceeding with CPU build
+echo.
 
 REM Check if SDK path exists
 if not exist "C:\Users\User\Documents\Windows_CameraSDK-2.0.2-build1+MediaSDK-3.0.5-build1\MediaSDK-3.0.5-20250619-win64\MediaSDK" (

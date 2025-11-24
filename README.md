@@ -14,7 +14,7 @@
 EXTRACT FRAMES (Insta360 SDK) → SPLIT PERSPECTIVES (Equirectangular to Pinhole) → AI MASKING (YOLOv8)
 ```
 
-1. **Insta360toFrames**: Extract frames from dual-fisheye `.INSV` files using official SDK
+1. **Frame Extraction Module**: Extract frames from dual-fisheye `.INSV` files using official SDK
 2. **360toFrame**: Convert equirectangular images to perspective views with compass-based positioning
 
 ### **Stage 1: Frame Extraction** 🎬
@@ -415,7 +415,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
 - ONE-DIR mode (required for PyTorch DLLs)- **Windows x64 only** (no macOS/Linux support)
 
-- MSVC Runtime DLL bundling (WinError 1114 fix)- Copy SDK DLLs from `Original_Projects/Insta360toFrames/sdk/`
+- MSVC Runtime DLL bundling (WinError 1114 fix)- Copy SDK DLLs from `Original_Projects/Extraction_Reference/sdk/`
 
 - CUDA DLL bundling (18 DLLs, ~2.7 GB)- Use FFmpeg fallback if SDK unavailable
 
@@ -511,7 +511,7 @@ h_fov:            30 to 150° (horizontal field of view)
 
 v_fov:            auto-calculated from h_fov and aspect ratio**Source Code**: See original project licenses
 
-split_count:      1 to 12 (cameras per ring)- Insta360toFrames: Original license applies
+split_count:      1 to 12 (cameras per ring)- Extraction Module: Original license applies
 
 cubemap_mode:     6-face | 8-tile- 360toFrame: Original license applies
 
@@ -531,7 +531,7 @@ confidence:       0.0 to 1.0 (detection threshold)
 
 model_size:       nano | small | medium | large | xlarge**360FrameTools** unifies:
 
-use_gpu:          true | false (auto-detect CUDA)- **Insta360toFrames**: Frame extraction from dual-fisheye cameras
+use_gpu:          true | false (auto-detect CUDA)- **Frame Extraction**: Frame extraction from dual-fisheye cameras
 
 skip_existing:    true | false (skip if mask exists)- **360toFrame**: Perspective splitting with compass positioning
 
@@ -578,34 +578,15 @@ C:\Users\[User]\Windows_CameraSDK-2.0.2-build1+MediaSDK-3.0.5-build1\
 
 ---
 
-## 🧪 Testing
+## ⚖️ Legal & Licensing
 
-**Contact**: 360toolkit Development Team
+**360ToolKit** is open-source software licensed under the [MIT License](LICENSE).
 
-## Support
+However, this software depends on the **Insta360 Camera SDK**, which is proprietary software owned by Arashi Vision Inc. (Insta360).
 
-**Documentation**: See `specs/` folder
-**Issues**: Check logs in application
-
-
-
-```bash---
-
-# Run all tests
-
-pytest tests/**Last Updated**: November 5, 2025  
-
-**Status**: Active Development
-
-# Run specific test suite
-pytest tests/extraction/
-pytest tests/transforms/
-pytest tests/masking/
-pytest tests/pipeline/
-
-# Run with coverage
-pytest tests/ --cov=src
-```
+- **Source Code**: The source code of 360ToolKit is free and open.
+- **Binaries**: The compiled releases of 360ToolKit include the Insta360 SDK binaries, which are redistributed under the terms of the [Insta360 SDK End User License Agreement](https://www.insta360.com/support/supportcourse?post_id=20734).
+- **Trademarks**: "Insta360" is a trademark of Arashi Vision Inc. This project is an unofficial tool and is not endorsed by or affiliated with Insta360.
 
 ## 🤝 Contributing
 
@@ -615,9 +596,20 @@ pytest tests/ --cov=src
 4. Push to branch (`git push origin feature/amazing-feature`)
 5. Open Pull Request
 
-## 📄 License
+## 📜 License
 
-[Specify your license here - e.g., MIT, GPL, etc.]
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+### Insta360 SDK Notice
+This software uses the **Insta360 MediaSDK** for frame extraction. The SDK itself is **proprietary** and is NOT included in this source code repository.
+
+- **For Users**: The pre-built releases include the necessary SDK runtime files (allowed under SDK redistribution terms).
+- **For Developers**: If you wish to build this project from source, you must:
+  1. Download the MediaSDK from the [Insta360 Developer Portal](https://www.insta360.com/sdk/home).
+  2. Place the SDK files in a local directory.
+  3. Update the build configuration to point to your local SDK copy.
+
+**Note**: You are responsible for complying with the Insta360 SDK License Agreement when using or redistributing their software.
 
 ## 🙏 Acknowledgments
 

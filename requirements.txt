@@ -11,9 +11,22 @@ PyQt6>=6.5.0
 PyQt6-Qt6>=6.5.0
 
 # AI/ML for masking
+# OPTION A: ONNX Runtime (RECOMMENDED - 90% smaller binary)
+# Uncomment ONE of these lines:
+# onnxruntime>=1.16.0  # CPU-only version (~300 MB)
+# onnxruntime-gpu>=1.16.0  # GPU version with CUDA support
+
+# OPTION B: PyTorch + Ultralytics (Original - larger binary ~6-8 GB)
+# Use this if you prefer PyTorch or haven't exported models to ONNX yet
 ultralytics>=8.0.200  # YOLOv8
 torch>=2.0.0  # PyTorch (install with CUDA support separately)
-torchvision>=0.15.0
+# torchvision removed - not used in application
+
+# Note: To use ONNX (recommended):
+# 1. pip install onnxruntime or onnxruntime-gpu
+# 2. Run: python export_yolo_to_onnx.py (creates .onnx models)
+# 3. Use ONNXMasker instead of MultiCategoryMasker in code
+# 4. Remove torch/ultralytics from requirements (optional)
 
 # Metadata handling
 piexif>=1.1.3

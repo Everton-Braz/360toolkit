@@ -7,8 +7,8 @@
 **Three-stage pipeline**: EXTRACT FRAMES → SPLIT FRAMES → MASKING → DONE
 
 This unified tool merges two separate applications:
-1. **Insta360toFrames**: Extracts frames from dual-fisheye .INSV files using official SDK (bypasses Insta360 Studio)
-2. **360toFrame**: Converts equirectangular images to perspective views with compass-based camera positioning
+1. **Frame Extraction Module**: Extracts frames from dual-fisheye .INSV files using official SDK (bypasses Insta360 Studio)
+2. **360toFrame**: Converts equirectangular images to perspective views with compass-based positioning
 
 **Key distinction**: This is a complete photogrammetry preprocessing pipeline—from raw Insta360 video to masked perspective frames—in one streamlined batch workflow.
 
@@ -16,7 +16,7 @@ This unified tool merges two separate applications:
 
 **Development location**: `C:\Users\User\Documents\APLICATIVOS\360ToolKit\`
 **Source reference folders** (DO NOT MODIFY, read-only):
-- `Original_Projects\Insta360toFrames\` - Frame extraction source
+- `Original_Projects\Extraction_Reference\` - Frame extraction source
 - `Original_Projects\360toFrame\` - Perspective splitting source
 
 **Note**: Reuse/copy code from source folders. Ignore existing library implementations (`lib/` folders).

@@ -30,12 +30,19 @@ def get_resource_path(relative_path: str) -> Path:
         >>> if sdk_exe.exists():
         ...     print(f"Found SDK at: {sdk_exe}")
     """
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
-        # This is where all bundled files are extracted at runtime
-        base_path = Path(sys._MEIPASS)
+    if getattr(sys, 'frozen', False):
+        # Running as bundled .exe
+        if hasattr(sys, '_MEIPASS'):
+            base_path = Path(sys._MEIPASS)
+        else:
+            # Fallback for one-dir mode if _MEIPASS is not set
+            # Try _internal folder next to executable (PyInstaller 6+)
+            base_path = Path(sys.executable).parent / '_internal'
+            if not base_path.exists():
+                base_path = Path(sys.executable).parent
+                
         logger.debug(f"Running as bundled .exe, base path: {base_path}")
-    except AttributeError:
+    else:
         # Running in development mode (not bundled)
         # Use project root directory
         base_path = Path(__file__).parent.parent.parent
@@ -54,7 +61,7 @@ def is_bundled() -> bool:
     Returns:
         True if running as .exe, False if running as Python script
     """
-    return hasattr(sys, '_MEIPASS')
+    return getattr(sys, 'frozen', False)
 
 
 def get_base_path() -> Path:
@@ -64,7 +71,13 @@ def get_base_path() -> Path:
     Returns:
         Path to temp extraction folder (if bundled) or project root (if dev)
     """
-    try:
-        return Path(sys._MEIPASS)
-    except AttributeError:
+    if getattr(sys, 'frozen', False):
+        if hasattr(sys, '_MEIPASS'):
+            return Path(sys._MEIPASS)
+        else:
+            base_path = Path(sys.executable).parent / '_internal'
+            if base_path.exists():
+                return base_path
+            return Path(sys.executable).parent
+    else:
         return Path(__file__).parent.parent.parent

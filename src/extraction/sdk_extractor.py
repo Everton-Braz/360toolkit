@@ -161,8 +161,14 @@ class SDKExtractor:
     def _find_sdk_executable(self) -> Optional[Path]:
         """Find MediaSDK executable in multiple possible locations."""
         possible_paths = [
+            # Bundled structure (dist/360ToolkitGS-ONNX/_internal/sdk/bin/RealTimeStitcherSDKTest.exe)
+            self.sdk_path / "bin" / "RealTimeStitcherSDKTest.exe",
+            self.sdk_path / "bin" / "MediaSDKTest.exe",
+            
             # MediaSDK 3.0.5 structure
+            self.sdk_path / "MediaSDK-3.0.5-20250619-win64" / "MediaSDK" / "bin" / "RealTimeStitcherSDKTest.exe",
             self.sdk_path / "MediaSDK-3.0.5-20250619-win64" / "MediaSDK" / "bin" / "MediaSDKTest.exe",
+            self.sdk_path / "MediaSDK" / "bin" / "RealTimeStitcherSDKTest.exe",
             self.sdk_path / "MediaSDK" / "bin" / "MediaSDKTest.exe",
             
             # Demo executable (common in older SDK versions)
@@ -171,7 +177,6 @@ class SDKExtractor:
             
             # Alternate locations
             self.sdk_path / "bin" / "MediaSDK-Demo.exe",
-            self.sdk_path / "bin" / "MediaSDKTest.exe",
         ]
         
         for path in possible_paths:
@@ -357,13 +362,27 @@ class SDKExtractor:
         
         # Execute SDK with Popen for termination support
         try:
+            # Set CWD to SDK bin directory to ensure DLLs are found
+            sdk_cwd = self.demo_exe.parent if self.demo_exe else None
+            
+            # Prepare environment with _internal in PATH (for msvcp140.dll etc)
+            env = os.environ.copy()
+            if getattr(sys, 'frozen', False):
+                exe_dir = Path(sys.executable).parent
+                internal_dir = exe_dir / '_internal'
+                if internal_dir.exists():
+                    env['PATH'] = str(internal_dir) + os.pathsep + env.get('PATH', '')
+                    logger.debug(f"Added {internal_dir} to SDK environment PATH")
+
             self._current_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding='utf-8',
-                errors='replace'
+                errors='replace',
+                cwd=sdk_cwd,  # CRITICAL: Run from SDK bin folder to find DLLs
+                env=env       # CRITICAL: Include _internal in PATH
             )
             
             # Calculate timeout based on frame count

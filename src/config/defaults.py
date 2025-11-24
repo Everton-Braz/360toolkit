@@ -17,15 +17,13 @@ SDK_QUALITY_OPTIONS = ['draft', 'good', 'best']
 DEFAULT_SDK_QUALITY = 'good'
 
 # Extraction methods (SDK is PRIMARY - Best Quality)
+# OpenCV methods removed for size optimization - use FFmpeg or SDK
 EXTRACTION_METHODS = {
     'sdk_stitching': 'SDK Stitching (Best Quality - RECOMMENDED)',
     'ffmpeg_stitched': 'FFmpeg Stitched (Good for pre-stitched MP4)',
     'ffmpeg_dual_lens': 'FFmpeg Dual-Lens (Both Lenses Separately)',
     'ffmpeg_lens1': 'FFmpeg Lens 1 Only (Front Fisheye)',
-    'ffmpeg_lens2': 'FFmpeg Lens 2 Only (Back Fisheye)',
-    'opencv_dual_lens': 'OpenCV Dual-Lens (Both Lenses Separately)',
-    'opencv_lens1': 'OpenCV Lens 1 Only (Front Fisheye)',
-    'opencv_lens2': 'OpenCV Lens 2 Only (Back Fisheye)'
+    'ffmpeg_lens2': 'FFmpeg Lens 2 Only (Back Fisheye)'
 }
 # SDK is PRIMARY method (use FFmpeg only for already-stitched MP4 files)
 DEFAULT_EXTRACTION_METHOD = 'sdk_stitching'

@@ -52,3 +52,18 @@ Original_Projects/
 
 # Dependencies
 node_modules/
+
+# Insta360 SDK & Proprietary Binaries
+# Exclude all DLLs and Libs to prevent accidental commit of SDK
+*.dll
+*.lib
+*.so
+*.dylib
+sdk/
+MediaSDK/
+libs/
+bin/
+
+# ONNX Models (Large files)
+*.onnx
+*.pt
