@@ -254,6 +254,15 @@ class ONNXMasker:
         detections = outputs[0][0]  # Remove batch dimension
         proto_masks = outputs[1][0] if len(outputs) > 1 else None
         
+        # DIAGNOSTIC: Log shapes
+        logger.debug(f"ONNX Output Shapes - Detections: {detections.shape}, Proto: {proto_masks.shape if proto_masks is not None else 'None'}")
+        
+        # YOLOv8 Output is usually (Channels, Anchors) e.g. (116, 8400)
+        # We need (Anchors, Channels) to iterate over detections
+        if detections.shape[0] < detections.shape[1]:
+            detections = detections.T
+            logger.debug(f"Transposed detections to: {detections.shape}")
+
         # Get target classes
         target_classes = self.get_target_classes()
         
@@ -412,18 +421,30 @@ class ONNXMasker:
             
             # Quick check for detections
             detections = outputs[0][0]
+            
+            # YOLOv8 Output is usually (Channels, Anchors) e.g. (116, 8400)
+            # We need (Anchors, Channels) to iterate over detections
+            if detections.shape[0] < detections.shape[1]:
+                detections = detections.T
+            
             target_classes = self.get_target_classes()
+            
+            # DEBUG: Print max confidence found
+            max_conf_found = 0.0
             
             for detection in detections:
                 class_scores = detection[4:84]
                 max_conf = np.max(class_scores)
                 class_id = np.argmax(class_scores)
                 
+                if max_conf > max_conf_found:
+                    max_conf_found = max_conf
+                
                 if max_conf >= self.confidence_threshold and class_id in target_classes:
-                    logger.debug("Objects detected")
+                    logger.debug(f"Object detected: Class {class_id} with conf {max_conf:.2f}")
                     return True
             
-            logger.debug("No objects detected")
+            logger.debug(f"No objects detected. Max confidence found: {max_conf_found:.2f} (Threshold: {self.confidence_threshold})")
             return False
             
         except Exception as e:

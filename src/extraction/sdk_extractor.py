@@ -161,15 +161,15 @@ class SDKExtractor:
     def _find_sdk_executable(self) -> Optional[Path]:
         """Find MediaSDK executable in multiple possible locations."""
         possible_paths = [
-            # Bundled structure (dist/360ToolkitGS-ONNX/_internal/sdk/bin/RealTimeStitcherSDKTest.exe)
-            self.sdk_path / "bin" / "RealTimeStitcherSDKTest.exe",
+            # Bundled structure - PREFER MediaSDKTest.exe as it supports CLI args
             self.sdk_path / "bin" / "MediaSDKTest.exe",
+            self.sdk_path / "bin" / "RealTimeStitcherSDKTest.exe",
             
             # MediaSDK 3.0.5 structure
-            self.sdk_path / "MediaSDK-3.0.5-20250619-win64" / "MediaSDK" / "bin" / "RealTimeStitcherSDKTest.exe",
             self.sdk_path / "MediaSDK-3.0.5-20250619-win64" / "MediaSDK" / "bin" / "MediaSDKTest.exe",
-            self.sdk_path / "MediaSDK" / "bin" / "RealTimeStitcherSDKTest.exe",
+            self.sdk_path / "MediaSDK-3.0.5-20250619-win64" / "MediaSDK" / "bin" / "RealTimeStitcherSDKTest.exe",
             self.sdk_path / "MediaSDK" / "bin" / "MediaSDKTest.exe",
+            self.sdk_path / "MediaSDK" / "bin" / "RealTimeStitcherSDKTest.exe",
             
             # Demo executable (common in older SDK versions)
             self.sdk_path / "Demo" / "Windows" / "Media SDK" / "MediaSDK-Demo.exe",
@@ -367,12 +367,27 @@ class SDKExtractor:
             
             # Prepare environment with _internal in PATH (for msvcp140.dll etc)
             env = os.environ.copy()
+            
+            # Add SDK bin directory to PATH (CRITICAL for finding DLLs in same folder)
+            if sdk_cwd:
+                env['PATH'] = str(sdk_cwd) + os.pathsep + env.get('PATH', '')
+            
             if getattr(sys, 'frozen', False):
                 exe_dir = Path(sys.executable).parent
                 internal_dir = exe_dir / '_internal'
                 if internal_dir.exists():
                     env['PATH'] = str(internal_dir) + os.pathsep + env.get('PATH', '')
                     logger.debug(f"Added {internal_dir} to SDK environment PATH")
+            
+            # DIAGNOSTIC: Log PATH and CWD
+            logger.info(f"SDK CWD: {sdk_cwd}")
+            logger.info(f"SDK PATH: {env['PATH'][:500]}...") # Log first 500 chars
+            
+            # Check for critical DLLs in SDK folder
+            if sdk_cwd:
+                critical_dlls = ['MediaSDK.dll', 'opencv_world', 'cudart']
+                found_dlls = [f.name for f in sdk_cwd.glob('*.dll')]
+                logger.info(f"DLLs in SDK bin: {found_dlls}")
 
             self._current_process = subprocess.Popen(
                 cmd,
@@ -478,6 +493,23 @@ class SDKExtractor:
                     progress_callback(100)
                 
                 if returncode != 0 and not completion_detected:
+                    # Handle specific error codes
+                    if returncode == 3221225781 or returncode == -1073741515: # 0xC0000135
+                        error_msg = (
+                            "MediaSDK failed to start (Missing DLL Dependency).\n"
+                            "This usually means:\n"
+                            "1. NVIDIA Drivers are missing or outdated (nvcuda.dll required)\n"
+                            "2. Visual C++ Redistributable 2015-2022 is missing\n"
+                            "3. System DLLs are corrupted\n"
+                            "Please install latest NVIDIA Drivers and VC++ Redistributable."
+                        )
+                        logger.error(f"[CRITICAL] {error_msg}")
+                        raise RuntimeError(error_msg)
+                    elif returncode == 3221225477 or returncode == -1073741819: # 0xC0000005
+                        error_msg = "MediaSDK crashed (Access Violation). Likely GPU driver incompatibility."
+                        logger.error(f"[CRITICAL] {error_msg}")
+                        raise RuntimeError(error_msg)
+                    
                     raise subprocess.CalledProcessError(returncode, cmd, stdout, stderr)
                 
                 logger.info("[OK] MediaSDK extraction completed successfully!")
@@ -553,12 +585,18 @@ class SDKExtractor:
             if 'FrameTypeTimelapseQuat failed' in error_msg:
                 logger.warning("[WARNING] SDK metadata read error (timelapse data missing)")
                 logger.warning("INFO: This is a known SDK issue with some .insv files")
+            elif 'no device found' in error_msg:
+                logger.warning("[WARNING] SDK failed: No GPU device found (expected on CPU-only systems)")
+                raise RuntimeError("MediaSDK requires GPU (no device found)")
             elif e.returncode == 3221225786:
                 logger.warning("[WARNING] SDK process was terminated (user cancel or timeout)")
             else:
                 logger.error(f"[ERROR] MediaSDK extraction failed (exit code {e.returncode})")
-            
-            logger.error(f"Error details: {error_msg[:200]}")
+
+            if e.stderr:
+                logger.error("[SDK STDERR]\n%s", e.stderr.rstrip())
+            else:
+                logger.error(f"Error details: {error_msg}")
             raise RuntimeError(f"MediaSDK extraction failed: {error_msg[:200]}")
     
     def stop(self):

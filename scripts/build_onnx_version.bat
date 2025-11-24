@@ -87,31 +87,47 @@ if exist "%CONDA_PREFIX%\Library\bin\vcomp140.dll" (
     copy /y "%CONDA_PREFIX%\Library\bin\vcomp140.dll" "%INTERNAL_DIR%\"
 )
 
-REM 2. Copy Runtime DLLs to SDK bin folder (Fixes Exit Code 3221225781)
-echo Spraying DLLs to SDK bin...
+REM 2. Fix SDK Dependencies (Fixes Exit Code 3221225781 - DLL not found)
+echo Fixing SDK dependencies...
 set "SDK_ROOT=C:\Users\User\Documents\Windows_CameraSDK-2.0.2-build1+MediaSDK-3.0.5-build1\MediaSDK-3.0.5-20250619-win64\MediaSDK"
 
-REM Ensure MediaSDK.dll is present (Critical!)
+REM CRITICAL: Copy MediaSDK.dll to _internal root (SDK exe depends on it via PATH)
 if exist "%SDK_ROOT%\bin\MediaSDK.dll" (
-    echo Copying MediaSDK.dll...
+    echo - Copying MediaSDK.dll to _internal root...
+    copy /y "%SDK_ROOT%\bin\MediaSDK.dll" "%INTERNAL_DIR%\" >nul
+    echo - Copying MediaSDK.dll to sdk\bin...
     copy /y "%SDK_ROOT%\bin\MediaSDK.dll" "%INTERNAL_DIR%\sdk\bin\" >nul
+) else (
+    echo WARNING: MediaSDK.dll not found in SDK installation!
 )
 
-REM Copy VC++ Runtimes
+REM Copy VC++ Runtimes to SDK bin folder (for SDK dependencies)
+echo - Spraying MSVC runtimes to sdk\bin...
 for %%f in (msvcp140.dll msvcp140_1.dll msvcp140_2.dll vcruntime140.dll vcruntime140_1.dll concrt140.dll vcomp140.dll ucrtbase.dll) do (
-    if exist "%INTERNAL_DIR%\%%f" copy /y "%INTERNAL_DIR%\%%f" "%INTERNAL_DIR%\sdk\bin\" >nul
+    if exist "%INTERNAL_DIR%\%%f" copy /y "%INTERNAL_DIR%\%%f" "%INTERNAL_DIR%\sdk\bin\" >nul 2>&1
 )
 
-REM 3. Copy Runtime DLLs to ONNX Runtime capi folder (Fixes DLL load failed)
-echo Spraying DLLs to ONNX Runtime capi...
-for %%f in (msvcp140.dll msvcp140_1.dll msvcp140_2.dll vcruntime140.dll vcruntime140_1.dll concrt140.dll vcomp140.dll ucrtbase.dll) do (
-    if exist "%INTERNAL_DIR%\%%f" copy /y "%INTERNAL_DIR%\%%f" "%INTERNAL_DIR%\onnxruntime\capi\" >nul
-)
+REM 3. Fix ONNX Runtime Dependencies (Fixes python310.dll initialization)
+echo Fixing ONNX Runtime dependencies...
 
-REM 4. Copy Python DLL to ONNX Runtime capi folder (Fixes python310.dll dependency)
+REM Copy Python DLL to ONNX capi folder
 if exist "%INTERNAL_DIR%\python310.dll" (
-    echo Copying python310.dll to ONNX capi...
+    echo - Copying python310.dll to onnxruntime\capi...
     copy /y "%INTERNAL_DIR%\python310.dll" "%INTERNAL_DIR%\onnxruntime\capi\" >nul
+) else (
+    echo WARNING: python310.dll not found!
+)
+
+REM Copy MSVC runtimes to ONNX capi folder (fixes "DLL initialization failed")
+echo - Spraying MSVC runtimes to onnxruntime\capi...
+for %%f in (msvcp140.dll msvcp140_1.dll msvcp140_2.dll vcruntime140.dll vcruntime140_1.dll concrt140.dll vcomp140.dll ucrtbase.dll) do (
+    if exist "%INTERNAL_DIR%\%%f" copy /y "%INTERNAL_DIR%\%%f" "%INTERNAL_DIR%\onnxruntime\capi\" >nul 2>&1
+)
+
+REM Copy python3.dll to ONNX capi if present (some ONNX builds need it)
+if exist "%INTERNAL_DIR%\python3.dll" (
+    echo - Copying python3.dll to onnxruntime\capi...
+    copy /y "%INTERNAL_DIR%\python3.dll" "%INTERNAL_DIR%\onnxruntime\capi\" >nul
 )
 
 echo.

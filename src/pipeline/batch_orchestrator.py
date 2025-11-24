@@ -317,6 +317,11 @@ class PipelineWorker(QThread):
                                 'warning': f'SDK error but {len(frame_files)} frames recovered'
                             }
                         
+                        # Check if fallback is allowed
+                        if not self.config.get('allow_fallback', True):
+                            logger.error("Fallback disabled by configuration. Aborting.")
+                            raise sdk_error
+                        
                         logger.warning("INFO: Falling back to FFmpeg method")
                         method = 'ffmpeg'
             
@@ -785,8 +790,30 @@ class PipelineWorker(QThread):
                             exe_dir = Path(sys.executable).parent
                             internal_dir = exe_dir / '_internal'
                             
-                            # Add _internal/onnxruntime/capi to DLL search path
+                            # DIAGNOSTIC: List what DLLs we have
+                            logger.info("=== ONNX Runtime DLL Diagnostics ===")
                             ort_capi_path = internal_dir / 'onnxruntime' / 'capi'
+                            if ort_capi_path.exists():
+                                logger.info(f"ONNX capi folder exists: {ort_capi_path}")
+                                import glob
+                                dlls = list(glob.glob(str(ort_capi_path / '*.dll')))
+                                logger.info(f"DLLs in capi: {[os.path.basename(d) for d in dlls]}")
+                                
+                                pyds = list(glob.glob(str(ort_capi_path / '*.pyd')))
+                                logger.info(f"PYDs in capi: {[os.path.basename(d) for d in pyds]}")
+                            else:
+                                logger.warning(f"ONNX capi folder NOT FOUND: {ort_capi_path}")
+                            
+                            # Check for MSVC runtimes
+                            msvc_dlls = list(glob.glob(str(internal_dir / 'msvcp*.dll')))
+                            msvc_dlls += list(glob.glob(str(internal_dir / 'vcruntime*.dll')))
+                            logger.info(f"MSVC runtimes in _internal: {[os.path.basename(d) for d in msvc_dlls]}")
+                            
+                            # Check current PATH
+                            logger.info(f"Current PATH dirs: {os.environ.get('PATH', '').split(os.pathsep)[:5]}")
+                            logger.info("=== End Diagnostics ===")
+                            
+                            # Add _internal/onnxruntime/capi to DLL search path
                             if ort_capi_path.exists():
                                 logger.info(f"Adding ONNX DLL path: {ort_capi_path}")
                                 os.add_dll_directory(str(ort_capi_path))
@@ -800,10 +827,12 @@ class PipelineWorker(QThread):
                             logger.info(f"Adding Exe DLL path: {exe_dir}")
                             os.add_dll_directory(str(exe_dir))
 
+                        logger.info("Attempting to import onnxruntime...")
                         import onnxruntime
-                        from ..masking.onnx_masker import OnnxMasker
-                        logger.info(f"Found ONNX model {onnx_path}, using OnnxMasker")
-                        self.masker = OnnxMasker(
+                        logger.info(f"Successfully imported onnxruntime {onnxruntime.__version__}")
+                        from ..masking.onnx_masker import ONNXMasker
+                        logger.info(f"Found ONNX model {onnx_path}, using ONNXMasker")
+                        self.masker = ONNXMasker(
                             model_path=str(onnx_path),
                             confidence_threshold=confidence,
                             use_gpu=use_gpu
@@ -814,7 +843,7 @@ class PipelineWorker(QThread):
                         logger.warning(f"ONNX model found but onnxruntime not installed/working. Error: {e}")
                     except Exception as e:
                         onnx_error = f"InitError: {e}"
-                        logger.warning(f"Failed to initialize OnnxMasker: {e}. Falling back to PyTorch.")
+                        logger.warning(f"Failed to initialize ONNXMasker: {e}. Falling back to PyTorch.")
                 else:
                     onnx_error = f"File not found at {onnx_path}"
                     logger.warning(f"ONNX model file not found at: {onnx_path}")

@@ -8,96 +8,76 @@
 
 ## 🎯 Three-Stage Pipeline
 
-```
-360toolkit combines two specialized applications into one streamlined workflow:
+**360toolkit** combines two specialized applications into one streamlined workflow:
 
-EXTRACT FRAMES (Insta360 SDK) → SPLIT PERSPECTIVES (Equirectangular to Pinhole) → AI MASKING (YOLOv8)
-```
-
-1. **Frame Extraction Module**: Extract frames from dual-fisheye `.INSV` files using official SDK
-2. **360toFrame**: Convert equirectangular images to perspective views with compass-based positioning
+`EXTRACT FRAMES (Insta360 SDK)` → `SPLIT PERSPECTIVES (Equirectangular to Pinhole)` → `AI MASKING (YOLOv8)`
 
 ### **Stage 1: Frame Extraction** 🎬
 
-- **Input**: `.INSV` (Insta360 native) or `.mp4` files**Three-stage pipeline**: `EXTRACT FRAMES` → `SPLIT PERSPECTIVES` → `AI MASKING` → **DONE**
-
+- **Input**: `.INSV` (Insta360 native) or `.mp4` files
 - **Output**: Equirectangular stitched panoramas (PNG/JPG/TIFF)
-
-- **Methods**:Perfect for photogrammetry workflows with **RealityScan**, **Metashape**, **COLMAP**, and **RealityCapture**.
-
+- **Methods**:
   - **Insta360 MediaSDK 3.0.5** (PRIMARY): GPU-accelerated AI stitching with seamless blending
-
-  - **FFmpeg**: Fallback dual-stream extraction---
-
+  - **FFmpeg**: Fallback dual-stream extraction
   - **Dual-fisheye**: Raw lens images (no stitching)
-
-  - **OpenCV**: Basic frame-by-frame extraction## Key Features
-
+  - **OpenCV**: Basic frame-by-frame extraction
 - **Features**:
+  - Configurable FPS (0.1 - 30 frames/second)
+  - Time range selection (start/end in seconds)
+  - Resolution options: Original, 8K, 6K, 4K, 2K
+  - Metadata preservation (camera info, NO GPS/GYRO)
+  - AI stitching quality modes: Draft, Good, Best
 
-  - Configurable FPS (0.1 - 30 frames/second)### Stage 1: Frame Extraction
+### **Stage 2: Perspective Splitting** 🔄
 
-  - Time range selection (start/end in seconds)- **Official Insta360 SDK integration** (bypasses Insta360 Studio)
-
-  - Resolution options: Original, 8K, 6K, 4K, 2K- Dual-fisheye → equirectangular stitching
-
-  - Metadata preservation (camera info, NO GPS/GYRO)- Configurable frame rate (0.1 - 30 FPS)
-
-  - AI stitching quality modes: Draft, Good, Best- Multiple extraction methods (SDK, FFmpeg, OpenCV)
-
-
-
-### **Stage 2: Perspective Splitting** 🔄### Stage 2: Perspective Splitting
-
-- **Input**: Equirectangular images- **Compass-based camera positioning** (8-camera default)
-
-- **Output**: Rectilinear perspective views (PNG/JPEG/TIFF)- Interactive multi-ring configuration (look-up/look-down support)
-
-- **Compass-Based Camera Positioning**:- E2P (Perspective) and E2C (Cubemap) transforms
-
-  - Default: 8 cameras arranged horizontally- Cached transformations for performance
-
+- **Input**: Equirectangular images
+- **Output**: Rectilinear perspective views (PNG/JPEG/TIFF)
+- **Compass-Based Camera Positioning**:
+  - Default: 8 cameras arranged horizontally
   - Configurable FOV (30° - 150°)
-
-  - Multi-ring support (main, look-up, look-down)### Stage 3: AI Masking
-
-  - Custom yaw/pitch/roll per camera- **Multi-category detection**: Persons, personal objects, animals
-
-- **Transform Engines**:- YOLOv8 instance segmentation (5 model sizes)
-
-  - **E2P Transform**: Equirectangular → Pinhole perspective (cached for performance)- **GPU acceleration** with CUDA
-
-  - **E2C Transform**: Equirectangular → Cubemap (6-face + 8-tile variants)- RealityScan-compatible binary masks
-
+  - Multi-ring support (main, look-up, look-down)
+  - Custom yaw/pitch/roll per camera
+- **Transform Engines**:
+  - **E2P Transform**: Equirectangular → Pinhole perspective (cached for performance)
+  - **E2C Transform**: Equirectangular → Cubemap (6-face + 8-tile variants)
   - **Real-time preview** with interactive compass widget
-
-- **Output Customization**:---
-
+- **Output Customization**:
   - Custom image dimensions
-
-  - Multiple format support## Installation
-
+  - Multiple format support
   - EXIF metadata embedding (camera orientation)
 
-### Prerequisites
+### **Stage 3: AI Masking** 🤖
 
-### **Stage 3: AI Masking** 🤖- Python 3.9+
-
-- **Input**: Perspective images- Windows 10/11 (for Insta360 SDK support)
-
-- **Output**: Binary masks (`<image>_mask.png`, RealityScan compatible)- CUDA 11.8+ (optional, for GPU acceleration)
-
+- **Input**: Perspective images
+- **Output**: Binary masks (`<image>_mask.png`, RealityScan compatible)
 - **Detection Categories**:
-
-  - Persons (primary)### Setup
-
+  - Persons (primary)
   - Personal objects (bags, phones, backpacks, etc.)
-
-  - Animals (all COCO animal classes)1. **Clone/Download** this repository
-
+  - Animals (all COCO animal classes)
 - **Features**:
+  - YOLOv8 instance segmentation (5 model sizes: nano → xlarge)
+  - **ONNX Runtime Integration**: Lightweight, fast inference (CPU/GPU)
+  - **Smart Skipping**: Skips mask generation for images without detected objects
+  - **GPU acceleration** with CUDA support
 
-  - YOLOv8 instance segmentation (5 model sizes: nano → xlarge)2. **Create virtual environment**:
+## 🚀 Recent Updates (v1.0.0)
+
+- **Fixed SDK Extraction**: Resolved issues with Insta360 MediaSDK integration for reliable frame extraction.
+- **Optimized Masking**: Switched to ONNX Runtime for faster, lightweight masking.
+- **Fixed Mask Generation**: Corrected matrix shape handling for YOLOv8 ONNX output, ensuring accurate detection and mask creation.
+- **Smart Optimization**: Added pre-check to skip processing images with no target objects.
+
+---
+
+## Key Features
+
+- **Official Insta360 SDK integration** (bypasses Insta360 Studio)
+- **Dual-fisheye → equirectangular stitching**
+- **Compass-based camera positioning** (8-camera default)
+- **Multi-category detection**: Persons, personal objects, animals
+- **RealityScan-compatible binary masks**
+
+---
 
   - GPU acceleration (CUDA) with CPU fallback   ```powershell
 
