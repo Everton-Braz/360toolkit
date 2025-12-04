@@ -5,6 +5,7 @@ Coordinates the 3-stage pipeline: Extract → Split → Mask
 Uses QThread for non-blocking UI execution with progress signals.
 """
 
+import glob
 import logging
 import subprocess
 import time
@@ -805,7 +806,6 @@ class PipelineWorker(QThread):
                             ort_capi_path = internal_dir / 'onnxruntime' / 'capi'
                             if ort_capi_path.exists():
                                 logger.info(f"ONNX capi folder exists: {ort_capi_path}")
-                                import glob
                                 dlls = list(glob.glob(str(ort_capi_path / '*.dll')))
                                 logger.info(f"DLLs in capi: {[os.path.basename(d) for d in dlls]}")
                                 
