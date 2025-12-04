@@ -85,7 +85,7 @@ DEFAULT_SDK_PATH = _get_default_sdk_path()
 
 # Stitch type presets (MediaSDK 3.0.5)
 STITCH_TYPES = {
-    'aiflow': 'aistitch',      # AI Stitching (BEST quality, slowest)
+    'aiflow': 'aiflow',        # AI Stitching (BEST quality, slowest)
     'optflow': 'optflow',       # Optical Flow (HIGH quality, moderate speed)
     'dynamic': 'dynamicstitch', # Dynamic Stitching (BALANCED)
     'template': 'template'      # Template (FAST, lower quality)
@@ -378,16 +378,45 @@ class SDKExtractor:
                 if internal_dir.exists():
                     env['PATH'] = str(internal_dir) + os.pathsep + env.get('PATH', '')
                     logger.debug(f"Added {internal_dir} to SDK environment PATH")
-            
+                    
+                    # CRITICAL FIX: Copy missing dependencies from _internal to SDK bin
+                    # MediaSDKTest.exe might not respect PATH for some DLLs (DLL Hell)
+                    if sdk_cwd:
+                        try:
+                            import shutil
+                            # List of DLLs that often cause issues if not in the same folder
+                            # zlib.dll: often needed by opencv/libpng
+                            # libiomp5md.dll: Intel OpenMP
+                            # msvcp140.dll: VC++ runtime (sometimes version mismatch)
+                            # concrt140.dll: Concurrency runtime
+                            deps_to_copy = ['zlib.dll', 'libiomp5md.dll', 'concrt140.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll']
+                            
+                            for dep in deps_to_copy:
+                                src_dll = internal_dir / dep
+                                dst_dll = sdk_cwd / dep
+                                if src_dll.exists() and not dst_dll.exists():
+                                    logger.info(f"Copying missing dependency to SDK bin: {dep}")
+                                    shutil.copy2(src_dll, dst_dll)
+                        except Exception as e:
+                            logger.warning(f"Failed to copy dependencies: {e}")
+
             # DIAGNOSTIC: Log PATH and CWD
             logger.info(f"SDK CWD: {sdk_cwd}")
-            logger.info(f"SDK PATH: {env['PATH'][:500]}...") # Log first 500 chars
+            # Log full PATH to debug missing system paths
+            logger.info(f"SDK PATH: {env['PATH']}") 
             
             # Check for critical DLLs in SDK folder
             if sdk_cwd:
-                critical_dlls = ['MediaSDK.dll', 'opencv_world', 'cudart']
                 found_dlls = [f.name for f in sdk_cwd.glob('*.dll')]
                 logger.info(f"DLLs in SDK bin: {found_dlls}")
+                
+                # Check for nvcuda.dll in System32
+                sys32 = Path(os.environ.get('SystemRoot', 'C:\\Windows')) / 'System32'
+                nvcuda = sys32 / 'nvcuda.dll'
+                if nvcuda.exists():
+                    logger.info(f"Found nvcuda.dll at {nvcuda}")
+                else:
+                    logger.warning(f"nvcuda.dll NOT FOUND in {sys32} (GPU stitching may fail)")
 
             self._current_process = subprocess.Popen(
                 cmd,
@@ -690,23 +719,27 @@ class SDKExtractor:
         # Quality preset
         preset = QUALITY_PRESETS.get(quality, QUALITY_PRESETS['best'])
         
-        # Stitch type (SetStitchType)
-        stitch_type_value = STITCH_TYPES[preset['stitch_type']]
-        cmd.extend(["-stitch_type", stitch_type_value])
+        # Determine stitch type and check AI model availability
+        stitch_type_key = preset['stitch_type']
         
         # AI model (required for AI stitching - fallback to optflow if missing)
-        if preset['stitch_type'] == 'aiflow':
+        if stitch_type_key == 'aiflow':
             # Detect camera model from filename or use default
             ai_model = self.ai_model_v1  # Default to v1 (X3/X4)
             # TODO: Detect X5 camera and use ai_model_v2
             
             if ai_model.exists():
                 cmd.extend(["-ai_stitching_model", str(ai_model)])
+                logger.info(f"✓ Using AI Stitching with model: {ai_model.name}")
             else:
                 # Model missing - downgrade to optical flow
-                logger.warning("AI model not found - using Optical Flow instead")
-                stitch_type_value = STITCH_TYPES['optflow']
-                cmd.extend(["-stitch_type", stitch_type_value])
+                logger.warning("⚠ AI model not found - downgrading to Optical Flow stitching")
+                stitch_type_key = 'optflow'
+        
+        # Set stitch type (SetStitchType) - only once, after AI model check
+        stitch_type_value = STITCH_TYPES[stitch_type_key]
+        cmd.extend(["-stitch_type", stitch_type_value])
+        logger.info(f"→ SDK Stitch Method: {stitch_type_value.upper()}")
         
         # CRITICAL: Enable chromatic calibration for seamless blending
         if preset.get('enable_stitchfusion', False):

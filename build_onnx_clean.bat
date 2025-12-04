@@ -21,19 +21,31 @@ python --version
 echo.
 
 REM Ensure ONNX Runtime is installed
-echo Checking ONNX Runtime installation...
-python -c "import onnxruntime; print('ONNX Runtime version:', onnxruntime.__version__)"
+echo Checking ONNX Runtime installation (GPU build)...
+python -c "import onnxruntime as ort, sys; print('ONNX Runtime version:', ort.__version__); print('Providers:', ort.get_available_providers()); sys.exit(0 if 'CUDAExecutionProvider' in ort.get_available_providers() else 1)"
+set GPU_PROVIDER_STATUS=%ERRORLEVEL%
+if "%GPU_PROVIDER_STATUS%"=="0" goto HAVE_CUDA
+
+echo.
+echo Installing ONNX Runtime GPU (CUDA-enabled)...
+pip install --upgrade onnxruntime-gpu==1.23.2
 if errorlevel 1 (
-    echo.
-    echo ERROR: ONNX Runtime import failed!
-    echo Installing ONNX Runtime...
-    pip install onnxruntime
-    if errorlevel 1 (
-        echo ERROR: Installation failed
-        pause
-        exit /b 1
-    )
+    echo ERROR: Installation failed
+    pause
+    exit /b 1
 )
+
+echo.
+echo Verifying GPU-enabled ONNX Runtime...
+python -c "import onnxruntime as ort, sys; print('ONNX Runtime version:', ort.__version__); print('Providers:', ort.get_available_providers()); sys.exit(0 if 'CUDAExecutionProvider' in ort.get_available_providers() else 1)"
+set GPU_PROVIDER_STATUS=%ERRORLEVEL%
+if "%GPU_PROVIDER_STATUS%"=="0" goto HAVE_CUDA
+
+echo ERROR: CUDAExecutionProvider still unavailable. Check CUDA Toolkit installation.
+pause
+exit /b 1
+
+:HAVE_CUDA
 
 echo.
 echo Verifying ONNX Runtime DLLs...

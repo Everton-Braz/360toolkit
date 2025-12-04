@@ -54,7 +54,7 @@ Implemented full integration with Insta360 official MediaSDK 3.0.5 as the **PRIM
 - `-image_sequence_dir`: Output directory
 - `-image_type`: jpg or png
 - `-export_frame_indices`: Comma-separated frame indices (e.g., "0,24,48,72")
-- `-stitch_type`: aistitch/optflow/dynamicstitch/template
+- `-stitch_type`: aiflow/optflow/dynamicstitch/template
 - `-ai_stitching_model`: Path to AI model file
 - `-enable_stitchfusion`: **CRITICAL** - Enables chromatic calibration
 - `-enable_flowstate`: Stabilization
@@ -189,7 +189,7 @@ DEFAULT_EXTRACTION_METHOD = 'sdk_stitching'
    - Reads video metadata (FPS, duration, resolution)
    - Calculates frame indices: [0, 24, 48, 72, ...] for 1 FPS @ 24fps video
    - Executes MediaSDK command with:
-     * AI stitching (`-stitch_type aistitch`)
+    * AI stitching (`-stitch_type aiflow`)
      * Chromatic calibration (`-enable_stitchfusion`)
      * Stabilization, Color Plus, Denoise, Defringe
      * 8K output (`-output_size 7680x3840`)
@@ -241,7 +241,7 @@ MediaSDKTest.exe \
   -image_sequence_dir "output/stage1_frames" \
   -image_type jpg \
   -export_frame_indices "0,24,48,72,96,120,144,168,192,216" \
-  -stitch_type aistitch \
+  -stitch_type aiflow \
   -ai_stitching_model "data/ai_stitch_model_v1.ins" \
   -enable_stitchfusion \
   -enable_flowstate \

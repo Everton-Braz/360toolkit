@@ -21,7 +21,8 @@ from src.pipeline.batch_orchestrator import BatchOrchestrator
 from src.config.defaults import (
     APP_NAME, APP_VERSION,
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
-    EXTRACTION_METHODS, TRANSFORM_TYPES, YOLOV8_MODELS
+    EXTRACTION_METHODS, TRANSFORM_TYPES, YOLOV8_MODELS,
+    DEFAULT_SDK_QUALITY
 )
 
 logger = logging.getLogger(__name__)
@@ -350,10 +351,13 @@ class MainWindow(QMainWindow):
         self.sdk_quality_label = QLabel("SDK Quality:")
         sdk_quality_layout.addWidget(self.sdk_quality_label)
         self.sdk_quality_combo = QComboBox()
-        self.sdk_quality_combo.addItem("Draft (Fast)", "draft")
-        self.sdk_quality_combo.addItem("Good (Balanced)", "good")
-        self.sdk_quality_combo.addItem("Best (Highest Quality)", "best")
-        self.sdk_quality_combo.setCurrentIndex(1)  # Default to "Good"
+        # Use SDK_QUALITY_OPTIONS from config (now includes method names)
+        from src.config.defaults import SDK_QUALITY_OPTIONS
+        for key, label in SDK_QUALITY_OPTIONS.items():
+            self.sdk_quality_combo.addItem(label, key)
+        default_quality_index = self.sdk_quality_combo.findData(DEFAULT_SDK_QUALITY)
+        if default_quality_index >= 0:
+            self.sdk_quality_combo.setCurrentIndex(default_quality_index)
         sdk_quality_layout.addWidget(self.sdk_quality_combo)
         sdk_quality_layout.addStretch()
         extract_layout.addWidget(self.sdk_quality_widget)
@@ -728,7 +732,7 @@ class MainWindow(QMainWindow):
     
     def analyze_video_file(self):
         """Analyze video file and display metadata"""
-        from ..extraction import FrameExtractor
+        from src.extraction import FrameExtractor
         
         input_file = self.input_file_edit.text()
         if not input_file or not Path(input_file).exists():
@@ -883,7 +887,7 @@ class MainWindow(QMainWindow):
             return
         
         # Auto-discover Stage 1 output
-        from src.pipeline.batch_orchestrator import PipelineWorker
+        from pipeline.batch_orchestrator import PipelineWorker
         worker = PipelineWorker({})  # Dummy worker just for discovery method
         
         stage1_folder = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
@@ -942,7 +946,7 @@ class MainWindow(QMainWindow):
             return
         
         # Auto-discover Stage 2 output
-        from src.pipeline.batch_orchestrator import PipelineWorker
+        from pipeline.batch_orchestrator import PipelineWorker
         worker = PipelineWorker({})  # Dummy worker just for discovery method
         
         stage2_folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)

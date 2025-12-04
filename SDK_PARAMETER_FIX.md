@@ -140,7 +140,7 @@ MediaSDKTest.exe
   -image_sequence_dir output/stage1_frames
   -image_type png                                    # ✅ FROM UI
   -export_frame_indices 0,24                         # ✅ ONLY 2 FRAMES (0-2s)
-  -stitch_type aistitch                              # ✅ BEST QUALITY
+  -stitch_type aiflow                                # ✅ BEST QUALITY
   -ai_stitching_model ai_stitcher_model_v1.ins      # ✅ AI MODEL
   -enable_stitchfusion                               # ✅ SEAMLESS
   -enable_flowstate                                  # ✅ STABILIZATION
@@ -301,7 +301,7 @@ Result: 24 frames extracted (1 every 2 seconds)
 - [ ] Run app with time range 0-2s → Verify only 2 frames extracted
 - [ ] Run app with 4K resolution → Verify `-output_size 3840x1920` in command
 - [ ] Run app with PNG format → Verify `-image_type png` in command
-- [ ] Run app with Best quality → Verify `-stitch_type aistitch` in command
+- [ ] Run app with Best quality → Verify `-stitch_type aiflow` in command
 - [ ] Run app with Good quality → Verify `-stitch_type optflow` in command
 - [ ] Run app with Draft quality → Verify `-stitch_type template` in command
 - [ ] Check extracted frames have correct resolution

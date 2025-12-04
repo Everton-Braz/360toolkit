@@ -13,8 +13,12 @@ FPS_MIN = 0.1
 FPS_MAX = 30.0
 
 # SDK quality settings
-SDK_QUALITY_OPTIONS = ['draft', 'good', 'best']
-DEFAULT_SDK_QUALITY = 'good'
+SDK_QUALITY_OPTIONS = {
+    'best': 'Best (AI Stitching - aiflow)',
+    'good': 'Good (Optical Flow - optflow)', 
+    'draft': 'Draft (Template - template)'
+}
+DEFAULT_SDK_QUALITY = 'best'
 
 # Extraction methods (SDK is PRIMARY - Best Quality)
 # OpenCV methods removed for size optimization - use FFmpeg or SDK

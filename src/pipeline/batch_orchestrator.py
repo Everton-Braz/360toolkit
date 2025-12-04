@@ -244,6 +244,16 @@ class PipelineWorker(QThread):
                     # SDK extraction parameters
                     quality = self.config.get('sdk_quality', 'best')  # best/good/draft
                     output_format = self.config.get('output_format', 'jpg')  # jpg/png
+
+                    quality_descriptions = {
+                        'best': 'AI Stitching (maximum quality)',
+                        'good': 'Optical Flow (balanced)',
+                        'draft': 'Template (fast preview)'
+                    }
+                    logger.info(
+                        f"Using SDK quality preset: {quality.upper()} - "
+                        f"{quality_descriptions.get(quality, 'custom preset')}"
+                    )
                     
                     # Resolution mapping
                     resolution_map = {
