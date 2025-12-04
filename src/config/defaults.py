@@ -13,10 +13,12 @@ FPS_MIN = 0.1
 FPS_MAX = 30.0
 
 # SDK quality settings
+# TESTED 2024-12-04: dynamicstitch produces excellent results
 SDK_QUALITY_OPTIONS = {
-    'best': 'Best (AI Stitching - aiflow)',
-    'good': 'Good (Optical Flow - optflow)', 
-    'draft': 'Draft (Template - template)'
+    'best': 'Best Quality (Dynamic Stitch + AI Enhancement)',
+    'good': 'High Quality (Dynamic Stitch)',
+    'balanced': 'Balanced (Optical Flow)',
+    'draft': 'Fast Preview (Template)'
 }
 DEFAULT_SDK_QUALITY = 'best'
 

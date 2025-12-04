@@ -4,11 +4,7 @@
 
 **360toolkit** is a fully portable desktop application that combines frame extraction from Insta360 cameras with advanced perspective splitting and AI masking for professional photogrammetry workflows.
 
-
-
 ## 🎯 Three-Stage Pipeline
-
-**360toolkit** combines two specialized applications into one streamlined workflow:
 
 `EXTRACT FRAMES (Insta360 SDK)` → `SPLIT PERSPECTIVES (Equirectangular to Pinhole)` → `AI MASKING (YOLOv8)`
 
@@ -26,7 +22,11 @@
   - Time range selection (start/end in seconds)
   - Resolution options: Original, 8K, 6K, 4K, 2K
   - Metadata preservation (camera info, NO GPS/GYRO)
-  - AI stitching quality modes: Draft, Good, Best
+  - **Quality Presets**:
+    - **Best Quality**: Dynamic Stitch + AI Enhancement (v2 model)
+    - **High Quality**: Dynamic Stitch + AI Enhancement (v1 model)
+    - **Balanced**: Optical Flow stitching
+    - **Fast Preview**: Template stitching
 
 ### **Stage 2: Perspective Splitting** 🔄
 
@@ -56,547 +56,255 @@
   - Animals (all COCO animal classes)
 - **Features**:
   - YOLOv8 instance segmentation (5 model sizes: nano → xlarge)
-  - **ONNX Runtime Integration**: Lightweight, fast inference (CPU/GPU)
+  - **ONNX Runtime Integration**: Lightweight, fast CPU/GPU inference
   - **Smart Skipping**: Skips mask generation for images without detected objects
-  - **GPU acceleration** with CUDA support
-
-## 🚀 Recent Updates (v1.0.0)
-
-- **Fixed SDK Extraction**: Resolved issues with Insta360 MediaSDK integration for reliable frame extraction.
-- **Optimized Masking**: Switched to ONNX Runtime for faster, lightweight masking.
-- **Fixed Mask Generation**: Corrected matrix shape handling for YOLOv8 ONNX output, ensuring accurate detection and mask creation.
-- **Smart Optimization**: Added pre-check to skip processing images with no target objects.
+  - Configurable confidence threshold
 
 ---
 
-## Key Features
+## 🚀 Recent Updates (v1.1.0)
 
-- **Official Insta360 SDK integration** (bypasses Insta360 Studio)
-- **Dual-fisheye → equirectangular stitching**
-- **Compass-based camera positioning** (8-camera default)
-- **Multi-category detection**: Persons, personal objects, animals
-- **RealityScan-compatible binary masks**
+- **Fixed SDK Stitching Quality**: Corrected stitch type mapping - now uses `dynamicstitch` for best quality output matching Insta360 Studio
+- **Professional Quality Presets**: Renamed SDK options to clear, professional labels
+- **AI Model v2 Support**: Best quality preset now uses AI stitcher model v2 for superior blending
+- **Fixed ONNX Model Compatibility**: Re-exported YOLOv8 model with opset 17 for onnxruntime 1.20.1 compatibility
+- **Optimized Masking Pipeline**: ONNX-based inference for lightweight, fast processing without PyTorch dependency
 
 ---
 
-  - GPU acceleration (CUDA) with CPU fallback   ```powershell
-
-  - Smart mask skipping (only create masks for detected objects)   cd C:\Users\User\Documents\APLICATIVOS\360ToolKit
-
-  - Multi-category selection UI (checkboxes)   python -m venv venv
-
-  - Batch processing with progress tracking   venv\Scripts\activate
-
-- **Mask Format**: Binary (0 = mask/remove, 255 = keep/valid) - RealityScan compatible   ```
-
-
-
-## 📦 Installation3. **Install dependencies**:
-
-   ```powershell
+## 📦 Installation
 
 ### Option 1: Portable Executable (Recommended)
 
-**No installation required!** Download `360toolkit-FULL-v1.0.zip` and extract. Works on any Windows 10/11 machine with NVIDIA GPU.
+**No installation required!** Download `360ToolkitGS-ONNX.zip` and extract. Works on any Windows 10/11 machine.
 
+```powershell
+# Extract and run
+.\360ToolkitGS-ONNX.exe
+```
 
+**Requirements**:
+- Windows 10/11 64-bit
+- 4 GB free disk space (ONNX version)
+- Optional: NVIDIA GPU for faster masking
 
-```powershell4. **For GPU support** (recommended):
-
-# Extract and run   ```powershell
-
-.\360ToolkitGS-FULL.exe   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-
-```   ```
-
-
-
-**Requirements**:5. **Verify installation**:
-
-- Windows 10/11 64-bit   ```powershell
-
-- NVIDIA GPU (with driver installed)   python test_setup.py
-
-- 20 GB free disk space   ```
-
-
-
-### Option 2: Development Setup---
+### Option 2: Development Setup
 
 Clone repository and set up Python environment:
 
-## Quick Start
-
 ```bash
+git clone https://github.com/Everton-Braz/360toolkit.git
+cd 360toolkit
 
-git clone https://github.com/Everton-Braz/360toolkit.git### Run the Application
+# Create virtual environment
+python -m venv .venv
+.venv\Scripts\activate
 
-cd 360toolkit```powershell
+# Install dependencies
+pip install -r requirements.txt
 
-python src/main.py
-
-# Create virtual environment```
-
-python -m venv venv
-
-venv\Scripts\activate### Basic Workflow
-
-
-
-# Install dependencies1. **Stage 1**: Load `.INSV` file → Set FPS (e.g., 1.0) → Extract equirectangular frames
-
-pip install -r requirements.txt2. **Stage 2**: Configure compass (8 cameras, 110° FOV) → Split to perspectives
-
-3. **Stage 3**: Enable categories (persons, objects, animals) → Generate masks
-
-# Run application4. **Click "Start Pipeline"** → All stages run automatically
-
-python src/main.py
-
-```### Output Structure
-
+# Run application
+python run_app.py
 ```
 
-**Requirements**:output/
-
-- Python 3.10+├── frames/              # Stage 1: Equirectangular images
-
-- PyTorch 2.7.1+cu118 (GPU version)├── perspectives/        # Stage 2: Camera views (8 per frame)
-
-- Ultralytics YOLOv8└── masks/              # Stage 3: Binary masks (*_mask.png)
-
-- PyQt6```
-
+**Requirements**:
+- Python 3.10+
+- ONNX Runtime 1.20+ (CPU or GPU)
+- PyQt6
 - OpenCV, NumPy
+- Insta360 MediaSDK 3.0.5
 
-- Insta360 MediaSDK 3.0.5---
-
-
+---
 
 ## 🚀 Quick Start
 
 ### Using the Portable Application
 
-1. Launch `360ToolkitGS-FULL.exe`
+1. Launch `360ToolkitGS-ONNX.exe`
 2. **Stage 1**: Select `.INSV`/`.mp4` file, configure extraction settings, click "Extract"
 3. **Stage 2**: Adjust compass settings, preview splits, click "Split"
 4. **Stage 3**: Enable masking categories, click "Generate Masks"
 5. Output saved to configured output folder
 
-## Project Structure
+### Basic Workflow
+
+1. **Stage 1**: Load `.INSV` file → Set FPS (e.g., 1.0) → Select quality preset → Extract
+2. **Stage 2**: Configure compass (8 cameras, 110° FOV) → Split to perspectives
+3. **Stage 3**: Enable categories (persons, objects, animals) → Generate masks
+4. **Click "Start Pipeline"** → All stages run automatically
+
+### Output Structure
+
+```
+output/
+├── frames/              # Stage 1: Equirectangular images
+├── perspectives/        # Stage 2: Camera views (8 per frame)
+└── masks/              # Stage 3: Binary masks (*_mask.png)
+```
+
+---
+
+## 📁 Project Structure
 
 ```
 360toolkit/
 ├── src/
-│   ├── extraction/      # Stage 1: Frame extraction
-│   ├── transforms/      # Stage 2: E2P, E2C engines
-│   ├── masking/         # Stage 3: Multi-category detection
-
-│   ├── ui/             # PyQt6 interface
-
-### Using Python│   ├── pipeline/       # Batch orchestration
-
-```python│   └── config/         # Settings & presets
-
-from src.pipeline.batch_orchestrator import PipelineWorker├── specs/              # UI & architecture specs
-
-├── tests/              # Unit & integration tests
-
-# Configure pipeline├── Original_Projects/  # Source reference (read-only)
-
-config = {└── requirements.txt
-
-    'input_file': 'video.insv',```
-
-    'output_dir': 'output/',
-
-    'fps': 1.0,---
-
-    'split_count': 8,
-
-    'h_fov': 110,## Configuration
-
-    'masking_categories': {
-
-        'persons': True,### Camera Presets
-
-        'personal_objects': True,- **8-Camera Horizontal**: Default (110° FOV, 0° pitch)
-
-        'animals': True- **16-Camera Dome**: 8 main + 4 up + 4 down
-
-    }- **4-Cardinal**: N/S/E/W views (90° FOV)
-
-}- **Custom**: Define your own via JSON
-
-
-
-# Run full pipelineLocated in: `src/config/camera_presets.json`
-
-worker = PipelineWorker(config)
-
-worker.start()### Masking Categories
-
-```Edit in UI or `src/config/defaults.py`:
-
-```python
-
-## 📁 Project StructureMASKING_CATEGORIES = {
-
-    'persons': True,
-
-```    'personal_objects': True,  # backpack, phone, etc.
-
-360ToolKit/    'animals': True
-
-├── src/}
-
-│   ├── extraction/           # Stage 1: Frame extraction```
-
+│   ├── extraction/           # Stage 1: Frame extraction
 │   │   ├── sdk_extractor.py
-
-│   │   ├── ffmpeg_extractor.py---
-
+│   │   ├── ffmpeg_extractor.py
 │   │   └── frame_extractor.py
-
-│   ├── transforms/           # Stage 2: Perspective splitting## Advanced Usage
-
+│   ├── transforms/           # Stage 2: Perspective splitting
 │   │   ├── e2p_transform.py  (cached equirect→pinhole)
-
-│   │   ├── e2c_transform.py  (equirect→cubemap)### Stage-Only Processing
-
+│   │   ├── e2c_transform.py  (equirect→cubemap)
 │   │   └── metadata_handler.py
-
-│   ├── masking/              # Stage 3: AI maskingRun individual stages:
-
-│   │   ├── multi_category_masker.py```python
-
-│   │   └── category_config.py# Stage 1 only: Extract frames
-
-│   ├── ui/                   # PyQt6 interfacepython src/extraction/extract_frames.py --input video.insv --output frames/ --fps 1.0
-
+│   ├── masking/              # Stage 3: AI masking
+│   │   ├── multi_category_masker.py
+│   │   └── category_config.py
+│   ├── ui/                   # PyQt6 interface
 │   │   ├── main_window.py
-
-│   │   └── widgets/# Stage 2 only: Split perspectives
-
-│   ├── pipeline/             # Batch orchestrationpython src/transforms/split_perspectives.py --input frames/ --output perspectives/
-
+│   │   └── widgets/
+│   ├── pipeline/             # Batch orchestration
 │   │   └── batch_orchestrator.py
-
-│   ├── config/               # Configuration# Stage 3 only: Generate masks
-
-│   │   ├── defaults.pypython src/masking/batch_mask.py --input perspectives/ --output masks/
-
-│   │   └── camera_presets.json```
-
-│   └── main.py              # Application entry point
+│   ├── config/               # Configuration
+│   │   ├── defaults.py
+│   │   └── camera_presets.json
+│   └── main.py               # Application entry point
 ├── specs/                    # Specification documents
 ├── tests/                    # Unit and integration tests
-├── runtime_hook_pytorch.py   # PyInstaller runtime hook (DLL pre-loading)
 ├── runtime_hook_sdk.py       # SDK environment setup
-├── 360toolkit_FULL.spec      # PyInstaller spec (build config)
+├── runtime_hook_onnx.py      # ONNX runtime hook
+├── 360ToolkitGS-ONNX.spec    # PyInstaller spec (ONNX build)
 ├── requirements.txt
-├── README.md
-└── .gitignore
+└── README.md
 ```
-
-### Batch Processing via CLI
-
-```python
-from src.pipeline import BatchOrchestrator
-
-orchestrator = BatchOrchestrator()
-orchestrator.run_full_pipeline(
-    input_file='path/to/video.insv',
-    output_dir='path/to/output',
-    fps=1.0,
-
-    camera_preset='8-Camera Horizontal',
-
-## ⚙️ Configuration    masking_enabled=True
-
-)
-
-### Camera Presets```
-
-Predefined camera group configurations in `src/config/camera_presets.json`:
-
-- **8-Camera Horizontal**: 8 cameras in horizontal ring, 110° FOV (default)---
-
-- **4-Cardinal**: N/S/E/W positioning, 90° FOV
-
-- **16-Camera Dome**: 8 main + 4 up + 4 down## Performance Tips
-
-- **Custom**: User-defined via UI or JSON
-
-### Stage 1 (Extraction)
-
-### Extraction Settings- **SDK mode**: 3-5× faster than Insta360 Studio
-
-```python- Use `draft` quality for quick previews
-
-# src/config/defaults.py- Use `best` quality for final output
-
-DEFAULT_FPS = 1.0              # Frames per second (0.1-30)
-
-DEFAULT_H_FOV = 110            # Horizontal field of view (30-150°)### Stage 2 (Splitting)
-
-DEFAULT_SPLIT_COUNT = 8        # Cameras per ring- Transform cache reuses mappings (10× speedup)
-
-DEFAULT_OUTPUT_WIDTH = 1920    # Output image width- Process all cameras for one frame before moving to next
-
-DEFAULT_OUTPUT_HEIGHT = 1920   # Output image height- SSD recommended for temp storage
-
-DEFAULT_MODEL_SIZE = 'small'   # YOLOv8 model: nano|small|medium|large|xlarge
-
-DEFAULT_CONFIDENCE_THRESHOLD = 0.5### Stage 3 (Masking)
-
-DEFAULT_USE_GPU = True         # GPU acceleration- **GPU**: Small model = 0.5s/image, Medium = 1.0s/image
-
-```- **CPU**: Small model = 3s/image (fallback)
-
-- Batch size 4-8 for 8 GB VRAM
-
-## 🔧 Build from Source (PyInstaller)
 
 ---
 
-### Prerequisites
+## ⚙️ Configuration
 
-- Python 3.10.11
-- PyTorch 2.7.1+cu118 with CUDA 11.8
-- PyInstaller 6.16.0
-- Insta360 MediaSDK 3.0.5
+### SDK Quality Presets
 
-### Build Command
+| Preset | Stitch Type | AI Model | Speed | Quality |
+|--------|-------------|----------|-------|---------|
+| **Best Quality** | Dynamic Stitch | v2 | ~2.2s/frame | ★★★★★ |
+| **High Quality** | Dynamic Stitch | v1 | ~1.5s/frame | ★★★★☆ |
+| **Balanced** | Optical Flow | v1 | ~1.0s/frame | ★★★☆☆ |
+| **Fast Preview** | Template | None | ~0.5s/frame | ★★☆☆☆ |
 
-```powershell
-pyinstaller 360toolkit_FULL.spec --clean
+### Camera Presets
+
+Predefined camera group configurations in `src/config/camera_presets.json`:
+- **8-Camera Horizontal**: 8 cameras in horizontal ring, 110° FOV (default)
+- **4-Cardinal**: N/S/E/W positioning, 90° FOV
+- **16-Camera Dome**: 8 main + 4 up + 4 down
+- **Custom**: User-defined via UI or JSON
+
+### Masking Categories
+
+Edit in UI or `src/config/defaults.py`:
+```python
+MASKING_CATEGORIES = {
+    'persons': True,
+    'personal_objects': True,  # backpack, phone, suitcase, etc.
+    'animals': True            # COCO animal classes
+}
 ```
 
-## Troubleshooting
+---
 
-### GPU Not Detected
-
-```powershell
-# Check CUDA availability
-python -c "import torch; print(torch.cuda.is_available())"
-
-# Reinstall PyTorch with CUDA
-
-```pip uninstall torch torchvision
-
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-
-**Output**: `dist\360ToolkitGS-FULL\` (~9 GB)```
-
-
-
-**Key Build Features**:### Insta360 SDK Issues
-
-- ONE-DIR mode (required for PyTorch DLLs)- **Windows x64 only** (no macOS/Linux support)
-
-- MSVC Runtime DLL bundling (WinError 1114 fix)- Copy SDK DLLs from `Original_Projects/Extraction_Reference/sdk/`
-
-- CUDA DLL bundling (18 DLLs, ~2.7 GB)- Use FFmpeg fallback if SDK unavailable
-
-- Lazy import hooks (torch/ultralytics loaded only at runtime)
-
-- Runtime DLL pre-loading via `runtime_hook_pytorch.py`### Memory Issues
-
-- Reduce batch size in Stage 3 settings
-
-## 📊 Performance- Lower cache size in Settings → Performance
-
-- Process fewer frames per run
+## 📊 Performance
 
 ### Stage 1: Frame Extraction
-
-- **SDK Method**: ~3-5 seconds per frame (GPU-accelerated, best quality)---
-
+- **SDK Method**: ~1.5-2.5 seconds per frame (GPU-accelerated, best quality)
 - **FFmpeg Method**: ~1-2 seconds per frame (proven quality)
+- **OpenCV Method**: ~0.5-1 second per frame (basic, no stitching)
 
-- **OpenCV Method**: ~0.5-1 second per frame (basic, no stitching)## Testing
+### Stage 2: Perspective Splitting
+- **E2P Transform**: ~0.1-0.2 seconds per frame (with caching)
+- **E2C Transform**: ~0.15-0.3 seconds per frame
 
+### Stage 3: AI Masking (ONNX Runtime)
+- **CPU (i7/Ryzen 7)**: ~1-3 seconds per image
+- **GPU (CUDA)**: ~0.3-0.5 seconds per image
 
+---
 
-### Stage 2: Perspective Splitting### Run Tests
-
-- **E2P Transform**: ~0.1-0.2 seconds per frame (with caching)```powershell
-
-- **E2C Transform**: ~0.15-0.3 seconds per frame# Unit tests
-
-pytest tests/transforms/
-
-### Stage 3: AI Maskingpytest tests/masking/
-
-- **GPU (NVIDIA RTX 3070+)**: ~0.3-0.5 seconds per image
-
-- **GPU (NVIDIA RTX 4070+)**: ~0.2-0.3 seconds per image# Integration test
-
-- **CPU (i7/Ryzen 7)**: ~2-5 seconds per imagepytest tests/pipeline/test_full_workflow.py
-
-
-
-## 🔌 Integration with Photogrammetry Tools# Manual test
-
-python test_setup.py
-
-Output is compatible with:```
-
-- **RealityScan** (primary - uses mask format)
-
-- **Metashape**---
-
-- **RealityCapture**
-
-- **COLMAP**## Known Limitations
-
-- **CloudCompare**
-
-1. **Insta360 SDK**: Windows x64 only
-
-## 📝 Specifications2. **GPS/GYRO**: Not extracted (not needed for photogrammetry)
-
-3. **Large videos**: Recommend splitting videos > 10 minutes
-
-### Stage 1 Parameters4. **VRAM**: 8 GB minimum for medium model with batch size 4
-
-```
-
-fps_interval:     0.1 - 30.0 (frames per second)---
-
-output_format:    equirectangular | dual_fisheye
-
-resolution:       original | 8k (7680×3840) | 6k | 4k | 2k## Contributing
-
-quality:          draft | good | best
-
-output_format:    jpg | png1. Read `specs/ui_specification.md` for design guidelines
-
-```2. Follow spec-driven development approach
-
-3. Test with `pytest` before submitting
-
-### Stage 2 Parameters4. Preserve metadata chain (NO GPS/GYRO)
-
-```
-
-yaw:              -180 to +180° (camera horizontal rotation)---
-
-pitch:            -90 to +90° (camera vertical angle)
-
-roll:             -180 to +180° (camera rotation)## License
-
-h_fov:            30 to 150° (horizontal field of view)
-
-v_fov:            auto-calculated from h_fov and aspect ratio**Source Code**: See original project licenses
-
-split_count:      1 to 12 (cameras per ring)- Extraction Module: Original license applies
-
-cubemap_mode:     6-face | 8-tile- 360toFrame: Original license applies
-
-overlap:          0 to 50% (for seamless blending)
-
-```**This Integration**: MIT License
-
-
-
-### Stage 3 Parameters---
-
-```
-
-categories:       [person | personal_objects | animals] (multi-select)## Credits
-
-confidence:       0.0 to 1.0 (detection threshold)
-
-model_size:       nano | small | medium | large | xlarge**360FrameTools** unifies:
-
-use_gpu:          true | false (auto-detect CUDA)- **Frame Extraction**: Frame extraction from dual-fisheye cameras
-
-skip_existing:    true | false (skip if mask exists)- **360toFrame**: Perspective splitting with compass positioning
-
-```
-
-**Technologies**:
-
-## 🐛 Troubleshooting- PyQt6 (GUI)
-
-- Ultralytics YOLOv8 (AI masking)
-
-### GPU Not Detected- OpenCV (image processing)
-
-```- NumPy (transformations)
-
-Error: CUDA not available
-
-Solution: Install NVIDIA GPU driver (no CUDA toolkit needed with portable build)---
-
-```
-
-## Version History
-
-### Memory Issues
-
-```**v1.0.0** (Initial Release)
-
-Error: Out of memory during masking- Three-stage unified pipeline
-
-Solution: Reduce batch size in config or use smaller YOLOv8 model (nano/small)- Multi-category AI masking
-
-```- GPU acceleration
-
-- Interactive compass UI
+## 🐛 Troubleshooting
 
 ### SDK Not Found
-
 ```
 Error: Insta360 MediaSDK not detected
-
 Solution: Included in portable build; if building from source, ensure SDK at:
 C:\Users\[User]\Windows_CameraSDK-2.0.2-build1+MediaSDK-3.0.5-build1\
 ```
+
+### Memory Issues
+```
+Error: Out of memory during masking
+Solution: Use smaller YOLOv8 model (nano/small) or reduce batch size
+```
+
+### ONNX Model Errors
+```
+Error: Model opset version incompatible
+Solution: Re-export model with opset 17: ultralytics export yolov8m-seg.pt format=onnx opset=17
+```
+
+---
+
+## 🔧 Build from Source (PyInstaller)
+
+### Prerequisites
+- Python 3.10+
+- ONNX Runtime 1.20+
+- PyInstaller 6.16.0
+- Insta360 MediaSDK 3.0.5
+
+### Build Command (ONNX Version)
+```powershell
+pyinstaller 360ToolkitGS-ONNX.spec --clean
+```
+
+**Output**: `dist\360ToolkitGS-ONNX\` (~1.5 GB)
+
+---
+
+## 🔌 Integration with Photogrammetry Tools
+
+Output is compatible with:
+- **RealityScan** (primary - uses mask format)
+- **Metashape**
+- **RealityCapture**
+- **COLMAP**
+- **CloudCompare**
 
 ---
 
 ## ⚖️ Legal & Licensing
 
-**360ToolKit** is open-source software licensed under the [MIT License](LICENSE).
+**360toolkit** is open-source software licensed under the [MIT License](LICENSE).
 
-However, this software depends on the **Insta360 Camera SDK**, which is proprietary software owned by Arashi Vision Inc. (Insta360).
+This software depends on the **Insta360 Camera SDK**, which is proprietary software owned by Arashi Vision Inc. (Insta360).
 
-- **Source Code**: The source code of 360ToolKit is free and open.
-- **Binaries**: The compiled releases of 360ToolKit include the Insta360 SDK binaries, which are redistributed under the terms of the [Insta360 SDK End User License Agreement](https://www.insta360.com/support/supportcourse?post_id=20734).
-- **Trademarks**: "Insta360" is a trademark of Arashi Vision Inc. This project is an unofficial tool and is not endorsed by or affiliated with Insta360.
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open Pull Request
-
-## 📜 License
-
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+- **Source Code**: The source code of 360toolkit is free and open.
+- **Binaries**: Compiled releases include the Insta360 SDK binaries, redistributed under the [Insta360 SDK EULA](https://www.insta360.com/support/supportcourse?post_id=20734).
+- **Trademarks**: "Insta360" is a trademark of Arashi Vision Inc. This project is unofficial and not affiliated with Insta360.
 
 ### Insta360 SDK Notice
-This software uses the **Insta360 MediaSDK** for frame extraction. The SDK itself is **proprietary** and is NOT included in this source code repository.
+The **Insta360 MediaSDK** is **proprietary** and NOT included in this source code repository.
+- **For Users**: Pre-built releases include necessary SDK runtime files.
+- **For Developers**: Download the SDK from the [Insta360 Developer Portal](https://www.insta360.com/sdk/home).
 
-- **For Users**: The pre-built releases include the necessary SDK runtime files (allowed under SDK redistribution terms).
-- **For Developers**: If you wish to build this project from source, you must:
-  1. Download the MediaSDK from the [Insta360 Developer Portal](https://www.insta360.com/sdk/home).
-  2. Place the SDK files in a local directory.
-  3. Update the build configuration to point to your local SDK copy.
-
-**Note**: You are responsible for complying with the Insta360 SDK License Agreement when using or redistributing their software.
+---
 
 ## 🙏 Acknowledgments
 
 - **Insta360 MediaSDK 3.0.5**: Official stitching engine
 - **Ultralytics YOLOv8**: Instance segmentation
-- **PyTorch**: Deep learning framework
+- **ONNX Runtime**: Cross-platform inference
 - **PyQt6**: Desktop UI framework
+
+---
 
 ## 📞 Support
 
@@ -607,6 +315,6 @@ For issues, feature requests, or questions:
 
 ---
 
-**Version**: 1.0.0  
-**Last Updated**: November 10, 2025  
+**Version**: 1.1.0  
+**Last Updated**: December 2025  
 **Status**: Production Ready ✅
