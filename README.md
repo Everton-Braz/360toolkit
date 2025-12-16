@@ -22,14 +22,13 @@
 - **Output**: Equirectangular stitched panoramas (PNG/JPG)
 - **Methods**:
   - **Insta360 MediaSDK 3.0.5** (PRIMARY): GPU-accelerated AI stitching with seamless blending
-  - **FFmpeg**: Fallback dual-stream extraction
-  - **Dual-fisheye**: Raw lens images (no stitching)
-  - **OpenCV**: Basic frame-by-frame extraction
+  - **FFmpeg Stitched**: For pre-stitched MP4 files
+  - **FFmpeg Dual-Lens**: Extract both lenses separately
+  - **FFmpeg Single Lens**: Extract front or back fisheye only
 - **Features**:
   - Configurable FPS (0.1 - 30 frames/second)
   - Time range selection (start/end in seconds)
   - Resolution options: Original, 8K, 6K, 4K, 2K
-  - Metadata preservation (camera info, NO GPS/GYRO)
   - **Quality Presets**:
     - **Best Quality**: Dynamic Stitch + AI Enhancement (v2 model)
     - **High Quality**: Dynamic Stitch + AI Enhancement (v1 model)
@@ -51,8 +50,8 @@
   - **Real-time preview** with interactive compass widget
 - **Output Customization**:
   - Custom image dimensions
-  - Multiple format support
-  - EXIF metadata embedding (camera orientation)
+  - Multiple format support (PNG, JPEG, TIFF)
+  - Camera orientation data preserved in output
 
 ### **Stage 3: AI Masking** 🤖
 
@@ -224,8 +223,7 @@ MASKING_CATEGORIES = {
 
 ### Stage 1: Frame Extraction
 - **SDK Method**: ~1.5-2.5 seconds per frame (GPU-accelerated, best quality)
-- **FFmpeg Method**: ~1-2 seconds per frame (proven quality)
-- **OpenCV Method**: ~0.5-1 second per frame (basic, no stitching)
+- **FFmpeg Method**: ~1-2 seconds per frame (for pre-stitched files)
 
 ### Stage 2: Perspective Splitting
 - **E2P Transform**: ~0.1-0.2 seconds per frame (with caching)
@@ -277,14 +275,12 @@ pyinstaller 360ToolkitGS-ONNX.spec --clean
 
 ---
 
-## 🔌 Integration with Photogrammetry Tools
+## 🔌 Integration with Photogrammetry Software
 
-Output is compatible with:
-- **RealityScan** (primary - uses mask format)
-- **Metashape**
-- **RealityCapture**
+Output can be used with:
+- **RealityScan (RealityCapture)** - Primary target, uses mask format
+- **Metashape (Agisoft)**
 - **COLMAP**
-- **CloudCompare**
 
 ---
 
@@ -294,8 +290,8 @@ Output is compatible with:
 
 This software depends on the **Insta360 Camera SDK**, which is proprietary software owned by Arashi Vision Inc. (Insta360).
 
-- **Source Code**: The source code of 360toolkit is free and open.
-- **Binaries**: Compiled releases include the Insta360 SDK binaries, redistributed under the [Insta360 SDK EULA](https://www.insta360.com/support/supportcourse?post_id=20734).
+- **360toolkit Source Code**: Free and open-source under MIT License.
+- **Insta360 SDK**: Proprietary software, free for development use but NOT open-source. Redistributed under the [Insta360 SDK EULA](https://www.insta360.com/support/supportcourse?post_id=20734).
 - **Trademarks**: "Insta360" is a trademark of Arashi Vision Inc. This project is unofficial and not affiliated with Insta360.
 
 ### Insta360 SDK Notice
