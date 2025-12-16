@@ -1,17 +1,25 @@
 # 360toolkit
 
+![360toolkit User Interface](resources/images/ui_screenshot.png)
+
 **Unified photogrammetry preprocessing pipeline**: Extract frames from Insta360 cameras → Split to perspective views → Generate AI masks
 
-**360toolkit** is a fully portable desktop application that combines frame extraction from Insta360 cameras with advanced perspective splitting and AI masking for professional photogrammetry workflows.
+## 📥 Download
+
+**[⬇️ Download 360toolkit v1.1.0 (Windows)](https://drive.google.com/file/d/1jIp3KkJQMqk_SDgJG5MM9jtnQN3jm51t/view?usp=sharing)** - Portable executable, no installation required (~5 GB)
+
+---
+
+**360toolkit** is a desktop application that combines frame extraction from Insta360 cameras with perspective splitting and AI masking for professional photogrammetry workflows.
 
 ## 🎯 Three-Stage Pipeline
 
-`EXTRACT FRAMES (Insta360 SDK)` → `SPLIT PERSPECTIVES (Equirectangular to Pinhole)` → `AI MASKING (YOLOv8)`
+`EXTRACT FRAMES (Insta360 SDK, FFMPEG)` → `SPLIT PERSPECTIVES (Equirectangular to Pinhole)` → `AI MASKING (YOLOv8)`
 
 ### **Stage 1: Frame Extraction** 🎬
 
 - **Input**: `.INSV` (Insta360 native) or `.mp4` files
-- **Output**: Equirectangular stitched panoramas (PNG/JPG/TIFF)
+- **Output**: Equirectangular stitched panoramas (PNG/JPG)
 - **Methods**:
   - **Insta360 MediaSDK 3.0.5** (PRIMARY): GPU-accelerated AI stitching with seamless blending
   - **FFmpeg**: Fallback dual-stream extraction
@@ -137,9 +145,9 @@ python run_app.py
 
 ```
 output/
-├── frames/              # Stage 1: Equirectangular images
-├── perspectives/        # Stage 2: Camera views (8 per frame)
-└── masks/              # Stage 3: Binary masks (*_mask.png)
+├── stage1_frames/       # Stage 1: Equirectangular images
+├── stage2_perspectives/ # Stage 2: Camera views (8 per frame)
+└── stage3_masks/        # Stage 3: Binary masks (*_mask.png)
 ```
 
 ---
@@ -150,31 +158,31 @@ output/
 360toolkit/
 ├── src/
 │   ├── extraction/           # Stage 1: Frame extraction
-│   │   ├── sdk_extractor.py
-│   │   ├── ffmpeg_extractor.py
-│   │   └── frame_extractor.py
+│   │   ├── sdk_extractor.py  # Insta360 MediaSDK integration
+│   │   └── frame_extractor.py # FFmpeg fallback
 │   ├── transforms/           # Stage 2: Perspective splitting
-│   │   ├── e2p_transform.py  (cached equirect→pinhole)
-│   │   ├── e2c_transform.py  (equirect→cubemap)
-│   │   └── metadata_handler.py
+│   │   ├── e2p_transform.py  # Equirect → Pinhole (cached)
+│   │   └── e2c_transform.py  # Equirect → Cubemap
 │   ├── masking/              # Stage 3: AI masking
-│   │   ├── multi_category_masker.py
-│   │   └── category_config.py
-│   ├── ui/                   # PyQt6 interface
-│   │   ├── main_window.py
-│   │   └── widgets/
+│   │   └── onnx_masker.py    # ONNX Runtime YOLOv8
 │   ├── pipeline/             # Batch orchestration
-│   │   └── batch_orchestrator.py
+│   │   ├── batch_orchestrator.py
+│   │   └── metadata_handler.py
+│   ├── ui/                   # PyQt6 interface
+│   │   └── main_window.py
 │   ├── config/               # Configuration
-│   │   ├── defaults.py
-│   │   └── camera_presets.json
+│   │   └── defaults.py
 │   └── main.py               # Application entry point
-├── specs/                    # Specification documents
-├── tests/                    # Unit and integration tests
-├── runtime_hook_sdk.py       # SDK environment setup
+├── resources/                # Images and assets
+├── scripts/                  # Build scripts
+├── specs/                    # UI specifications
+├── tests/                    # Unit tests
 ├── runtime_hook_onnx.py      # ONNX runtime hook
-├── 360ToolkitGS-ONNX.spec    # PyInstaller spec (ONNX build)
+├── runtime_hook_sdk.py       # SDK environment setup
+├── 360ToolkitGS-ONNX.spec    # PyInstaller build spec
+├── yolov8m-seg.onnx          # AI model (medium)
 ├── requirements.txt
+├── LICENSE
 └── README.md
 ```
 

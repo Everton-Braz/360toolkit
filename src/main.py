@@ -23,7 +23,7 @@ def main():
     """Main application entry point"""
     
     logger.info("=" * 60)
-    logger.info("Starting 360toolkit v1.0.0")
+    logger.info("Starting 360toolkit v1.1.0")
     logger.info("=" * 60)
     
     try:
