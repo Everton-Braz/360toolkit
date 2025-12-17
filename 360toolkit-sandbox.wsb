@@ -1,0 +1,11 @@
+<Configuration>
+  <VGpu>Enable</VGpu>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\User\Documents\APLICATIVOS\360ToolKit\dist\360ToolkitGS-ONNX</HostFolder>
+      <SandboxFolder>C:\360toolkit</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <MemoryInMB>8192</MemoryInMB>
+</Configuration>

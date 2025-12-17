@@ -9,11 +9,58 @@ Based on Extraction Module but adapted for unified pipeline.
 import cv2
 import subprocess
 import logging
+import sys
 from pathlib import Path
 from typing import Dict, Optional, Callable, List
 import shutil
 
 logger = logging.getLogger(__name__)
+
+
+def _find_bundled_ffmpeg() -> Optional[str]:
+    """Find FFmpeg in bundled location (for PyInstaller builds)."""
+    if getattr(sys, 'frozen', False):
+        # Running as compiled executable
+        base_path = Path(sys._MEIPASS)
+        
+        # Check in ffmpeg subfolder
+        bundled_ffmpeg = base_path / 'ffmpeg' / 'ffmpeg.exe'
+        if bundled_ffmpeg.exists():
+            return str(bundled_ffmpeg)
+        
+        # Check in root of _internal
+        internal_ffmpeg = base_path / 'ffmpeg.exe'
+        if internal_ffmpeg.exists():
+            return str(internal_ffmpeg)
+    else:
+        # Running from source - check local ffmpeg folder
+        source_path = Path(__file__).parent.parent.parent
+        local_ffmpeg = source_path / 'ffmpeg' / 'ffmpeg.exe'
+        if local_ffmpeg.exists():
+            return str(local_ffmpeg)
+    
+    return None
+
+
+def _find_bundled_ffprobe() -> Optional[str]:
+    """Find FFprobe in bundled location (for PyInstaller builds)."""
+    if getattr(sys, 'frozen', False):
+        base_path = Path(sys._MEIPASS)
+        
+        bundled_ffprobe = base_path / 'ffmpeg' / 'ffprobe.exe'
+        if bundled_ffprobe.exists():
+            return str(bundled_ffprobe)
+        
+        internal_ffprobe = base_path / 'ffprobe.exe'
+        if internal_ffprobe.exists():
+            return str(internal_ffprobe)
+    else:
+        source_path = Path(__file__).parent.parent.parent
+        local_ffprobe = source_path / 'ffmpeg' / 'ffprobe.exe'
+        if local_ffprobe.exists():
+            return str(local_ffprobe)
+    
+    return None
 
 
 class FrameExtractor:
@@ -31,6 +78,7 @@ class FrameExtractor:
             ffmpeg_path: Path to FFmpeg executable (auto-detect if None)
         """
         self.ffmpeg_path = ffmpeg_path or self._find_ffmpeg()
+        self.ffprobe_path = self._find_ffprobe()
         self.has_ffmpeg = self.ffmpeg_path is not None
         self.is_cancelled = False
         
@@ -38,11 +86,37 @@ class FrameExtractor:
             logger.info(f"FFmpeg found at: {self.ffmpeg_path}")
         else:
             logger.error("FFmpeg not found - FFmpeg is REQUIRED for frame extraction")
+        
+        if self.ffprobe_path:
+            logger.info(f"FFprobe found at: {self.ffprobe_path}")
     
     def _find_ffmpeg(self) -> Optional[str]:
-        """Auto-detect FFmpeg installation"""
+        """Auto-detect FFmpeg installation - check bundled first, then system PATH."""
+        # Check bundled location first
+        bundled = _find_bundled_ffmpeg()
+        if bundled:
+            logger.info(f"Found bundled FFmpeg at: {bundled}")
+            return bundled
+        
+        # Fallback to system PATH
         ffmpeg_path = shutil.which('ffmpeg')
+        if ffmpeg_path:
+            logger.info(f"Found system FFmpeg at: {ffmpeg_path}")
         return ffmpeg_path
+    
+    def _find_ffprobe(self) -> Optional[str]:
+        """Auto-detect FFprobe installation - check bundled first, then system PATH."""
+        # Check bundled location first
+        bundled = _find_bundled_ffprobe()
+        if bundled:
+            logger.info(f"Found bundled FFprobe at: {bundled}")
+            return bundled
+        
+        # Fallback to system PATH
+        ffprobe_path = shutil.which('ffprobe')
+        if ffprobe_path:
+            logger.info(f"Found system FFprobe at: {ffprobe_path}")
+        return ffprobe_path
     
     def cancel(self):
         """Cancel ongoing extraction operation"""

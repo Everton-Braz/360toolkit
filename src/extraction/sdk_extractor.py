@@ -299,10 +299,28 @@ class SDKExtractor:
             logger.warning("AI stitch model v1 not found - will use Optical Flow stitching")
             # SDK is still available, just without AI stitching
         
-        # TODO: Check GPU availability (CUDA/Vulkan)
-        # MediaSDK 3.x REQUIRES GPU
+        # Check GPU availability (CUDA required for best/good presets)
+        self._gpu_available = self._check_gpu_available()
         
         return True
+    
+    def _check_gpu_available(self) -> bool:
+        """Check if NVIDIA GPU is available for SDK stitching."""
+        # Check for nvcuda.dll in System32
+        sys32 = Path(os.environ.get('SystemRoot', 'C:\\Windows')) / 'System32'
+        nvcuda = sys32 / 'nvcuda.dll'
+        if nvcuda.exists():
+            logger.info(f"[OK] GPU available: Found nvcuda.dll at {nvcuda}")
+            return True
+        
+        # Check via CUDA environment variable
+        cuda_path = os.environ.get('CUDA_PATH')
+        if cuda_path and Path(cuda_path).exists():
+            logger.info(f"[OK] GPU available: Found CUDA at {cuda_path}")
+            return True
+        
+        logger.warning("[WARNING] GPU not available - nvcuda.dll not found. SDK will use CPU fallback (template stitching).")
+        return False
     
     def is_available(self) -> bool:
         """Check if SDK is available for use."""
@@ -344,6 +362,12 @@ class SDKExtractor:
         """
         if not self.available:
             raise RuntimeError("MediaSDK not available - use FFmpeg fallback")
+        
+        # Check GPU availability and adjust quality preset if needed
+        if not self._gpu_available and quality in ['best', 'good', 'balanced']:
+            logger.warning(f"[GPU FALLBACK] '{quality}' preset requires GPU. Falling back to 'draft' (template stitching).")
+            logger.warning("[GPU FALLBACK] For best quality, run on a PC with NVIDIA GPU.")
+            quality = 'draft'
         
         input_path = Path(input_path)
         output_dir = Path(output_dir)
