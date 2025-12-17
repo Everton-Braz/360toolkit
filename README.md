@@ -10,7 +10,7 @@
 
 ### 🛒 Pre-Built Binary (Gumroad)
 
-**[⬇️ Get 360toolkit v1.1.0 (Windows) - $15](https://YOUR_GUMROAD_LINK_HERE)**
+**[⬇️ Get 360toolkit v1.1.0 (Windows) - $15](https://evertonbraz.gumroad.com/l/360toolkit)**
 
 Ready-to-run executable with everything bundled:
 - ✅ No Python installation required
@@ -100,7 +100,7 @@ The complete source code is available under MIT License. See [Build from Source]
 
 ### Option 1: Pre-Built Binary (Recommended)
 
-Purchase from [Gumroad](https://YOUR_GUMROAD_LINK_HERE) - Ready to use, no setup required.
+Purchase from [Gumroad](https://evertonbraz.gumroad.com/l/360toolkit) - Ready to use, no setup required.
 
 - Download `360ToolkitGS-ONNX.zip`
 - Extract anywhere
