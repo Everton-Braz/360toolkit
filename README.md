@@ -4,9 +4,26 @@
 
 **Unified photogrammetry preprocessing pipeline**: Extract frames from Insta360 cameras → Split to perspective views → Generate AI masks
 
-## 📥 Download
+---
 
-**[⬇️ Download 360toolkit v1.1.0 (Windows)](https://drive.google.com/file/d/1jIp3KkJQMqk_SDgJG5MM9jtnQN3jm51t/view?usp=sharing)** - Portable executable, no installation required (~5 GB)
+## 📥 Download Options
+
+### 🛒 Pre-Built Binary (Gumroad)
+
+**[⬇️ Get 360toolkit v1.1.0 (Windows) - $15](https://YOUR_GUMROAD_LINK_HERE)**
+
+Ready-to-run executable with everything bundled:
+- ✅ No Python installation required
+- ✅ Insta360 SDK included
+- ✅ FFmpeg bundled
+- ✅ ONNX models included
+- ✅ Just extract and run!
+
+> 💡 *Purchasing supports continued development of this open-source project*
+
+### 🔧 Build from Source (Free)
+
+The complete source code is available under MIT License. See [Build from Source](#-build-from-source) section below.
 
 ---
 
@@ -81,45 +98,22 @@
 
 ## 📦 Installation
 
-### Option 1: Portable Executable (Recommended)
+### Option 1: Pre-Built Binary (Recommended)
 
-**No installation required!** Download `360ToolkitGS-ONNX.zip` and extract. Works on any Windows 10/11 machine.
+Purchase from [Gumroad](https://YOUR_GUMROAD_LINK_HERE) - Ready to use, no setup required.
 
-```powershell
-# Extract and run
-.\360ToolkitGS-ONNX.exe
-```
+- Download `360ToolkitGS-ONNX.zip`
+- Extract anywhere
+- Run `360ToolkitGS-ONNX.exe`
 
 **Requirements**:
 - Windows 10/11 64-bit
-- 4 GB free disk space (ONNX version)
+- 4 GB free disk space
 - Optional: NVIDIA GPU for faster masking
 
-### Option 2: Development Setup
+### Option 2: Build from Source (Free)
 
-Clone repository and set up Python environment:
-
-```bash
-git clone https://github.com/Everton-Braz/360toolkit.git
-cd 360toolkit
-
-# Create virtual environment
-python -m venv .venv
-.venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run application
-python run_app.py
-```
-
-**Requirements**:
-- Python 3.10+
-- ONNX Runtime 1.20+ (CPU or GPU)
-- PyQt6
-- OpenCV, NumPy
-- Insta360 MediaSDK 3.0.5
+See [Build from Source](#-build-from-source) section for complete instructions.
 
 ---
 
@@ -261,17 +255,67 @@ Solution: Re-export model with opset 17: ultralytics export yolov8m-seg.pt forma
 ## 🔧 Build from Source (PyInstaller)
 
 ### Prerequisites
-- Python 3.10+
-- ONNX Runtime 1.20+
-- PyInstaller 6.16.0
-- Insta360 MediaSDK 3.0.5
 
-### Build Command (ONNX Version)
+1. **Python 3.10+** - [Download](https://www.python.org/downloads/)
+2. **Git** - [Download](https://git-scm.com/)
+3. **Insta360 MediaSDK 3.0.5** - Download from [Insta360 Developer Portal](https://www.insta360.com/sdk/home)
+4. **FFmpeg** - [Download](https://ffmpeg.org/download.html)
+
+### Step 1: Clone Repository
+
+```bash
+git clone https://github.com/Everton-Braz/360toolkit.git
+cd 360toolkit
+```
+
+### Step 2: Create Virtual Environment
+
+```bash
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+# Linux/Mac
+source .venv/bin/activate
+```
+
+### Step 3: Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### Step 4: Setup SDK and FFmpeg
+
+1. **Insta360 SDK**: Extract to `C:\Users\[YourUser]\Windows_CameraSDK-2.0.2-build1+MediaSDK-3.0.5-build1\`
+2. **FFmpeg**: Install to `C:\Program Files (x86)\ffmpeg\bin\` or add to PATH
+
+### Step 5: Run from Source
+
+```bash
+python run_app.py
+```
+
+### Step 6: Build Executable (Optional)
+
 ```powershell
+# Build ONNX version (~1.5 GB output)
 pyinstaller 360ToolkitGS-ONNX.spec --clean
 ```
 
-**Output**: `dist\360ToolkitGS-ONNX\` (~1.5 GB)
+Output: `dist\360ToolkitGS-ONNX\360ToolkitGS-ONNX.exe`
+
+### Dependencies Summary
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| PyQt6 | 6.x | Desktop UI |
+| OpenCV | 4.x | Image processing |
+| NumPy | 2.x | Array operations |
+| onnxruntime | 1.20+ | AI inference |
+| Pillow | 10.x | Image I/O |
+| PyInstaller | 6.16+ | Build executable |
 
 ---
 
