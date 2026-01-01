@@ -500,82 +500,103 @@ class PipelineWorker(QThread):
             use_gpu = False
             if HAS_TORCH_TRANSFORM and torch.cuda.is_available():
                 try:
-                    # Test GPU memory with a small tensor
-                    torch.zeros(1).cuda()
+                    # Test GPU memory AND computation to catch RTX 50-series incompatibility early
+                    t = torch.zeros(1).cuda()
+                    _ = t + 1  # Force kernel execution
                     use_gpu = True
                     logger.info("GPU acceleration enabled for Stage 2 (PyTorch)")
                 except Exception as e:
                     logger.warning(f"GPU available but failed check: {e}. Falling back to CPU.")
             
+            # GPU Execution Block
             if use_gpu:
-                # GPU Path: Single process, GPU accelerated
-                transformer = TorchE2PTransform()
-                
-                for frame_idx, frame_path in enumerate(input_frames):
-                    if self.is_cancelled:
-                        return {'success': False, 'error': 'Cancelled by user'}
-                        
-                    # Load image
-                    equirect_img = cv2.imread(str(frame_path))
-                    if equirect_img is None:
-                        logger.warning(f"Failed to load {frame_path}")
-                        continue
-                        
-                    # Convert to tensor (H, W, C) -> (C, H, W) and normalize
-                    # Note: cv2 reads BGR, we keep it BGR for saving later or convert if needed
-                    img_tensor = torch.from_numpy(equirect_img).permute(2, 0, 1).float() / 255.0
-                    img_tensor = img_tensor.to(transformer.device)
+                try:
+                    # GPU Path: Single process, GPU accelerated
+                    transformer = TorchE2PTransform()
                     
-                    for cam_idx, camera in enumerate(cameras):
-                        if self.is_cancelled: return {'success': False, 'error': 'Cancelled'}
+                    for frame_idx, frame_path in enumerate(input_frames):
+                        if self.is_cancelled:
+                            return {'success': False, 'error': 'Cancelled by user'}
+                            
+                        # Load image
+                        equirect_img = cv2.imread(str(frame_path))
+                        if equirect_img is None:
+                            logger.warning(f"Failed to load {frame_path}")
+                            continue
+                            
+                        # Convert to tensor (H, W, C) -> (C, H, W) and normalize
+                        # Note: cv2 reads BGR, we keep it BGR for saving later or convert if needed
+                        img_tensor = torch.from_numpy(equirect_img).permute(2, 0, 1).float() / 255.0
+                        img_tensor = img_tensor.to(transformer.device)
                         
-                        yaw = camera['yaw']
-                        pitch = camera.get('pitch', 0)
-                        roll = camera.get('roll', 0)
-                        fov = camera.get('fov', DEFAULT_H_FOV)
-                        
-                        # Transform on GPU
-                        out_tensor = transformer.equirect_to_pinhole(
-                            img_tensor, yaw, pitch, roll, fov, None, output_width, output_height
-                        )
-                        
-                        # Download to CPU (1, C, H, W) -> (H, W, C)
-                        out_img = out_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-                        out_img = (out_img * 255).clip(0, 255).astype(np.uint8)
-                        
-                        # Save
-                        ext = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
-                        out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
-                        out_path = output_dir / out_name
-                        
-                        success = False
-                        if ext == 'png':
-                            try:
-                                rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
-                                pil_img = Image.fromarray(rgb)
-                                pil_img.save(str(out_path), 'PNG', compress_level=6)
-                                pil_img.close()
-                                success = True
-                            except Exception:
-                                success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
-                        elif ext in ['jpg', 'jpeg']:
-                            success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                        else:
-                            success = cv2.imwrite(str(out_path), out_img)
-                        
-                        if success:
-                            try:
-                                self.metadata_handler.embed_camera_orientation(str(out_path), yaw, pitch, roll, fov)
-                            except: pass
-                            output_files.append(str(out_path))
-                        
-                        # Progress
-                        current_op = frame_idx * len(cameras) + cam_idx + 1
-                        if current_op % 5 == 0:
-                            self.progress.emit(current_op, total_operations, 
-                                f"Stage 2 (GPU): Frame {frame_idx+1}/{total_frames}")
-                                
-            else:
+                        for cam_idx, camera in enumerate(cameras):
+                            if self.is_cancelled: return {'success': False, 'error': 'Cancelled'}
+                            
+                            yaw = camera['yaw']
+                            pitch = camera.get('pitch', 0)
+                            roll = camera.get('roll', 0)
+                            fov = camera.get('fov', DEFAULT_H_FOV)
+                            
+                            # Transform on GPU
+                            out_tensor = transformer.equirect_to_pinhole(
+                                img_tensor, yaw, pitch, roll, fov, None, output_width, output_height
+                            )
+                            
+                            # Download to CPU (1, C, H, W) -> (H, W, C)
+                            out_img = out_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                            out_img = (out_img * 255).clip(0, 255).astype(np.uint8)
+                            
+                            # Save
+                            ext = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
+                            out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
+                            out_path = output_dir / out_name
+                            
+                            success = False
+                            if ext == 'png':
+                                try:
+                                    rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
+                                    pil_img = Image.fromarray(rgb)
+                                    pil_img.save(str(out_path), 'PNG', compress_level=6)
+                                    pil_img.close()
+                                    success = True
+                                except Exception:
+                                    success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+                            elif ext in ['jpg', 'jpeg']:
+                                success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                            else:
+                                success = cv2.imwrite(str(out_path), out_img)
+                            
+                            if success:
+                                try:
+                                    self.metadata_handler.embed_camera_orientation(str(out_path), yaw, pitch, roll, fov)
+                                except: pass
+                                output_files.append(str(out_path))
+                            
+                            # Progress
+                            current_op = frame_idx * len(cameras) + cam_idx + 1
+                            if current_op % 5 == 0:
+                                self.progress.emit(current_op, total_operations, 
+                                    f"Stage 2 (GPU): Frame {frame_idx+1}/{total_frames}")
+                    
+                    # If we completed successfully on GPU, return here
+                    return {
+                        'success': True,
+                        'perspective_count': len(output_files),
+                        'output_files': output_files,
+                        'output_dir': str(output_dir)
+                    }
+
+                except RuntimeError as e:
+                    if "no kernel image" in str(e) or "CUDA error" in str(e):
+                        logger.warning(f"GPU Stage 2 failed (RTX 50-series incompatibility): {e}")
+                        logger.warning("Falling back to CPU Multiprocessing...")
+                        use_gpu = False # Fall through to CPU block
+                        output_files = [] # Reset output files
+                    else:
+                        raise e # Re-raise other errors
+
+            # CPU Execution Block (Fallback or Default)
+            if not use_gpu:
                 # CPU Path: Multiprocessing
                 # Limit workers to avoid OOM with 8K images. 
                 # 8K image ~100MB. 20 workers = 2GB. Safe.
