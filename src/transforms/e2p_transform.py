@@ -11,7 +11,165 @@ import cv2
 import math
 import logging
 
+try:
+    import torch
+    import torch.nn.functional as F
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
 logger = logging.getLogger(__name__)
+
+
+class TorchE2PTransform:
+    """
+    GPU-accelerated Equirectangular to Pinhole transformation using PyTorch.
+    """
+    def __init__(self, device=None):
+        if not HAS_TORCH:
+            raise ImportError("PyTorch is required for TorchE2PTransform")
+        
+        self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.cache = {}
+        logger.info(f"Initialized TorchE2PTransform on {self.device}")
+
+    def equirect_to_pinhole(self, equirect_tensor, yaw=0, pitch=0, roll=0, 
+                           h_fov=90, v_fov=None, output_width=1920, output_height=1080):
+        """
+        Convert equirectangular image to pinhole perspective view using GPU.
+        
+        Args:
+            equirect_tensor: Input image tensor (1, 3, H, W) or (3, H, W), normalized 0-1 or 0-255
+            yaw, pitch, roll: Camera orientation in degrees
+            h_fov, v_fov: Field of view
+            output_width, output_height: Output dimensions
+            
+        Returns:
+            Perspective view tensor (1, 3, H_out, W_out)
+        """
+        if v_fov is None:
+            v_fov = h_fov * output_height / output_width
+
+        # Ensure input is (N, C, H, W)
+        if equirect_tensor.dim() == 3:
+            equirect_tensor = equirect_tensor.unsqueeze(0)
+            
+        # Create cache key
+        cache_key = (yaw, pitch, roll, h_fov, v_fov, output_width, output_height)
+        
+        if cache_key in self.cache:
+            grid = self.cache[cache_key]
+        else:
+            grid = self._generate_grid(yaw, pitch, roll, h_fov, v_fov, output_width, output_height)
+            self.cache[cache_key] = grid
+            
+        # Apply grid sample
+        # grid is (N, H_out, W_out, 2)
+        # input is (N, C, H_in, W_in)
+        return F.grid_sample(equirect_tensor, grid, mode='bilinear', padding_mode='border', align_corners=True)
+
+    def _generate_grid(self, yaw, pitch, roll, h_fov, v_fov, width, height):
+        """Generate sampling grid for grid_sample"""
+        # Create meshgrid
+        y_coords = torch.linspace(-1, 1, height, device=self.device)
+        x_coords = torch.linspace(-1, 1, width, device=self.device)
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        
+        # Perspective projection params
+        h_fov_rad = math.radians(h_fov)
+        v_fov_rad = math.radians(v_fov)
+        f_x = 1.0 / math.tan(h_fov_rad / 2)
+        f_y = 1.0 / math.tan(v_fov_rad / 2)
+        
+        # 3D coordinates on image plane
+        x_3d = grid_x / f_x
+        y_3d = grid_y / f_y
+        z_3d = torch.ones_like(x_3d)
+        
+        # Normalize
+        norm = torch.sqrt(x_3d**2 + y_3d**2 + z_3d**2)
+        x_3d /= norm
+        y_3d /= norm
+        z_3d /= norm
+        
+        # Apply rotations (inverse of camera rotation)
+        # Note: The math in original E2PTransform applies rotation to the ray vectors.
+        # We need to replicate that exact logic.
+        
+        yaw_rad = math.radians(yaw)
+        pitch_rad = math.radians(pitch)
+        roll_rad = math.radians(roll)
+        
+        # Roll
+        if roll_rad != 0:
+            cos_roll = math.cos(roll_rad)
+            sin_roll = math.sin(roll_rad)
+            x_rot = x_3d * cos_roll - y_3d * sin_roll
+            y_rot = x_3d * sin_roll + y_3d * cos_roll
+            x_3d, y_3d = x_rot, y_rot
+            
+        # Pitch
+        if pitch_rad != 0:
+            cos_pitch = math.cos(pitch_rad)
+            sin_pitch = math.sin(pitch_rad)
+            y_rot = y_3d * cos_pitch - z_3d * sin_pitch
+            z_rot = y_3d * sin_pitch + z_3d * cos_pitch
+            y_3d, z_3d = y_rot, z_rot
+            
+        # Yaw
+        if yaw_rad != 0:
+            cos_yaw = math.cos(yaw_rad)
+            sin_yaw = math.sin(yaw_rad)
+            x_rot = x_3d * cos_yaw + z_3d * sin_yaw
+            z_rot = -x_3d * sin_yaw + z_3d * cos_yaw
+            x_3d, z_3d = x_rot, z_rot
+            
+        # Convert to spherical (phi, theta)
+        # phi = atan2(x, z) -> longitude
+        # theta = asin(y) -> latitude
+        phi = torch.atan2(x_3d, z_3d)
+        theta = torch.asin(torch.clamp(y_3d, -1.0, 1.0))
+        
+        # Map to normalized equirectangular coordinates [-1, 1]
+        # Longitude: -pi to pi -> -1 to 1
+        # Latitude: -pi/2 to pi/2 -> -1 to 1
+        # Note: grid_sample expects (x, y) where x is width (long), y is height (lat)
+        
+        # Original code: map_x = (phi + pi) * W / (2pi)
+        # Normalized: (phi + pi) / (2pi) * 2 - 1 = phi / pi
+        grid_u = phi / math.pi
+        
+        # Original code: map_y = (pi/2 + theta) * H / pi
+        # Normalized: (pi/2 + theta) / pi * 2 - 1 = (0.5 + theta/pi) * 2 - 1 = 1 + 2theta/pi - 1 = 2theta/pi
+        # Wait, let's check coordinate system of grid_sample.
+        # (-1, -1) is top-left. (1, 1) is bottom-right.
+        # Image coordinates: y increases downwards.
+        # Spherical: theta increases upwards (usually).
+        # Original code: map_y = (pi/2 + theta) ...
+        # If theta is -pi/2 (bottom), map_y = 0 (top). So original code flips Y.
+        # Let's stick to the original mapping logic.
+        
+        # Normalized U (Longitude): -1 (left) to 1 (right)
+        # phi ranges -pi to pi.
+        # grid_u = phi / pi.
+        
+        # Normalized V (Latitude): -1 (top) to 1 (bottom)
+        # theta ranges -pi/2 to pi/2.
+        # Original map_y goes 0 to H.
+        # map_y = (pi/2 + theta) * H / pi
+        # Normalized V = map_y / H * 2 - 1
+        # = (pi/2 + theta) / pi * 2 - 1
+        # = (0.5 + theta/pi) * 2 - 1
+        # = 1 + 2*theta/pi - 1
+        # = 2 * theta / pi
+        
+        grid_v = 2 * theta / math.pi
+        
+        # Stack to (H, W, 2)
+        grid = torch.stack((grid_u, grid_v), dim=-1)
+        
+        # Add batch dimension (1, H, W, 2)
+        return grid.unsqueeze(0)
 
 
 class E2PTransform:
