@@ -123,7 +123,22 @@ class MultiCategoryMasker:
                 if cuda_available and device_count > 0:
                     device_name = torch.cuda.get_device_name(0)
                     logger.info(f"Using CUDA device: {device_name}")
-                    return 'cuda:0'
+                    
+                    # Test GPU compatibility (RTX 50-series Blackwell sm_120 not supported yet)
+                    try:
+                        test_tensor = torch.zeros(1).cuda()
+                        del test_tensor
+                        torch.cuda.synchronize()
+                        logger.info("GPU compatibility verified")
+                        return 'cuda:0'
+                    except RuntimeError as e:
+                        error_msg = str(e)
+                        if "sm_" in error_msg or "CUDA capability" in error_msg or "no kernel image" in error_msg:
+                            logger.warning(f"GPU architecture not supported by PyTorch ({device_name}).")
+                            logger.warning("RTX 50-series (Blackwell sm_120) requires newer PyTorch. Falling back to CPU.")
+                        else:
+                            logger.warning(f"GPU test failed: {e}. Falling back to CPU.")
+                        return 'cpu'
                 else:
                     logger.warning(f"GPU requested but CUDA not available (version={cuda_version}, devices={device_count}). Using CPU.")
                     return 'cpu'
@@ -240,6 +255,30 @@ class MultiCategoryMasker:
             logger.error(f"Error generating mask for {image_path}: {e}")
             return None
     
+    def _safe_predict(self, image, **kwargs):
+        """
+        Run model prediction with automatic fallback to CPU if CUDA fails.
+        Handles 'no kernel image is available' error for unsupported GPUs (e.g. RTX 50-series).
+        """
+        try:
+            # Ensure device is passed in kwargs or use self.device
+            if 'device' not in kwargs:
+                kwargs['device'] = self.device
+                
+            return self.model.predict(image, **kwargs)
+        except RuntimeError as e:
+            error_msg = str(e)
+            if "CUDA error" in error_msg or "no kernel image" in error_msg:
+                if self.device != 'cpu':
+                    logger.warning(f"CUDA inference failed: {error_msg}")
+                    logger.warning("Falling back to CPU for remaining operations.")
+                    self.device = 'cpu'
+                    # Retry with CPU
+                    kwargs['device'] = 'cpu'
+                    return self.model.predict(image, **kwargs)
+            # Re-raise if it's not a CUDA error or if we were already on CPU
+            raise e
+
     def generate_mask_from_array(self, image: np.ndarray) -> Optional[np.ndarray]:
         """
         Generate binary mask from numpy array.
@@ -261,13 +300,12 @@ class MultiCategoryMasker:
                 logger.warning("No masking categories enabled")
                 return np.full((h, w), MASK_VALUE_KEEP, dtype=np.uint8)
             
-            # Run YOLOv8 inference
-            results = self.model.predict(
+            # Run YOLOv8 inference with safe fallback
+            results = self._safe_predict(
                 image,
                 classes=target_classes,
                 conf=self.confidence_threshold,
-                verbose=False,
-                device=self.device
+                verbose=False
             )
             
             # Extract masks
@@ -336,13 +374,12 @@ class MultiCategoryMasker:
             if not target_classes:
                 return False
             
-            # Run YOLOv8 inference
-            results = self.model.predict(
+            # Run YOLOv8 inference with safe fallback
+            results = self._safe_predict(
                 image,
                 classes=target_classes,
                 conf=self.confidence_threshold,
-                verbose=False,
-                device=self.device
+                verbose=False
             )
             
             # Check if any objects detected

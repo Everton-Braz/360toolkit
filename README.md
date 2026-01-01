@@ -76,6 +76,8 @@
 - **AI Model v2 Support**: Best quality preset now uses AI stitcher model v2 for superior blending
 - **Fixed ONNX Model Compatibility**: Re-exported YOLOv8 model with opset 17 for onnxruntime 1.20.1 compatibility
 - **Optimized Masking Pipeline**: ONNX-based inference for lightweight, fast processing without PyTorch dependency
+- **Fixed SDK Black Image Issue**: Resolved path resolution errors for SDK models.
+- **RTX 50-Series Compatibility**: Added automatic CPU fallback for masking on unsupported GPUs (e.g., RTX 5070 Ti).
 
 ---
 
@@ -113,6 +115,15 @@ pip install -r requirements.txt
 # Run application
 python run_app.py
 ```
+
+### SDK Setup (Critical)
+
+For the Insta360 MediaSDK to work correctly, you must ensure the model files are in the correct location relative to the executable.
+
+1. Locate your Insta360 MediaSDK folder.
+2. Copy the `models` folder.
+3. Paste it inside the `bin` folder (where `MediaSDKTest.exe` resides).
+   - Structure should be: `.../MediaSDK/bin/models/`
 
 **Requirements**:
 - Python 3.10+

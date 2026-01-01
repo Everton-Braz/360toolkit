@@ -55,6 +55,8 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional, Callable, List, Tuple
 
+from src.config.settings import get_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,7 +165,21 @@ class SDKExtractor:
         Args:
             sdk_path: Path to MediaSDK installation (auto-detects if None)
         """
-        self.sdk_path = Path(sdk_path) if sdk_path else Path(DEFAULT_SDK_PATH)
+        # Use settings manager for SDK path
+        settings = get_settings()
+        
+        if sdk_path:
+            self.sdk_path = Path(sdk_path)
+        else:
+            configured_sdk = settings.get_sdk_path()
+            if configured_sdk:
+                self.sdk_path = configured_sdk
+                logger.info(f"Using SDK from settings: {configured_sdk}")
+            else:
+                # Fall back to default detection
+                self.sdk_path = Path(DEFAULT_SDK_PATH)
+                logger.info(f"No SDK configured in settings, using default: {self.sdk_path}")
+        
         self.is_cancelled = False
         
         # Detect SDK executable (multiple possible locations)
@@ -222,32 +238,34 @@ class SDKExtractor:
         """Find model files in SDK installation (multiple possible locations)."""
         if not self.demo_exe or not hasattr(self, 'sdk_base'):
             # SDK not found, use default paths
-            self.ai_model_v1 = self.sdk_path / "data" / "ai_stitch_model_v1.ins"
-            self.ai_model_v2 = self.sdk_path / "data" / "ai_stitch_model_v2.ins"
-            self.colorplus_model = self.sdk_path / "data" / "colorplus_model.ins"
-            self.denoise_model = self.sdk_path / "data" / "jpg_denoise_9d006262.ins"
-            self.defringe_model = self.sdk_path / "modelfile" / "defringe_hr_dynamic_7b56e80f.ins"
-            self.deflicker_model = self.sdk_path / "modelfile" / "deflicker_86ccba0d.ins"
+            self.ai_model_v1 = self.sdk_path / "models" / "ai_stitch_model_v1.ins"
+            self.ai_model_v2 = self.sdk_path / "models" / "ai_stitch_model_v2.ins"
+            self.colorplus_model = self.sdk_path / "models" / "colorplus_model.ins"
+            self.denoise_model = self.sdk_path / "models" / "jpg_denoise_9d006262.ins"
+            self.defringe_model = self.sdk_path / "models" / "defringe_hr_dynamic_7b56e80f.ins"
+            self.deflicker_model = self.sdk_path / "models" / "deflicker_86ccba0d.ins"
             return
         
         # Search in SDK-relative locations
         possible_model_dirs = [
+            self.sdk_base / "models",     # MediaSDK 3.1.0 location (FIRST PRIORITY)
             self.sdk_base / "modelfile",  # MediaSDK 3.0.5 location
             self.sdk_base / "data",       # Older SDK versions
-            self.sdk_path / "data",       # Root SDK path
+            self.sdk_path / "models",     # Root SDK path
+            self.sdk_path / "data",       # Root SDK path alternate
             self.sdk_path / "modelfile",  # Root SDK path alternate
         ]
         
         # Find AI stitch model v1 (try different names)
         self.ai_model_v1 = self._find_model_file(
             possible_model_dirs,
-            ["ai_stitcher_model_v1.ins", "ai_stitch_model_v1.ins"]
+            ["ai_stitcher_v1.ins", "ai_stitcher_model_v1.ins", "ai_stitch_model_v1.ins"]
         )
         
         # Find AI stitch model v2
         self.ai_model_v2 = self._find_model_file(
             possible_model_dirs,
-            ["ai_stitcher_model_v2.ins", "ai_stitch_model_v2.ins"]
+            ["ai_stitcher_v2.ins", "ai_stitcher_model_v2.ins", "ai_stitch_model_v2.ins"]
         )
         
         # Find Color Plus model
@@ -568,6 +586,14 @@ class SDKExtractor:
                 returncode = self._current_process.returncode
                 self._current_process = None
                 
+                # Log SDK output immediately for diagnostics
+                if stdout:
+                    stdout_text = stdout.decode('utf-8', errors='replace') if isinstance(stdout, bytes) else str(stdout)
+                    logger.info(f"[SDK STDOUT]\n{stdout_text}")
+                if stderr:
+                    stderr_text = stderr.decode('utf-8', errors='replace') if isinstance(stderr, bytes) else str(stderr)
+                    logger.warning(f"[SDK STDERR]\n{stderr_text}")
+                
                 # Final progress update
                 if progress_callback:
                     progress_callback(100)
@@ -654,6 +680,17 @@ class SDKExtractor:
                 logger.warning(f"[WARNING] Low extraction rate: {actual_count}/{expected_count} ({success_rate:.1f}%)")
             
             logger.info(f"[OK] Extracted {actual_count}/{expected_count} frames ({success_rate:.1f}%)")
+            
+            # Verify image file sizes (detect black/empty images)
+            if extracted_frames:
+                sample_path = Path(extracted_frames[0])
+                if sample_path.exists():
+                    file_size = sample_path.stat().st_size
+                    logger.info(f"[VERIFY] Sample image: {sample_path.name} ({file_size:,} bytes)")
+                    if file_size < 10000:  # Less than 10KB is suspiciously small
+                        logger.error(f"[ERROR] Extracted images are suspiciously small ({file_size} bytes) - likely black/empty!")
+                        logger.error("[ERROR] This usually means SDK failed to stitch properly. Check SDK output above.")
+            
             return extracted_frames
             
         except subprocess.CalledProcessError as e:
@@ -751,6 +788,13 @@ class SDKExtractor:
         """Build MediaSDK command line arguments."""
         cmd = [str(self.demo_exe)]
         
+        # SDK 3.1.x: Set model root directory (replaces individual model paths)
+        # CRITICAL: Must use ABSOLUTE path since SDK runs from bin/ directory
+        models_dir = self.sdk_base / "models"
+        if models_dir.exists():
+            cmd.extend(["-model_dir", str(models_dir.resolve())])
+            logger.info(f"[SDK 3.1.x] Model directory set: {models_dir.resolve()}")
+        
         # Input files (SetInputPath)
         cmd.extend(["-inputs"] + input_files)
         
@@ -786,10 +830,9 @@ class SDKExtractor:
             ai_model = None
             logger.warning("[WARNING] No AI model found")
         
-        # Add AI model for stitch types that benefit from it
-        # NOTE: Even dynamicstitch can use AI model for better results
-        if ai_model and ai_model.exists():
-            cmd.extend(["-ai_stitching_model", str(ai_model)])
+        # SDK 3.1.x: AI model auto-discovered from model_dir (SetModelFileRootDir)
+        # NOTE: -ai_stitching_model is DEPRECATED in SDK 3.1.x and conflicts with -model_dir
+        # The SDK automatically selects the correct AI model based on camera type
         
         # Set stitch type (SetStitchType)
         stitch_type_value = STITCH_TYPES.get(stitch_type_key, 'dynamicstitch')
@@ -804,23 +847,17 @@ class SDKExtractor:
         if preset.get('enable_flowstate', False):
             cmd.append("-enable_flowstate")
         
-        # Color Plus (EnableColorPlus)
+        # Color Plus (EnableColorPlus) - SDK 3.1.x auto-finds model
         if preset.get('enable_colorplus', False):
             cmd.append("-enable_colorplus")
-            if self.colorplus_model.exists():
-                cmd.extend(["-colorplus_model", str(self.colorplus_model)])
         
-        # Denoise (EnableSequenceDenoise) - requires model path for image denoising
+        # Denoise (EnableSequenceDenoise) - SDK 3.1.x auto-finds model
         if preset.get('enable_denoise', False):
             cmd.append("-enable_denoise")
-            if self.denoise_model.exists():
-                cmd.extend(["-image_denoise_model", str(self.denoise_model)])
         
-        # Defringe (EnableDefringe)
+        # Defringe (EnableDefringe) - SDK 3.1.x auto-finds model
         if preset.get('enable_defringe', False):
             cmd.append("-enable_defringe")
-            if self.defringe_model.exists():
-                cmd.extend(["-defringe_model", str(self.defringe_model)])
         
         # Output resolution (SetOutputSize - must be 2:1 ratio)
         if resolution:
