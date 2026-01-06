@@ -26,11 +26,11 @@ onnxruntime>=1.20.0
 # For GPU acceleration (optional):
 # pip install onnxruntime-gpu>=1.20.0
 
-# OPTION B: PyTorch + Ultralytics (for development/model export)
-# Only needed if you want to train or export new ONNX models
-# Uncomment if needed:
-# ultralytics>=8.0.200
-# torch>=2.0.0
+# OPTION B: PyTorch + Ultralytics (INSTALLED - for full YOLOv8 support)
+# Required for YOLOv8 masking with model auto-download
+ultralytics>=8.0.200
+torch>=2.0.0
+torchvision>=0.15.0
 
 # ============================================================================
 # EXTERNAL DEPENDENCIES (Install separately)

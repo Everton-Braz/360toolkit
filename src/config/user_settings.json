@@ -1,0 +1,11 @@
+{
+    "sdk_path": "C:\\Users\\Everton-PC\\Documents\\Windows_CameraSDK-2.1.1_MediaSDK-3.1.0\\MediaSDK-3.1.0.0-20250904-win64\\MediaSDK",
+    "sdk_auto_detected": true,
+    "ffmpeg_path": "C:\\Users\\Everton-PC\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe",
+    "ffmpeg_auto_detected": true,
+    "auto_detect_on_startup": true,
+    "last_input_directory": null,
+    "last_output_directory": null,
+    "recent_files": [],
+    "max_recent_files": 10
+}

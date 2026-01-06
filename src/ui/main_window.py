@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QSplitter, QScrollArea, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QAction
 
 from src.pipeline.batch_orchestrator import BatchOrchestrator
 from src.config.defaults import (
@@ -24,6 +24,8 @@ from src.config.defaults import (
     EXTRACTION_METHODS, TRANSFORM_TYPES, YOLOV8_MODELS,
     DEFAULT_SDK_QUALITY
 )
+from src.config.settings import get_settings
+from src.ui.settings_dialog import SettingsDialog
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +36,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
+        self.settings = get_settings()
         self.orchestrator = BatchOrchestrator()
         self.pipeline_config = {}
         
         self.init_ui()
+        self.create_menu_bar()
         self.apply_dark_theme()
         
         # Trigger initial visibility of SDK controls
@@ -68,6 +72,103 @@ class MainWindow(QMainWindow):
         
         # Status bar
         self.statusBar().showMessage("Ready to start")
+    
+    def create_menu_bar(self):
+        """Create menu bar with File and Settings menus"""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu("&File")
+        
+        open_action = QAction("&Open File...", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self.browse_input_file)
+        file_menu.addAction(open_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("E&xit", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # Settings menu
+        settings_menu = menubar.addMenu("&Settings")
+        
+        preferences_action = QAction("&Preferences...", self)
+        preferences_action.setShortcut("Ctrl+P")
+        preferences_action.triggered.connect(self.open_settings)
+        settings_menu.addAction(preferences_action)
+        
+        settings_menu.addSeparator()
+        
+        detect_paths_action = QAction("&Detect SDK/FFmpeg Paths", self)
+        detect_paths_action.triggered.connect(self.detect_paths)
+        settings_menu.addAction(detect_paths_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+        
+        about_action = QAction("&About", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+    
+    def open_settings(self):
+        """Open settings dialog"""
+        dialog = SettingsDialog(self)
+        dialog.settings_changed.connect(self.on_settings_changed)
+        dialog.exec()
+    
+    def detect_paths(self):
+        """Run automatic path detection"""
+        sdk = self.settings.auto_detect_sdk()
+        ffmpeg = self.settings.auto_detect_ffmpeg()
+        
+        msg = "Path Detection Results:\n\n"
+        
+        if sdk:
+            self.settings.set_sdk_path(sdk, auto_detected=True)
+            msg += f"[OK] SDK Found: {sdk}\n"
+        else:
+            msg += "[X] SDK not found\n"
+        
+        if ffmpeg:
+            self.settings.set_ffmpeg_path(ffmpeg, auto_detected=True)
+            msg += f"[OK] FFmpeg Found: {ffmpeg}\n"
+        else:
+            msg += "[X] FFmpeg not found\n"
+        
+        QMessageBox.information(self, "Path Detection", msg)
+        self.on_settings_changed()
+    
+    def on_settings_changed(self):
+        """Handle settings changes - update UI and log"""
+        sdk_path = self.settings.get_sdk_path()
+        ffmpeg_path = self.settings.get_ffmpeg_path()
+        
+        status_parts = []
+        if sdk_path:
+            status_parts.append(f"SDK: {sdk_path.name}")
+        if ffmpeg_path:
+            status_parts.append(f"FFmpeg: {ffmpeg_path.name}")
+        
+        if status_parts:
+            self.statusBar().showMessage(" | ".join(status_parts))
+        else:
+            self.statusBar().showMessage("[!] SDK/FFmpeg not configured - check Settings")
+        
+        logger.info(f"Settings updated - SDK: {sdk_path}, FFmpeg: {ffmpeg_path}")
+    
+    def show_about(self):
+        """Show about dialog"""
+        about_text = f"""{APP_NAME} v{APP_VERSION}
+
+Unified photogrammetry preprocessing pipeline.
+Extract -> Split -> Mask in one streamlined workflow.
+
+Copyright (c) 2026
+License: MIT"""
+        QMessageBox.about(self, f"About {APP_NAME}", about_text)
     
     def create_splitter_section(self) -> QSplitter:
         """Create splitter with tabs (top) and log panel (bottom) - resizable"""

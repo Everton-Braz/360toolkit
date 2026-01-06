@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Dict, Optional, Callable, List
 import shutil
 
+from src.config.settings import get_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,7 +79,15 @@ class FrameExtractor:
         Args:
             ffmpeg_path: Path to FFmpeg executable (auto-detect if None)
         """
-        self.ffmpeg_path = ffmpeg_path or self._find_ffmpeg()
+        # Use settings manager for FFmpeg path
+        settings = get_settings()
+        
+        if ffmpeg_path:
+            self.ffmpeg_path = ffmpeg_path
+        else:
+            configured_ffmpeg = settings.get_ffmpeg_path()
+            self.ffmpeg_path = str(configured_ffmpeg) if configured_ffmpeg else self._find_ffmpeg()
+        
         self.ffprobe_path = self._find_ffprobe()
         self.has_ffmpeg = self.ffmpeg_path is not None
         self.is_cancelled = False
