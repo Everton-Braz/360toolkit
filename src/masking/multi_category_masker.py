@@ -139,24 +139,24 @@ class MultiCategoryMasker:
                         del test_tensor, test_result
                         torch.cuda.synchronize()
                         torch.cuda.empty_cache()
-                        logger.info("✓ GPU compatibility verified - CUDA operations successful")
+                        logger.info("[OK] GPU compatibility verified - CUDA operations successful")
                         return 'cuda:0'
                     except RuntimeError as e:
                         error_msg = str(e).lower()
                         
                         # Detect specific compatibility issues
                         if "sm_" in error_msg or "cuda capability" in error_msg or "no kernel image" in error_msg:
-                            logger.error(f"✗ GPU architecture incompatibility detected")
+                            logger.error(f"[!] GPU architecture incompatibility detected")
                             logger.error(f"   GPU: {device_name} ({compute_cap_str})")
                             logger.error(f"   PyTorch was compiled for older CUDA compute capabilities")
                             
                             if "sm_12" in compute_cap_str or "RTX 50" in device_name:
                                 logger.error(f"   RTX 50-series (Blackwell) requires PyTorch 2.7+ or nightly build")
-                                logger.error(f"   Install: pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124")
+                                logger.error(f"   Install: pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128")
                             else:
                                 logger.error(f"   Try: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124")
                             
-                            logger.warning(f"→ Falling back to CPU for masking operations")
+                            logger.warning(f"=> Falling back to CPU for masking operations")
                         else:
                             logger.warning(f"GPU test failed: {e}. Falling back to CPU.")
                         

@@ -39,7 +39,7 @@ NVIDIA GeForce RTX 5070 Ti with CUDA capability sm_120 is not compatible
 2. Or manually install:
    ```bash
    pip uninstall torch torchvision
-   pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124
+   pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
    ```
 3. Restart 360toolkit
 
@@ -124,8 +124,8 @@ Using device: cuda:0
 
 ### For RTX 50-series (5090, 5080, 5070 Ti, 5070):
 ```bash
-# Use PyTorch nightly
-pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124
+# Use PyTorch nightly (CUDA 12.8+)
+pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
 pip install ultralytics opencv-python pillow piexif PyQt6
 ```
 

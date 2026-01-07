@@ -64,11 +64,11 @@ try:
                         print("    " + "=" * 60)
                         
                         if "rtx 50" in device_name.lower() or compute_cap_str == "sm_120":
-                            print("    Your RTX 50-series GPU requires PyTorch nightly build.")
+                            print("    Your RTX 50-series GPU requires PyTorch nightly build (CUDA 12.8+).")
                             print()
                             print("    FIX: Run this command:")
                             print("    pip uninstall torch torchvision")
-                            print("    pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124")
+                            print("    pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128")
                             print()
                             print("    Or use: update_pytorch_for_rtx50.bat")
                         else:

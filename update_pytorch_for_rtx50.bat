@@ -19,12 +19,12 @@ echo.
 pause
 
 echo.
-echo Uninstalling current PyTorch...
-pip uninstall -y torch torchvision torchaudio
+echo Removing potentially incompatible PyTorch versions...
+pip uninstall -y torch torchvision
 
 echo.
-echo Installing PyTorch nightly with CUDA 12.4...
-pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124
+echo Installing PyTorch nightly with CUDA 12.8 support (for RTX 50-series)...
+pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
 
 echo.
 echo ============================================================
