@@ -496,17 +496,45 @@ class PipelineWorker(QThread):
             total_operations = total_frames * len(cameras)
             image_format = self.config.get('stage2_format', 'png')
             
-            # Check for GPU acceleration
+            # Check for GPU acceleration with comprehensive compatibility testing
             use_gpu = False
             if HAS_TORCH_TRANSFORM and torch.cuda.is_available():
                 try:
-                    # Test GPU memory AND computation to catch RTX 50-series incompatibility early
-                    t = torch.zeros(1).cuda()
-                    _ = t + 1  # Force kernel execution
+                    # Get GPU info
+                    device_name = torch.cuda.get_device_name(0)
+                    try:
+                        compute_capability = torch.cuda.get_device_capability(0)
+                        compute_cap_str = f"sm_{compute_capability[0]}{compute_capability[1]}"
+                    except Exception:
+                        compute_cap_str = "unknown"
+                    
+                    # Test GPU with actual kernel execution (not just memory allocation)
+                    # This catches RTX 50-series "no kernel image available" errors early
+                    test_tensor = torch.zeros(10, 10, device='cuda')
+                    test_result = test_tensor + 1  # Force CUDA kernel execution
+                    test_mean = test_result.mean().item()  # Force device synchronization
+                    del test_tensor, test_result
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                    
                     use_gpu = True
-                    logger.info("GPU acceleration enabled for Stage 2 (PyTorch)")
+                    logger.info(f"\u2713 GPU acceleration enabled for Stage 2: {device_name} ({compute_cap_str})")
+                except RuntimeError as e:
+                    error_msg = str(e).lower()
+                    if "no kernel image" in error_msg or "cuda capability" in error_msg or "sm_" in error_msg:
+                        logger.error(f"\u2717 GPU incompatibility detected for Stage 2")
+                        logger.error(f"   GPU: {device_name} ({compute_cap_str})")
+                        logger.error(f"   PyTorch CUDA kernels not available for this GPU architecture")
+                        if "sm_12" in compute_cap_str or "RTX 50" in device_name:
+                            logger.error(f"   RTX 50-series requires PyTorch nightly build")
+                        logger.warning(f"\u2192 Using CPU multiprocessing instead")
+                    else:
+                        logger.warning(f"GPU check failed: {e}. Falling back to CPU.")
+                    torch.cuda.empty_cache()
                 except Exception as e:
-                    logger.warning(f"GPU available but failed check: {e}. Falling back to CPU.")
+                    logger.warning(f"GPU test failed: {e}. Falling back to CPU.")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
             
             # GPU Execution Block
             if use_gpu:

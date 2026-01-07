@@ -98,7 +98,8 @@
 **Requirements**:
 - Windows 10/11 64-bit
 - 4 GB free disk space (ONNX version)
-- Optional: NVIDIA GPU for faster masking
+- Optional: NVIDIA GPU for faster masking (RTX 30/40/50, GTX 10+)
+  - **RTX 50-series users**: See [GPU_COMPATIBILITY.md](GPU_COMPATIBILITY.md) for setup
 
 ### Option 2: Development Setup
 
@@ -134,6 +135,10 @@ For the Insta360 MediaSDK to work correctly, you must ensure the model files are
 - PyQt6
 - OpenCV, NumPy
 - Insta360 MediaSDK 3.0.5
+- Optional: PyTorch 2.6+ with CUDA 12.4 for GPU acceleration
+  - **RTX 50-series**: Requires PyTorch nightly build - run `update_pytorch_for_rtx50.bat`
+  - **RTX 30/40-series, GTX**: Stable PyTorch works fine
+  - See [GPU_COMPATIBILITY.md](GPU_COMPATIBILITY.md) for details
 
 ---
 

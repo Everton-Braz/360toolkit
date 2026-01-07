@@ -106,7 +106,7 @@ class MultiCategoryMasker:
         self._initialize_model()
         
     def _select_device(self, use_gpu: bool) -> str:
-        """Select compute device (CUDA or CPU)"""
+        """Select compute device (CUDA or CPU) with comprehensive compatibility checking"""
         if not TORCH_AVAILABLE:
             if use_gpu:
                 logger.warning("GPU requested but PyTorch not available. Using CPU.")
@@ -122,22 +122,48 @@ class MultiCategoryMasker:
                 
                 if cuda_available and device_count > 0:
                     device_name = torch.cuda.get_device_name(0)
-                    logger.info(f"Using CUDA device: {device_name}")
                     
-                    # Test GPU compatibility (RTX 50-series Blackwell sm_120 not supported yet)
+                    # Get compute capability
                     try:
-                        test_tensor = torch.zeros(1).cuda()
-                        del test_tensor
+                        compute_capability = torch.cuda.get_device_capability(0)
+                        compute_cap_str = f"sm_{compute_capability[0]}{compute_capability[1]}"
+                        logger.info(f"GPU Device: {device_name} (Compute Capability: {compute_cap_str})")
+                    except Exception:
+                        compute_cap_str = "unknown"
+                        logger.info(f"GPU Device: {device_name}")
+                    
+                    # Test GPU compatibility with actual tensor operations
+                    try:
+                        test_tensor = torch.zeros(1, device='cuda')
+                        test_result = test_tensor + 1
+                        del test_tensor, test_result
                         torch.cuda.synchronize()
-                        logger.info("GPU compatibility verified")
+                        torch.cuda.empty_cache()
+                        logger.info("✓ GPU compatibility verified - CUDA operations successful")
                         return 'cuda:0'
                     except RuntimeError as e:
-                        error_msg = str(e)
-                        if "sm_" in error_msg or "CUDA capability" in error_msg or "no kernel image" in error_msg:
-                            logger.warning(f"GPU architecture not supported by PyTorch ({device_name}).")
-                            logger.warning("RTX 50-series (Blackwell sm_120) requires newer PyTorch. Falling back to CPU.")
+                        error_msg = str(e).lower()
+                        
+                        # Detect specific compatibility issues
+                        if "sm_" in error_msg or "cuda capability" in error_msg or "no kernel image" in error_msg:
+                            logger.error(f"✗ GPU architecture incompatibility detected")
+                            logger.error(f"   GPU: {device_name} ({compute_cap_str})")
+                            logger.error(f"   PyTorch was compiled for older CUDA compute capabilities")
+                            
+                            if "sm_12" in compute_cap_str or "RTX 50" in device_name:
+                                logger.error(f"   RTX 50-series (Blackwell) requires PyTorch 2.7+ or nightly build")
+                                logger.error(f"   Install: pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124")
+                            else:
+                                logger.error(f"   Try: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124")
+                            
+                            logger.warning(f"→ Falling back to CPU for masking operations")
                         else:
                             logger.warning(f"GPU test failed: {e}. Falling back to CPU.")
+                        
+                        torch.cuda.empty_cache()
+                        return 'cpu'
+                    except Exception as e:
+                        logger.warning(f"GPU initialization error: {e}. Falling back to CPU.")
                         return 'cpu'
                 else:
                     logger.warning(f"GPU requested but CUDA not available (version={cuda_version}, devices={device_count}). Using CPU.")
@@ -146,6 +172,7 @@ class MultiCategoryMasker:
                 logger.warning(f"Error detecting CUDA: {e}. Falling back to CPU.")
                 return 'cpu'
         else:
+            logger.info("CPU mode selected (GPU disabled in settings)")
             return 'cpu'
     
     def _initialize_model(self):
