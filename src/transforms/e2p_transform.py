@@ -11,12 +11,9 @@ import cv2
 import math
 import logging
 
-try:
-    import torch
-    import torch.nn.functional as F
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
+# Defer torch import to avoid DLL errors on incompatible GPUs
+# Torch will only be imported when TorchE2PTransform is instantiated
+HAS_TORCH = False
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +23,18 @@ class TorchE2PTransform:
     GPU-accelerated Equirectangular to Pinhole transformation using PyTorch.
     """
     def __init__(self, device=None):
-        if not HAS_TORCH:
-            raise ImportError("PyTorch is required for TorchE2PTransform")
+        # Import torch at runtime only when GPU transform is needed
+        global HAS_TORCH
+        try:
+            import torch
+            import torch.nn.functional as F
+            self.torch = torch
+            self.F = F
+            HAS_TORCH = True
+        except (ImportError, OSError) as e:
+            raise ImportError(f"PyTorch is required for TorchE2PTransform but failed to load: {e}")
         
-        self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device if device else ('cuda' if self.torch.cuda.is_available() else 'cpu')
         self.cache = {}
         logger.info(f"Initialized TorchE2PTransform on {self.device}")
 
@@ -66,14 +71,14 @@ class TorchE2PTransform:
         # Apply grid sample
         # grid is (N, H_out, W_out, 2)
         # input is (N, C, H_in, W_in)
-        return F.grid_sample(equirect_tensor, grid, mode='bilinear', padding_mode='border', align_corners=True)
+        return self.F.grid_sample(equirect_tensor, grid, mode='bilinear', padding_mode='border', align_corners=True)
 
     def _generate_grid(self, yaw, pitch, roll, h_fov, v_fov, width, height):
         """Generate sampling grid for grid_sample"""
         # Create meshgrid
-        y_coords = torch.linspace(-1, 1, height, device=self.device)
-        x_coords = torch.linspace(-1, 1, width, device=self.device)
-        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        y_coords = self.torch.linspace(-1, 1, height, device=self.device)
+        x_coords = self.torch.linspace(-1, 1, width, device=self.device)
+        grid_y, grid_x = self.torch.meshgrid(y_coords, x_coords, indexing='ij')
         
         # Perspective projection params
         h_fov_rad = math.radians(h_fov)
@@ -84,10 +89,10 @@ class TorchE2PTransform:
         # 3D coordinates on image plane
         x_3d = grid_x / f_x
         y_3d = grid_y / f_y
-        z_3d = torch.ones_like(x_3d)
+        z_3d = self.torch.ones_like(x_3d)
         
         # Normalize
-        norm = torch.sqrt(x_3d**2 + y_3d**2 + z_3d**2)
+        norm = self.torch.sqrt(x_3d**2 + y_3d**2 + z_3d**2)
         x_3d /= norm
         y_3d /= norm
         z_3d /= norm
@@ -127,8 +132,8 @@ class TorchE2PTransform:
         # Convert to spherical (phi, theta)
         # phi = atan2(x, z) -> longitude
         # theta = asin(y) -> latitude
-        phi = torch.atan2(x_3d, z_3d)
-        theta = torch.asin(torch.clamp(y_3d, -1.0, 1.0))
+        phi = self.torch.atan2(x_3d, z_3d)
+        theta = self.torch.asin(self.torch.clamp(y_3d, -1.0, 1.0))
         
         # Map to normalized equirectangular coordinates [-1, 1]
         # Longitude: -pi to pi -> -1 to 1
@@ -166,7 +171,7 @@ class TorchE2PTransform:
         grid_v = 2 * theta / math.pi
         
         # Stack to (H, W, 2)
-        grid = torch.stack((grid_u, grid_v), dim=-1)
+        grid = self.torch.stack((grid_u, grid_v), dim=-1)
         
         # Add batch dimension (1, H, W, 2)
         return grid.unsqueeze(0)

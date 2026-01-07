@@ -229,6 +229,25 @@ class SDKExtractor:
                 # Path is like: .../MediaSDK/bin/MediaSDKTest.exe
                 # Go up 2 levels: MediaSDK/bin -> MediaSDK
                 self.sdk_base = path.parent.parent
+                
+                # CRITICAL FIX: SDK 3.1.x looks for models relative to CWD (bin/)
+                # Create junction: bin/models -> ../models if it doesn't exist
+                bin_models = path.parent / "models"
+                sdk_models = self.sdk_base / "models"
+                if sdk_models.exists() and not bin_models.exists():
+                    try:
+                        import subprocess
+                        # Use mklink /J (junction) which doesn't require admin rights
+                        subprocess.run(
+                            ["cmd", "/c", "mklink", "/J", str(bin_models), str(sdk_models)],
+                            check=True,
+                            capture_output=True
+                        )
+                        logger.info(f"[OK] Created models junction: {bin_models} -> {sdk_models}")
+                    except Exception as e:
+                        logger.warning(f"Failed to create models junction: {e}")
+                        logger.warning("SDK may fail to find model files. Try manually creating junction.")
+                
                 return path
         
         logger.warning(f"MediaSDK executable not found in {len(possible_paths)} checked locations")

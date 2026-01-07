@@ -19,12 +19,8 @@ from datetime import datetime
 from PIL import Image
 import numpy as np
 
-try:
-    import torch
-    from ..transforms.e2p_transform import TorchE2PTransform
-    HAS_TORCH_TRANSFORM = True
-except ImportError:
-    HAS_TORCH_TRANSFORM = False
+# Defer torch import to runtime to avoid DLL errors on incompatible GPUs
+HAS_TORCH_TRANSFORM = False
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -41,18 +37,51 @@ from ..config.defaults import (
 logger = logging.getLogger(__name__)
 
 
+def _try_import_torch():
+    """
+    Attempt to import torch at runtime with comprehensive error handling.
+    Returns (has_torch, torch_module, TorchE2PTransform_class, error_msg)
+    """
+    try:
+        import torch
+        from ..transforms.e2p_transform import TorchE2PTransform
+        return True, torch, TorchE2PTransform, None
+    except (ImportError, OSError) as e:
+        error_msg = str(e)
+        if "DLL" in error_msg or "1114" in error_msg:
+            # Windows DLL loading error - likely CUDA/GPU incompatibility
+            logger.warning(f"PyTorch GPU DLL loading failed: {error_msg[:100]}")
+            logger.info("=> CPU-only processing will be used")
+        else:
+            logger.warning(f"PyTorch import failed: {error_msg[:100]}")
+        return False, None, None, error_msg
+    except Exception as e:
+        logger.warning(f"Unexpected PyTorch import error: {e}")
+        return False, None, None, str(e)
+
+
 def process_frame_cpu(frame_data):
     """
     Worker function for CPU parallel processing of Stage 2.
     Must be at module level for pickling.
+    Uses absolute imports to work in subprocesses.
     """
     frame_path, frame_idx, cameras, output_dir, width, height, fmt = frame_data
     
-    # Re-import locally to ensure clean process state
+    # Import with absolute paths for subprocess compatibility
+    import sys
+    import os
+    from pathlib import Path
     import cv2
     from PIL import Image
-    from ..transforms import E2PTransform
-    from .metadata_handler import MetadataHandler
+    
+    # Add project root to path for absolute imports
+    project_root = Path(__file__).parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    
+    from src.transforms.e2p_transform import E2PTransform
+    from src.pipeline.metadata_handler import MetadataHandler
     
     transformer = E2PTransform()
     meta_handler = MetadataHandler()
@@ -496,9 +525,12 @@ class PipelineWorker(QThread):
             total_operations = total_frames * len(cameras)
             image_format = self.config.get('stage2_format', 'png')
             
+            # Attempt to import torch at runtime (deferred to avoid DLL errors at startup)
+            has_torch, torch, TorchE2PTransform, import_error = _try_import_torch()
+            
             # Check for GPU acceleration with comprehensive compatibility testing
             use_gpu = False
-            if HAS_TORCH_TRANSFORM and torch.cuda.is_available():
+            if has_torch and torch.cuda.is_available():
                 try:
                     # Get GPU info
                     device_name = torch.cuda.get_device_name(0)
