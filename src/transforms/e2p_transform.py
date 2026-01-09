@@ -68,6 +68,94 @@ class TorchE2PTransform:
         # input is (N, C, H_in, W_in)
         return F.grid_sample(equirect_tensor, grid, mode='bilinear', padding_mode='border', align_corners=True)
 
+    def batch_equirect_to_pinhole(self, equirect_batch, yaw=0, pitch=0, roll=0, 
+                                   h_fov=90, v_fov=None, output_width=1920, output_height=1080):
+        """
+        Convert multiple equirectangular images to pinhole views (batch processing).
+        Processes all frames simultaneously on GPU for massive speedup.
+        
+        Args:
+            equirect_batch: Batch of images (N, 3, H, W) tensor, normalized 0-1
+            yaw, pitch, roll: Camera orientation in degrees (same for all frames)
+            h_fov, v_fov: Field of view
+            output_width, output_height: Output dimensions
+            
+        Returns:
+            Batch of perspective views (N, 3, H_out, W_out)
+        """
+        if v_fov is None:
+            v_fov = h_fov * output_height / output_width
+
+        # Ensure input is (N, C, H, W)
+        if equirect_batch.dim() == 3:
+            equirect_batch = equirect_batch.unsqueeze(0)
+            
+        batch_size = equirect_batch.shape[0]
+        
+        # Create cache key (camera params only)
+        cache_key = (yaw, pitch, roll, h_fov, v_fov, output_width, output_height)
+        
+        if cache_key in self.cache:
+            grid_single = self.cache[cache_key]  # (1, H, W, 2)
+        else:
+            grid_single = self._generate_grid(yaw, pitch, roll, h_fov, v_fov, output_width, output_height)
+            self.cache[cache_key] = grid_single
+            
+        # Expand grid for batch: (1, H, W, 2) -> (N, H, W, 2)
+        grid_batch = grid_single.expand(batch_size, -1, -1, -1)
+        
+        # Batch transform (all frames processed in parallel on GPU)
+        return F.grid_sample(equirect_batch, grid_batch, mode='bilinear', padding_mode='border', align_corners=True)
+
+    def get_optimal_batch_size(self, input_height, input_width, output_height, output_width):
+        """
+        Calculate optimal batch size based on available VRAM.
+        
+        Args:
+            input_height, input_width: Input equirectangular dimensions
+            output_height, output_width: Output perspective dimensions
+            
+        Returns:
+            Optimal batch size (int)
+        """
+        if self.device == 'cpu':
+            return 1  # No batching on CPU
+            
+        try:
+            # Get GPU memory info
+            total_vram = torch.cuda.get_device_properties(self.device).total_memory
+            allocated = torch.cuda.memory_allocated(self.device)
+            reserved = torch.cuda.memory_reserved(self.device)
+            free_vram = total_vram - reserved
+            
+            # Conservative estimate: use 50% of free VRAM
+            available = free_vram * 0.5
+            
+            # Memory per frame (in bytes):
+            # Input: H × W × 3 channels × 4 bytes (float32)
+            input_size = input_height * input_width * 3 * 4
+            # Output: H_out × W_out × 3 × 4
+            output_size = output_height * output_width * 3 * 4
+            # Grid: H_out × W_out × 2 × 4 (shared across batch, but count once)
+            grid_size = output_height * output_width * 2 * 4
+            # Overhead for intermediate calculations (~30% of input+output)
+            overhead = (input_size + output_size) * 0.3
+            
+            per_frame_memory = input_size + output_size + overhead
+            
+            # Calculate batch size
+            batch_size = int(available // per_frame_memory)
+            
+            # Clamp between 1 and 32 (practical limits)
+            batch_size = max(1, min(batch_size, 32))
+            
+            logger.info(f"Auto-detected optimal batch size: {batch_size} (Free VRAM: {free_vram / 1024**3:.2f} GB)")
+            return batch_size
+            
+        except Exception as e:
+            logger.warning(f"Failed to detect optimal batch size: {e}. Using batch_size=4")
+            return 4
+
     def _generate_grid(self, yaw, pitch, roll, h_fov, v_fov, width, height):
         """Generate sampling grid for grid_sample"""
         # Create meshgrid

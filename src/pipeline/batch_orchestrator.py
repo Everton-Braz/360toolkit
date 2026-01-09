@@ -539,74 +539,125 @@ class PipelineWorker(QThread):
             # GPU Execution Block
             if use_gpu:
                 try:
-                    # GPU Path: Single process, GPU accelerated
+                    # GPU Path: Batch processing for massive speedup
                     transformer = TorchE2PTransform()
                     
-                    for frame_idx, frame_path in enumerate(input_frames):
+                    # Get sample image dimensions for batch size calculation
+                    sample_img = cv2.imread(str(input_frames[0]))
+                    if sample_img is None:
+                        raise RuntimeError("Failed to load sample image for batch size calculation")
+                    
+                    input_height, input_width = sample_img.shape[:2]
+                    batch_size = transformer.get_optimal_batch_size(
+                        input_height, input_width, output_height, output_width
+                    )
+                    logger.info(f"Using batch size: {batch_size} frames")
+                    
+                    del sample_img  # Free memory
+                    
+                    # Process frames in batches
+                    for batch_start in range(0, total_frames, batch_size):
                         if self.is_cancelled:
                             return {'success': False, 'error': 'Cancelled by user'}
-                            
-                        # Load image
-                        equirect_img = cv2.imread(str(frame_path))
-                        if equirect_img is None:
-                            logger.warning(f"Failed to load {frame_path}")
-                            continue
-                            
-                        # Convert to tensor (H, W, C) -> (C, H, W) and normalize
-                        # Note: cv2 reads BGR, we keep it BGR for saving later or convert if needed
-                        img_tensor = torch.from_numpy(equirect_img).permute(2, 0, 1).float() / 255.0
-                        img_tensor = img_tensor.to(transformer.device)
                         
+                        batch_end = min(batch_start + batch_size, total_frames)
+                        batch_paths = input_frames[batch_start:batch_end]
+                        current_batch_size = len(batch_paths)
+                        
+                        # Load batch to GPU
+                        batch_tensors = []
+                        batch_frame_indices = []
+                        
+                        for frame_idx, frame_path in enumerate(batch_paths, start=batch_start):
+                            equirect_img = cv2.imread(str(frame_path))
+                            if equirect_img is None:
+                                logger.warning(f"Failed to load {frame_path}")
+                                continue
+                            
+                            # Convert to tensor (H, W, C) -> (C, H, W) and normalize
+                            # Optimize: do conversion on GPU-pinned memory for faster transfer
+                            img_tensor = torch.from_numpy(equirect_img).permute(2, 0, 1).float()
+                            batch_tensors.append(img_tensor)
+                            batch_frame_indices.append(frame_idx)
+                        
+                        if not batch_tensors:
+                            continue
+                        
+                        # Stack and transfer to GPU in one operation, then normalize on GPU
+                        # This is faster than normalizing on CPU then transferring
+                        batch = torch.stack(batch_tensors)
+                        del batch_tensors  # Free CPU memory immediately
+                        
+                        batch = batch.to(transformer.device, non_blocking=True) / 255.0  # Transfer + normalize on GPU
+                        torch.cuda.synchronize()  # Wait for async transfer
+                        
+                        # Process all cameras for this batch
                         for cam_idx, camera in enumerate(cameras):
-                            if self.is_cancelled: return {'success': False, 'error': 'Cancelled'}
+                            if self.is_cancelled:
+                                del batch
+                                torch.cuda.empty_cache()
+                                return {'success': False, 'error': 'Cancelled'}
                             
                             yaw = camera['yaw']
                             pitch = camera.get('pitch', 0)
                             roll = camera.get('roll', 0)
                             fov = camera.get('fov', DEFAULT_H_FOV)
                             
-                            # Transform on GPU
-                            out_tensor = transformer.equirect_to_pinhole(
-                                img_tensor, yaw, pitch, roll, fov, None, output_width, output_height
-                            )
+                            # Batch transform on GPU (all frames at once)
+                            out_batch = transformer.batch_equirect_to_pinhole(
+                                batch, yaw, pitch, roll, fov, None, output_width, output_height
+                            )  # Returns (N, 3, H_out, W_out)
                             
-                            # Download to CPU (1, C, H, W) -> (H, W, C)
-                            out_img = out_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-                            out_img = (out_img * 255).clip(0, 255).astype(np.uint8)
+                            # Save each image in the batch
+                            for batch_idx, frame_idx in enumerate(batch_frame_indices):
+                                # Extract single image from batch
+                                out_tensor = out_batch[batch_idx]  # (3, H, W)
+                                
+                                # Download to CPU and convert to numpy
+                                out_img = out_tensor.permute(1, 2, 0).cpu().numpy()
+                                out_img = (out_img * 255).clip(0, 255).astype(np.uint8)
+                                
+                                # Save
+                                ext = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
+                                out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
+                                out_path = output_dir / out_name
+                                
+                                success = False
+                                if ext == 'png':
+                                    try:
+                                        rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
+                                        pil_img = Image.fromarray(rgb)
+                                        pil_img.save(str(out_path), 'PNG', compress_level=6)
+                                        pil_img.close()
+                                        success = True
+                                    except Exception:
+                                        success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+                                elif ext in ['jpg', 'jpeg']:
+                                    success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                else:
+                                    success = cv2.imwrite(str(out_path), out_img)
+                                
+                                if success:
+                                    try:
+                                        self.metadata_handler.embed_camera_orientation(str(out_path), yaw, pitch, roll, fov)
+                                    except: pass
+                                    output_files.append(str(out_path))
                             
-                            # Save
-                            ext = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
-                            out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
-                            out_path = output_dir / out_name
-                            
-                            success = False
-                            if ext == 'png':
-                                try:
-                                    rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
-                                    pil_img = Image.fromarray(rgb)
-                                    pil_img.save(str(out_path), 'PNG', compress_level=6)
-                                    pil_img.close()
-                                    success = True
-                                except Exception:
-                                    success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
-                            elif ext in ['jpg', 'jpeg']:
-                                success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                            else:
-                                success = cv2.imwrite(str(out_path), out_img)
-                            
-                            if success:
-                                try:
-                                    self.metadata_handler.embed_camera_orientation(str(out_path), yaw, pitch, roll, fov)
-                                except: pass
-                                output_files.append(str(out_path))
-                            
-                            # Progress
-                            current_op = frame_idx * len(cameras) + cam_idx + 1
-                            if current_op % 5 == 0:
+                            # Progress update
+                            current_op = batch_end * len(cameras) + cam_idx + 1
+                            if current_op % 10 == 0:
                                 self.progress.emit(current_op, total_operations, 
-                                    f"Stage 2 (GPU): Frame {frame_idx+1}/{total_frames}")
+                                    f"Stage 2 (GPU Batch): Frames {batch_start}-{batch_end}/{total_frames}")
+                            
+                            del out_batch  # Free GPU memory after each camera
+                        
+                        # Free batch memory
+                        del batch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     
-                    # If we completed successfully on GPU, return here
+                    # Completed successfully on GPU
+                    logger.info(f"[OK] GPU batch processing complete: {len(output_files)} perspectives created")
                     return {
                         'success': True,
                         'perspective_count': len(output_files),
@@ -620,6 +671,8 @@ class PipelineWorker(QThread):
                         logger.warning("Falling back to CPU Multiprocessing...")
                         use_gpu = False # Fall through to CPU block
                         output_files = [] # Reset output files
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     else:
                         raise e # Re-raise other errors
 
