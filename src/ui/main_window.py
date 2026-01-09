@@ -988,7 +988,7 @@ License: MIT"""
             return
         
         # Auto-discover Stage 1 output
-        from pipeline.batch_orchestrator import PipelineWorker
+        from src.pipeline.batch_orchestrator import PipelineWorker
         worker = PipelineWorker({})  # Dummy worker just for discovery method
         
         stage1_folder = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
@@ -1047,7 +1047,7 @@ License: MIT"""
             return
         
         # Auto-discover Stage 2 output
-        from pipeline.batch_orchestrator import PipelineWorker
+        from src.pipeline.batch_orchestrator import PipelineWorker
         worker = PipelineWorker({})  # Dummy worker just for discovery method
         
         stage2_folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
