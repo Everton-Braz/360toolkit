@@ -285,6 +285,18 @@ License: MIT"""
         self.stage2_method_combo.currentIndexChanged.connect(self.on_stage2_method_changed)
         stage2_header.addWidget(self.stage2_method_combo)
         stage2_layout.addLayout(stage2_header)
+        
+        # Skip Transform checkbox (Direct Masking Mode)
+        self.skip_transform_check = QCheckBox("⏩ Skip Transform (Direct Mask)")
+        self.skip_transform_check.setChecked(False)
+        self.skip_transform_check.setToolTip(
+            "Skip perspective splitting and mask equirectangular/fisheye images directly.\n"
+            "Faster workflow for 360° VR or native photogrammetry."
+        )
+        self.skip_transform_check.setStyleSheet("color: #4a9eff; font-weight: bold;")
+        self.skip_transform_check.toggled.connect(self.on_skip_transform_toggled)
+        stage2_layout.addWidget(self.skip_transform_check)
+        
         self.run_stage2_btn = QPushButton("▶ Run Stage 2")
         self.run_stage2_btn.setMinimumHeight(32)
         self.run_stage2_btn.clicked.connect(self.run_stage_2_only)
@@ -531,6 +543,7 @@ License: MIT"""
         camera_layout.addLayout(fov_layout)
         
         camera_group.setLayout(camera_layout)
+        self.stage2_camera_group = camera_group  # Store reference for enabling/disabling
         layout.addWidget(camera_group)
         
         # Output Settings for Stage 2
@@ -567,6 +580,7 @@ License: MIT"""
         output_layout.addLayout(format2_layout)
         
         output_group.setLayout(output_layout)
+        self.stage2_output_group = output_group  # Store reference
         layout.addWidget(output_group)
         
         # Perspective-specific parameters
@@ -594,6 +608,7 @@ License: MIT"""
         perspective_params_layout.addLayout(roll_layout)
         
         perspective_params_group.setLayout(perspective_params_layout)
+        self.stage2_perspective_params_group = perspective_params_group  # Store reference
         layout.addWidget(perspective_params_group)
         
         layout.addStretch()
@@ -891,6 +906,21 @@ License: MIT"""
         # Compass functionality removed (preview disabled)
         pass
     
+    def on_skip_transform_toggled(self, checked: bool):
+        """Handle skip transform checkbox toggle"""
+        # Enable/disable Stage 2 transform controls in tabs
+        self.stage2_camera_group.setEnabled(not checked)
+        self.stage2_output_group.setEnabled(not checked)
+        self.stage2_perspective_params_group.setEnabled(not checked)
+        
+        # Also disable the Run Stage 2 button when skip is enabled
+        self.run_stage2_btn.setEnabled(not checked)
+        
+        if checked:
+            self.log_message("⏩ Direct Masking Mode enabled - Stage 2 will be skipped")
+        else:
+            self.log_message("ℹ️ Direct Masking Mode disabled - Stage 2 transform enabled")
+    
     def on_stage2_method_changed(self, index: int):
         """Handle Stage 2 method selection change"""
         method = self.stage2_method_combo.currentData()
@@ -1127,7 +1157,8 @@ License: MIT"""
             'input_file': input_file,
             'output_dir': output_dir,
             'enable_stage1': self.stage1_enable.isChecked(),
-            'enable_stage2': self.stage2_enable.isChecked(),
+            'skip_transform': self.skip_transform_check.isChecked(),
+            'enable_stage2': self.stage2_enable.isChecked() and not self.skip_transform_check.isChecked(),
             'enable_stage3': self.stage3_enable.isChecked(),
             
             # Stage 1

@@ -449,9 +449,12 @@ class MultiCategoryMasker:
         image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
         image_files = []
         
+        # Search recursively for images (supports dual-lens subdirectories like lens_1/, lens_2/)
         for ext in image_extensions:
-            image_files.extend(input_path.glob(ext))
-            image_files.extend(input_path.glob(ext.upper()))
+            image_files.extend(input_path.glob(ext))  # Direct files
+            image_files.extend(input_path.glob(ext.upper()))  # Uppercase
+            image_files.extend(input_path.glob(f'**/{ext}'))  # Subdirectories (lowercase)
+            image_files.extend(input_path.glob(f'**/{ext.upper()}'))  # Subdirectories (uppercase)
         
         total = len(image_files)
         successful = 0

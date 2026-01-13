@@ -228,8 +228,21 @@ class PipelineWorker(QThread):
                     self.finished.emit(results)
                     return
             
-            # Stage 2: Split Perspectives
-            if self.config.get('enable_stage2', True):
+            # Stage 2: Split Perspectives (Skip if direct masking mode)
+            skip_transform = self.config.get('skip_transform', False)
+            
+            if skip_transform:
+                logger.info("=== Stage 2: SKIPPED (Direct Masking Mode) ===")
+                logger.info("Stage 1 frames will be used directly for Stage 3 masking")
+                # Pass Stage 1 output to Stage 3 input
+                results['stage2'] = {
+                    'success': True,
+                    'skipped': True,
+                    'message': 'Transform skipped - using equirectangular/fisheye frames directly'
+                }
+                stages_executed.append(2)  # Mark as executed (but skipped)
+                self.stage_complete.emit(2, results['stage2'])
+            elif self.config.get('enable_stage2', True):
                 if self.is_cancelled:
                     logger.info("Pipeline cancelled before Stage 2")
                     results['stages_executed'] = stages_executed
@@ -944,6 +957,19 @@ class PipelineWorker(QThread):
     def _execute_stage3(self) -> Dict:
         """Execute Stage 3: AI Masking"""
         try:
+            # Determine input directory based on skip_transform flag
+            skip_transform = self.config.get('skip_transform', False)
+            
+            if skip_transform:
+                # Use Stage 1 output (equirectangular/fisheye frames) directly
+                input_dir = Path(self.config['output_dir']) / 'stage1_frames'
+                logger.info("[Direct Masking] Using Stage 1 frames (equirectangular/fisheye) for masking")
+            else:
+                # Use Stage 2 output (perspective images)
+                input_dir = Path(self.config.get('stage3_input_dir', 
+                                               str(Path(self.config['output_dir']) / 'stage2_perspectives')))
+                logger.info(f"Using Stage 2 perspectives for masking: {input_dir}")
+            
             # Initialize masker if not done
             if self.masker is None:
                 model_size = self.config.get('model_size', 'small')
@@ -1074,10 +1100,17 @@ class PipelineWorker(QThread):
                     animals=categories.get('animals', True)
                 )
             
-            # Get input images (auto-discovery runs ONLY ONCE)
-            if self.config.get('enable_stage2', True):
-                # Stage 2 was enabled - use its output directly
+            # Get input images based on skip_transform flag
+            skip_transform = self.config.get('skip_transform', False)
+            
+            if skip_transform:
+                # Direct Masking Mode - use Stage 1 frames (equirectangular/fisheye)
+                input_dir = Path(self.config['output_dir']) / 'stage1_frames'
+                logger.info(f"[Direct Masking] Using Stage 1 frames directly: {input_dir}")
+            elif self.config.get('enable_stage2', True):
+                # Stage 2 was enabled - use its output (perspective images)
                 input_dir = Path(self.config['output_dir']) / 'stage2_perspectives'
+                logger.info(f"Using Stage 2 perspectives: {input_dir}")
             else:
                 # Stage 2 disabled - check for explicit input or auto-discover ONCE
                 stage3_input = self.config.get('stage3_input_dir')
@@ -1086,6 +1119,7 @@ class PipelineWorker(QThread):
                     discovered = self.discover_stage_input_folder(3, self.config['output_dir'])
                     if discovered:
                         input_dir = discovered
+                        logger.info(f"Auto-discovered Stage 3 input: {input_dir}")
                     else:
                         return {
                             'success': False,
@@ -1096,6 +1130,7 @@ class PipelineWorker(QThread):
                         }
                 else:
                     input_dir = Path(stage3_input)
+                    logger.info(f"Using specified Stage 3 input: {input_dir}")
             
             output_dir = Path(self.config['output_dir']) / 'stage3_masks'
             save_visualization = self.config.get('save_visualization', False)
