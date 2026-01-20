@@ -137,13 +137,14 @@ class TorchE2PTransform:
             
         return result
 
-    def get_optimal_batch_size(self, input_height, input_width, output_height, output_width):
+    def get_optimal_batch_size(self, input_height, input_width, output_height, output_width, num_cameras=8):
         """
         Calculate optimal batch size based on available VRAM.
         
         Args:
             input_height, input_width: Input equirectangular dimensions
             output_height, output_width: Output perspective dimensions
+            num_cameras: Number of camera perspectives per frame (default 8)
             
         Returns:
             Optimal batch size (int)
@@ -158,8 +159,8 @@ class TorchE2PTransform:
             reserved = torch.cuda.memory_reserved(self.device)
             free_vram = total_vram - reserved
             
-            # Conservative estimate: use 50% of free VRAM
-            available = free_vram * 0.5
+            # Conservative estimate: use 40% of free VRAM (reduced from 50% for safety)
+            available = free_vram * 0.4
             
             # Memory per frame (in bytes):
             # FP16 uses 2 bytes, FP32 uses 4 bytes
@@ -167,23 +168,35 @@ class TorchE2PTransform:
             
             # Input: H × W × 3 channels × bytes_per_element
             input_size = input_height * input_width * 3 * bytes_per_element
-            # Output: H_out × W_out × 3 × bytes_per_element
-            output_size = output_height * output_width * 3 * bytes_per_element
-            # Grid: H_out × W_out × 2 × bytes_per_element (shared across batch, but count once)
-            grid_size = output_height * output_width * 2 * bytes_per_element
-            # Overhead for intermediate calculations (~30% of input+output)
-            overhead = (input_size + output_size) * 0.3
+            # Output PER CAMERA: H_out × W_out × 3 × bytes_per_element
+            output_size_per_cam = output_height * output_width * 3 * bytes_per_element
+            # Total output for ALL cameras (we process all cameras per batch)
+            output_size = output_size_per_cam * num_cameras
+            # Grid: H_out × W_out × 2 × bytes_per_element (one per camera, cached)
+            grid_size = output_height * output_width * 2 * bytes_per_element * num_cameras
+            # Overhead for intermediate calculations (~50% of input+output for safety)
+            overhead = (input_size + output_size) * 0.5
             
-            per_frame_memory = input_size + output_size + overhead
+            per_frame_memory = input_size + output_size + grid_size + overhead
             
-            # Calculate batch size (FP16 allows ~2x larger batches)
+            # Calculate batch size
             batch_size = int(available // per_frame_memory)
             
-            # Clamp between 1 and 64 (FP16 allows larger batches)
-            max_batch = 64 if self.use_fp16 else 32
+            # Clamp between 1 and reasonable max based on input size
+            # For 8K input (7680×3840), limit to smaller batches
+            if input_height * input_width > 20_000_000:  # > ~5K resolution
+                max_batch = 8 if self.use_fp16 else 4
+            elif input_height * input_width > 8_000_000:  # > ~3K resolution
+                max_batch = 16 if self.use_fp16 else 8
+            else:
+                max_batch = 32 if self.use_fp16 else 16
+            
             batch_size = max(1, min(batch_size, max_batch))
             
-            logger.info(f"Auto-detected optimal batch size: {batch_size} (Free VRAM: {free_vram / 1024**3:.2f} GB)")
+            logger.info(f"Auto-detected optimal batch size: {batch_size} "
+                       f"(Input: {input_width}×{input_height}, "
+                       f"Cameras: {num_cameras}, "
+                       f"Free VRAM: {free_vram / 1024**3:.2f} GB)")
             return batch_size
             
         except Exception as e:

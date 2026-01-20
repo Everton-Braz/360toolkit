@@ -596,8 +596,11 @@ class PipelineWorker(QThread):
                         raise RuntimeError("Failed to load sample image for batch size calculation")
                     
                     input_height, input_width = sample_img.shape[:2]
+                    
+                    # Pass num_cameras to batch size calculation for accurate VRAM estimation
+                    num_cameras = len(cameras)
                     batch_size = transformer.get_optimal_batch_size(
-                        input_height, input_width, output_height, output_width
+                        input_height, input_width, output_height, output_width, num_cameras
                     )
                     logger.info(f"Using batch size: {batch_size} frames")
                     
