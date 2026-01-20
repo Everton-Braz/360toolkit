@@ -132,6 +132,20 @@ class PipelineWorker(QThread):
         self.e2c_transform = E2CTransform()
         self.metadata_handler = MetadataHandler()
         self.masker = None  # Initialize only if masking enabled
+        
+        # Temp folder for Stage 1 when skip_intermediate_save is enabled
+        self._temp_stage1_dir = None
+    
+    def _cleanup_temp_stage1(self):
+        """Clean up temp Stage 1 folder after Stage 2 completes (if skip_intermediate_save was used)"""
+        if self._temp_stage1_dir and Path(self._temp_stage1_dir).exists():
+            import shutil
+            try:
+                shutil.rmtree(self._temp_stage1_dir)
+                logger.info(f"[CLEANUP] Deleted temp Stage 1 folder: {self._temp_stage1_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp folder: {e}")
+            self._temp_stage1_dir = None
     
     def discover_stage_input_folder(self, stage: int, output_dir: str) -> Optional[Path]:
         """
@@ -255,6 +269,9 @@ class PipelineWorker(QThread):
                 stages_executed.append(2)
                 self.stage_complete.emit(2, stage2_result)
                 
+                # Clean up temp Stage 1 folder if skip_intermediate_save was enabled
+                self._cleanup_temp_stage1()
+                
                 if not stage2_result.get('success'):
                     self.error.emit(f"Stage 2 failed: {stage2_result.get('error')}")
                     results['success'] = False
@@ -301,7 +318,21 @@ class PipelineWorker(QThread):
         """Execute Stage 1: Frame Extraction"""
         try:
             input_file = self.config['input_file']
-            output_dir = Path(self.config['output_dir']) / 'stage1_frames'
+            
+            # Check if we should skip saving intermediate files
+            skip_intermediate = self.config.get('skip_intermediate_save', False)
+            
+            if skip_intermediate:
+                # Use a temp folder that will be cleaned up after Stage 2
+                import tempfile
+                temp_dir = tempfile.mkdtemp(prefix='360toolkit_stage1_')
+                output_dir = Path(temp_dir)
+                self._temp_stage1_dir = temp_dir  # Store for cleanup
+                logger.info(f"[FAST] Using temp folder for Stage 1: {temp_dir}")
+            else:
+                output_dir = Path(self.config['output_dir']) / 'stage1_frames'
+                self._temp_stage1_dir = None
+            
             fps = self.config.get('fps', DEFAULT_FPS)
             method = self.config.get('extraction_method', 'opencv')
             
@@ -578,7 +609,8 @@ class PipelineWorker(QThread):
                         logger.warning("PNG format selected - saving will be slower. Consider JPEG for faster processing.")
                     
                     # Thread pool for async image saving (I/O bound)
-                    save_executor = ThreadPoolExecutor(max_workers=8)
+                    # Optimal workers found by test_optimal_workers.py: 16-24 threads
+                    save_executor = ThreadPoolExecutor(max_workers=16)
                     save_futures = []
                     
                     def save_image_async(out_img, out_path, ext, yaw, pitch, roll, fov):
@@ -604,7 +636,10 @@ class PipelineWorker(QThread):
                             return None
                     
                     # Thread pool for async image loading (I/O bound)
-                    load_executor = ThreadPoolExecutor(max_workers=4)
+                    # Optimal workers found by test_optimal_workers.py: 24 threads
+                    # With 4 workers: 4.18s for 30 images (7680x3840)
+                    # With 24 workers: 2.30s for 30 images = 1.8x faster
+                    load_executor = ThreadPoolExecutor(max_workers=24)
                     
                     def load_image(path):
                         """Load image and convert to pinned memory tensor for faster GPU transfer"""
@@ -615,8 +650,13 @@ class PipelineWorker(QThread):
                         tensor = torch.from_numpy(img).permute(2, 0, 1).float()
                         return tensor.pin_memory() if tensor.device.type == 'cpu' else tensor
                     
-                    # Process frames in batches with prefetching
+                    # Process frames in batches with PREFETCHING
+                    # Overlaps I/O (loading next batch) with GPU compute (processing current batch)
                     total_batches = (total_frames + batch_size - 1) // batch_size
+                    
+                    # Pre-submit first batch load
+                    pending_load_futures = None
+                    pending_batch_start = 0
                     
                     for batch_idx, batch_start in enumerate(range(0, total_frames, batch_size)):
                         if self.is_cancelled:
@@ -627,9 +667,23 @@ class PipelineWorker(QThread):
                         batch_end = min(batch_start + batch_size, total_frames)
                         batch_paths = input_frames[batch_start:batch_end]
                         
-                        # Load images in parallel using thread pool
-                        load_futures = {load_executor.submit(load_image, p): (i, p) 
-                                       for i, p in enumerate(batch_paths, start=batch_start)}
+                        # If first batch or no prefetch, submit load now
+                        if pending_load_futures is None:
+                            load_futures = {load_executor.submit(load_image, p): (i, p) 
+                                           for i, p in enumerate(batch_paths, start=batch_start)}
+                        else:
+                            # Use prefetched futures
+                            load_futures = pending_load_futures
+                        
+                        # PREFETCH: Start loading NEXT batch while we process current batch
+                        next_batch_start = batch_end
+                        if next_batch_start < total_frames:
+                            next_batch_end = min(next_batch_start + batch_size, total_frames)
+                            next_batch_paths = input_frames[next_batch_start:next_batch_end]
+                            pending_load_futures = {load_executor.submit(load_image, p): (i, p) 
+                                                   for i, p in enumerate(next_batch_paths, start=next_batch_start)}
+                        else:
+                            pending_load_futures = None
                         
                         batch_tensors = []
                         batch_frame_indices = []

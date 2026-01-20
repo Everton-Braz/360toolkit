@@ -527,6 +527,15 @@ class SettingsManager:
         self.settings['auto_detect_on_startup'] = enabled
         self.save_settings()
     
+    def get_skip_intermediate_save(self) -> bool:
+        """Get skip intermediate save setting (Stage 1 frames saved to temp folder)"""
+        return self.settings.get('skip_intermediate_save', False)
+    
+    def set_skip_intermediate_save(self, enabled: bool):
+        """Set skip intermediate save setting"""
+        self.settings['skip_intermediate_save'] = enabled
+        self.save_settings()
+    
     def get_last_input_directory(self) -> Optional[Path]:
         """Get last used input directory"""
         path_str = self.settings.get('last_input_directory')

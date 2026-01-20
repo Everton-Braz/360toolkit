@@ -48,6 +48,11 @@ DEFAULT_OUTPUT_FORMAT = 'png'
 # File handling
 DELETE_INTERMEDIATE_FILES = False
 
+# Stage 1 intermediate frame handling
+# When True, equirectangular frames are saved to a temp folder and cleaned up after Stage 2
+# When False, equirectangular frames are saved to output_dir/stage1_frames (default)
+SKIP_INTERMEDIATE_SAVE = False
+
 # ============================================================================
 # STAGE 2: PERSPECTIVE SPLITTING DEFAULTS
 # ============================================================================

@@ -187,6 +187,22 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
         
+        # Performance options
+        perf_group = QGroupBox("Performance Options")
+        perf_layout = QVBoxLayout()
+        
+        self.skip_intermediate_checkbox = QCheckBox("Skip saving Stage 1 frames (faster)")
+        self.skip_intermediate_checkbox.setToolTip(
+            "When enabled, equirectangular frames are saved to a temp folder\n"
+            "and automatically deleted after Stage 2 completes.\n"
+            "This saves disk space and can be faster on SSDs.\n\n"
+            "Disable this if you want to keep the equirectangular frames."
+        )
+        perf_layout.addWidget(self.skip_intermediate_checkbox)
+        
+        perf_group.setLayout(perf_layout)
+        layout.addWidget(perf_group)
+        
         # Recent directories
         dirs_group = QGroupBox("Recent Directories")
         dirs_layout = QFormLayout()
@@ -267,6 +283,9 @@ class SettingsDialog(QDialog):
         if ffmpeg_path:
             self.ffmpeg_path_edit.setText(str(ffmpeg_path))
         self.update_ffmpeg_status()
+        
+        # Performance options
+        self.skip_intermediate_checkbox.setChecked(self.settings.get_skip_intermediate_save())
         
         # Directories
         last_input = self.settings.get_last_input_directory()
@@ -521,6 +540,9 @@ class SettingsDialog(QDialog):
         """Save all settings"""
         # Save auto-detection preference
         self.settings.set_auto_detect_on_startup(self.auto_detect_checkbox.isChecked())
+        
+        # Save performance options
+        self.settings.set_skip_intermediate_save(self.skip_intermediate_checkbox.isChecked())
         
         # Save SDK path
         sdk_path_str = self.sdk_path_edit.text().strip()

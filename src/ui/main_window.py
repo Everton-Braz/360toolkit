@@ -1152,6 +1152,11 @@ License: MIT"""
         # Get Stage 2 method
         stage2_method = self.stage2_method_combo.currentData()
         
+        # Get skip intermediate setting from settings manager
+        from src.config.settings import get_settings
+        settings = get_settings()
+        skip_intermediate = settings.get_skip_intermediate_save()
+        
         # Build configuration
         self.pipeline_config = {
             'input_file': input_file,
@@ -1160,6 +1165,7 @@ License: MIT"""
             'skip_transform': self.skip_transform_check.isChecked(),
             'enable_stage2': self.stage2_enable.isChecked() and not self.skip_transform_check.isChecked(),
             'enable_stage3': self.stage3_enable.isChecked(),
+            'skip_intermediate_save': skip_intermediate,  # Performance: Use temp folder for Stage 1
             
             # Stage 1
             'fps': self.fps_spin.value(),
