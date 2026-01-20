@@ -50,6 +50,14 @@ class SettingsManager:
             if detected_ffmpeg:
                 self.settings['ffmpeg_path'] = str(detected_ffmpeg)
                 self.settings['ffmpeg_auto_detected'] = True
+        
+        # Auto-detect GloMAP if not configured
+        if not self.settings.get('glomap_path') or not self.is_glomap_valid(self.settings.get('glomap_path')):
+            logger.info("GloMAP path not configured or invalid, running auto-detection...")
+            detected_glomap = self.auto_detect_glomap()
+            if detected_glomap:
+                self.settings['glomap_path'] = str(detected_glomap)
+                self.settings['glomap_auto_detected'] = True
     
     def _load_settings(self) -> Dict:
         """Load settings from JSON file"""
@@ -359,6 +367,142 @@ class SettingsManager:
         self.settings['yolo_model_size'] = size
         self.save_settings()
     
+    # === GLOMAP PATH MANAGEMENT ===
+    
+    def auto_detect_glomap(self) -> Optional[Path]:
+        """
+        Auto-detect GloMAP installation.
+        
+        Search order:
+        1. Documents/APLICATIVOS/GloMAP/bin/glomap.exe
+        2. Documents/APLICATIVOS/GloMAP_GUI/glomap/build/bin/Release/glomap.exe
+        3. System PATH (shutil.which)
+        4. C:/Program Files/GloMAP/bin/glomap.exe
+        5. ../glomap/bin/ relative to app
+        
+        Returns:
+            Path to glomap.exe if found, None otherwise
+        """
+        logger.info("Searching for GloMAP...")
+        
+        # 1. User Documents folder - pre-built release
+        docs = Path.home() / "Documents"
+        glomap_paths = [
+            docs / "APLICATIVOS" / "GloMAP" / "bin" / "glomap.exe",
+            docs / "APLICATIVOS" / "GloMAP_GUI" / "glomap" / "build" / "bin" / "Release" / "glomap.exe",
+            docs / "APLICATIVOS" / "GloMAP_GUI" / "glomap" / "build" / "Release" / "glomap.exe",
+        ]
+        for path in glomap_paths:
+            if self.is_glomap_valid(path):
+                logger.info(f"[OK] GloMAP found at {path}")
+                return path
+        
+        # 2. System PATH
+        glomap_in_path = shutil.which('glomap')
+        if glomap_in_path:
+            glomap_path = Path(glomap_in_path)
+            if self.is_glomap_valid(glomap_path):
+                logger.info(f"[OK] GloMAP found in PATH: {glomap_path}")
+                return glomap_path
+        
+        # 3. Standard installation locations
+        standard_paths = [
+            Path("C:/Program Files/GloMAP/bin/glomap.exe"),
+            Path("C:/GloMAP/bin/glomap.exe"),
+            Path("C:/colmap/glomap.exe"),
+        ]
+        for path in standard_paths:
+            if self.is_glomap_valid(path):
+                logger.info(f"[OK] GloMAP found at {path}")
+                return path
+        
+        # 4. Relative to app
+        app_dir = Path(__file__).parent.parent.parent
+        relative_glomap = app_dir / "glomap" / "bin" / "glomap.exe"
+        if self.is_glomap_valid(relative_glomap):
+            logger.info(f"[OK] GloMAP found at {relative_glomap}")
+            return relative_glomap
+        
+        logger.warning("[X] GloMAP not found in any standard location")
+        return None
+    
+    def is_glomap_valid(self, glomap_path: Optional[Path]) -> bool:
+        """Validate GloMAP path by checking executable exists and is runnable"""
+        if glomap_path is None:
+            return False
+        
+        glomap_path = Path(glomap_path)
+        if glomap_path.is_dir():
+            # If directory provided, look for glomap.exe inside
+            glomap_path = glomap_path / "glomap.exe"
+        
+        return glomap_path.exists() and glomap_path.is_file()
+    
+    def set_glomap_path(self, path: Optional[Path], auto_detected: bool = False) -> bool:
+        """Set GloMAP path and save. Returns True if valid, False otherwise."""
+        if path is None:
+            self.settings['glomap_path'] = None
+            self.settings['glomap_auto_detected'] = False
+            self.save_settings()
+            logger.info("GloMAP path cleared")
+            return True
+        
+        if not self.is_glomap_valid(path):
+            logger.warning(f"Invalid GloMAP path: {path}")
+            return False
+        
+        self.settings['glomap_path'] = str(path)
+        self.settings['glomap_auto_detected'] = auto_detected
+        self.save_settings()
+        logger.info(f"GloMAP path set to {path}")
+        return True
+    
+    def get_glomap_path(self) -> Optional[Path]:
+        """Get current GloMAP path"""
+        glomap_str = self.settings.get('glomap_path')
+        if glomap_str:
+            return Path(glomap_str)
+        return None
+    
+    def get_glomap_info(self, glomap_path: Optional[Path]) -> Dict:
+        """
+        Get detailed information about GloMAP installation.
+        
+        Returns:
+            Dictionary with GloMAP info (version, CUDA support, etc.)
+        """
+        if glomap_path is None or not self.is_glomap_valid(glomap_path):
+            return {'valid': False, 'error': 'Invalid or missing GloMAP path'}
+        
+        glomap_path = Path(glomap_path)
+        info = {
+            'valid': True,
+            'path': str(glomap_path),
+            'executable': glomap_path.name,
+            'cuda': False
+        }
+        
+        # Try to get version and CUDA status
+        try:
+            import subprocess
+            result = subprocess.run(
+                [str(glomap_path), '-h'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                output = result.stdout + result.stderr
+                if 'CUDA' in output:
+                    info['cuda'] = True
+                    info['version'] = 'GloMAP (with CUDA)'
+                else:
+                    info['version'] = 'GloMAP (CPU only)'
+        except Exception as e:
+            info['version'] = f'Could not determine version: {e}'
+        
+        return info
+    
     # === GENERAL SETTINGS ===
     
     def get(self, key: str, default=None):
@@ -492,6 +636,7 @@ class SettingsManager:
             'sdk_path': None,
             'ffmpeg_path': None,
             'yolo_model_path': None,
+            'glomap_path': None,
             'auto_detect_on_startup': True,
             'output_format': 'PNG',
             'default_fps': 1.0,
@@ -539,6 +684,17 @@ class SettingsManager:
             diagnostics.append(("YOLO Model", yolo_valid, yolo_status))
         else:
             diagnostics.append(("YOLO Model", False, "Not configured (will use Ultralytics default)"))
+        
+        # GloMAP
+        glomap_path = self.get_glomap_path()
+        if glomap_path:
+            glomap_valid = self.is_glomap_valid(glomap_path)
+            glomap_info = self.get_glomap_info(glomap_path)
+            cuda_status = " (CUDA)" if glomap_info.get('cuda') else " (CPU)"
+            glomap_status = f"{glomap_path}{cuda_status}" if glomap_valid else f"{glomap_path} (INVALID)"
+            diagnostics.append(("GloMAP", glomap_valid, glomap_status))
+        else:
+            diagnostics.append(("GloMAP", False, "Not configured (will use COLMAP mapper fallback)"))
         
         return diagnostics
 
