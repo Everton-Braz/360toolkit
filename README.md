@@ -93,6 +93,11 @@ The complete source code is available under MIT License. See [Build from Source]
 - **AI Model v2 Support**: Best quality preset now uses AI stitcher model v2 for superior blending
 - **Fixed ONNX Model Compatibility**: Re-exported YOLOv8 model with opset 17 for onnxruntime 1.20.1 compatibility
 - **Optimized Masking Pipeline**: ONNX-based inference for lightweight, fast processing without PyTorch dependency
+- **Fixed SDK Black Image Issue**: Resolved path resolution errors for SDK models.
+- **RTX 50-Series Compatibility**: Added automatic CPU fallback for masking on unsupported GPUs (e.g., RTX 5070 Ti).
+- **Performance Boost**: 
+  - **Stage 2 GPU Acceleration**: Uses PyTorch for ultra-fast perspective splitting (10x faster).
+  - **Stage 2 CPU Parallelism**: Uses all CPU cores when GPU is unavailable.
 
 ---
 
@@ -108,12 +113,48 @@ Purchase from [Gumroad](https://evertonbraz.gumroad.com/l/360toolkit) - Ready to
 
 **Requirements**:
 - Windows 10/11 64-bit
-- 4 GB free disk space
-- Optional: NVIDIA GPU for faster masking
+- 4 GB free disk space (ONNX version)
+- Optional: NVIDIA GPU for faster masking (RTX 30/40/50, GTX 10+)
+  - **RTX 50-series users**: See [GPU_COMPATIBILITY.md](GPU_COMPATIBILITY.md) for setup
 
 ### Option 2: Build from Source (Free)
 
-See [Build from Source](#-build-from-source) section for complete instructions.
+Clone repository and set up Python environment:
+
+```bash
+git clone https://github.com/Everton-Braz/360toolkit.git
+cd 360toolkit
+
+# Create virtual environment
+python -m venv .venv
+.venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run application
+python run_app.py
+```
+
+### SDK Setup (Critical)
+
+For the Insta360 MediaSDK to work correctly, you must ensure the model files are in the correct location relative to the executable.
+
+1. Locate your Insta360 MediaSDK folder.
+2. Copy the `models` folder.
+3. Paste it inside the `bin` folder (where `MediaSDKTest.exe` resides).
+   - Structure should be: `.../MediaSDK/bin/models/`
+
+**Requirements**:
+- Python 3.10+
+- ONNX Runtime 1.20+ (CPU or GPU)
+- PyQt6
+- OpenCV, NumPy
+- Insta360 MediaSDK 3.0.5
+- Optional: PyTorch 2.6+ with CUDA 12.4 for GPU acceleration
+  - **RTX 50-series**: Requires PyTorch nightly build - run `update_pytorch_for_rtx50.bat`
+  - **RTX 30/40-series, GTX**: Stable PyTorch works fine
+  - See [GPU_COMPATIBILITY.md](GPU_COMPATIBILITY.md) for details
 
 ---
 

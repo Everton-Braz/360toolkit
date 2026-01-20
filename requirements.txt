@@ -26,11 +26,18 @@ onnxruntime>=1.20.0
 # For GPU acceleration (optional):
 # pip install onnxruntime-gpu>=1.20.0
 
-# OPTION B: PyTorch + Ultralytics (for development/model export)
-# Only needed if you want to train or export new ONNX models
-# Uncomment if needed:
-# ultralytics>=8.0.200
-# torch>=2.0.0
+# OPTION B: PyTorch + Ultralytics (INSTALLED - for full YOLOv8 support)
+# Required for YOLOv8 masking with model auto-download
+ultralytics>=8.0.200
+
+# PyTorch with CUDA 12.x support (RTX 30/40/50 series + GTX compatibility)
+# For RTX 50-series (Blackwell sm_120), use PyTorch nightly or wait for official 2.7+
+# Install with: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+torch>=2.6.0
+torchvision>=0.20.0
+
+# IMPORTANT: If you have RTX 50-series GPU, you need PyTorch nightly build:
+# pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124
 
 # ============================================================================
 # EXTERNAL DEPENDENCIES (Install separately)

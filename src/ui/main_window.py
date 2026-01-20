@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QSplitter, QScrollArea, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QAction
 
 from src.pipeline.batch_orchestrator import BatchOrchestrator
 from src.config.defaults import (
@@ -24,6 +24,8 @@ from src.config.defaults import (
     EXTRACTION_METHODS, TRANSFORM_TYPES, YOLOV8_MODELS,
     DEFAULT_SDK_QUALITY
 )
+from src.config.settings import get_settings
+from src.ui.settings_dialog import SettingsDialog
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +36,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
+        self.settings = get_settings()
         self.orchestrator = BatchOrchestrator()
         self.pipeline_config = {}
         
         self.init_ui()
+        self.create_menu_bar()
         self.apply_dark_theme()
         
         # Trigger initial visibility of SDK controls
@@ -68,6 +72,103 @@ class MainWindow(QMainWindow):
         
         # Status bar
         self.statusBar().showMessage("Ready to start")
+    
+    def create_menu_bar(self):
+        """Create menu bar with File and Settings menus"""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu("&File")
+        
+        open_action = QAction("&Open File...", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self.browse_input_file)
+        file_menu.addAction(open_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("E&xit", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # Settings menu
+        settings_menu = menubar.addMenu("&Settings")
+        
+        preferences_action = QAction("&Preferences...", self)
+        preferences_action.setShortcut("Ctrl+P")
+        preferences_action.triggered.connect(self.open_settings)
+        settings_menu.addAction(preferences_action)
+        
+        settings_menu.addSeparator()
+        
+        detect_paths_action = QAction("&Detect SDK/FFmpeg Paths", self)
+        detect_paths_action.triggered.connect(self.detect_paths)
+        settings_menu.addAction(detect_paths_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu("&Help")
+        
+        about_action = QAction("&About", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+    
+    def open_settings(self):
+        """Open settings dialog"""
+        dialog = SettingsDialog(self)
+        dialog.settings_changed.connect(self.on_settings_changed)
+        dialog.exec()
+    
+    def detect_paths(self):
+        """Run automatic path detection"""
+        sdk = self.settings.auto_detect_sdk()
+        ffmpeg = self.settings.auto_detect_ffmpeg()
+        
+        msg = "Path Detection Results:\n\n"
+        
+        if sdk:
+            self.settings.set_sdk_path(sdk, auto_detected=True)
+            msg += f"[OK] SDK Found: {sdk}\n"
+        else:
+            msg += "[X] SDK not found\n"
+        
+        if ffmpeg:
+            self.settings.set_ffmpeg_path(ffmpeg, auto_detected=True)
+            msg += f"[OK] FFmpeg Found: {ffmpeg}\n"
+        else:
+            msg += "[X] FFmpeg not found\n"
+        
+        QMessageBox.information(self, "Path Detection", msg)
+        self.on_settings_changed()
+    
+    def on_settings_changed(self):
+        """Handle settings changes - update UI and log"""
+        sdk_path = self.settings.get_sdk_path()
+        ffmpeg_path = self.settings.get_ffmpeg_path()
+        
+        status_parts = []
+        if sdk_path:
+            status_parts.append(f"SDK: {sdk_path.name}")
+        if ffmpeg_path:
+            status_parts.append(f"FFmpeg: {ffmpeg_path.name}")
+        
+        if status_parts:
+            self.statusBar().showMessage(" | ".join(status_parts))
+        else:
+            self.statusBar().showMessage("[!] SDK/FFmpeg not configured - check Settings")
+        
+        logger.info(f"Settings updated - SDK: {sdk_path}, FFmpeg: {ffmpeg_path}")
+    
+    def show_about(self):
+        """Show about dialog"""
+        about_text = f"""{APP_NAME} v{APP_VERSION}
+
+Unified photogrammetry preprocessing pipeline.
+Extract -> Split -> Mask in one streamlined workflow.
+
+Copyright (c) 2026
+License: MIT"""
+        QMessageBox.about(self, f"About {APP_NAME}", about_text)
     
     def create_splitter_section(self) -> QSplitter:
         """Create splitter with tabs (top) and log panel (bottom) - resizable"""
@@ -184,6 +285,18 @@ class MainWindow(QMainWindow):
         self.stage2_method_combo.currentIndexChanged.connect(self.on_stage2_method_changed)
         stage2_header.addWidget(self.stage2_method_combo)
         stage2_layout.addLayout(stage2_header)
+        
+        # Skip Transform checkbox (Direct Masking Mode)
+        self.skip_transform_check = QCheckBox("⏩ Skip Transform (Direct Mask)")
+        self.skip_transform_check.setChecked(False)
+        self.skip_transform_check.setToolTip(
+            "Skip perspective splitting and mask equirectangular/fisheye images directly.\n"
+            "Faster workflow for 360° VR or native photogrammetry."
+        )
+        self.skip_transform_check.setStyleSheet("color: #4a9eff; font-weight: bold;")
+        self.skip_transform_check.toggled.connect(self.on_skip_transform_toggled)
+        stage2_layout.addWidget(self.skip_transform_check)
+        
         self.run_stage2_btn = QPushButton("▶ Run Stage 2")
         self.run_stage2_btn.setMinimumHeight(32)
         self.run_stage2_btn.clicked.connect(self.run_stage_2_only)
@@ -430,6 +543,7 @@ class MainWindow(QMainWindow):
         camera_layout.addLayout(fov_layout)
         
         camera_group.setLayout(camera_layout)
+        self.stage2_camera_group = camera_group  # Store reference for enabling/disabling
         layout.addWidget(camera_group)
         
         # Output Settings for Stage 2
@@ -466,6 +580,7 @@ class MainWindow(QMainWindow):
         output_layout.addLayout(format2_layout)
         
         output_group.setLayout(output_layout)
+        self.stage2_output_group = output_group  # Store reference
         layout.addWidget(output_group)
         
         # Perspective-specific parameters
@@ -493,6 +608,7 @@ class MainWindow(QMainWindow):
         perspective_params_layout.addLayout(roll_layout)
         
         perspective_params_group.setLayout(perspective_params_layout)
+        self.stage2_perspective_params_group = perspective_params_group  # Store reference
         layout.addWidget(perspective_params_group)
         
         layout.addStretch()
@@ -790,6 +906,21 @@ class MainWindow(QMainWindow):
         # Compass functionality removed (preview disabled)
         pass
     
+    def on_skip_transform_toggled(self, checked: bool):
+        """Handle skip transform checkbox toggle"""
+        # Enable/disable Stage 2 transform controls in tabs
+        self.stage2_camera_group.setEnabled(not checked)
+        self.stage2_output_group.setEnabled(not checked)
+        self.stage2_perspective_params_group.setEnabled(not checked)
+        
+        # Also disable the Run Stage 2 button when skip is enabled
+        self.run_stage2_btn.setEnabled(not checked)
+        
+        if checked:
+            self.log_message("⏩ Direct Masking Mode enabled - Stage 2 will be skipped")
+        else:
+            self.log_message("ℹ️ Direct Masking Mode disabled - Stage 2 transform enabled")
+    
     def on_stage2_method_changed(self, index: int):
         """Handle Stage 2 method selection change"""
         method = self.stage2_method_combo.currentData()
@@ -887,7 +1018,7 @@ class MainWindow(QMainWindow):
             return
         
         # Auto-discover Stage 1 output
-        from pipeline.batch_orchestrator import PipelineWorker
+        from src.pipeline.batch_orchestrator import PipelineWorker
         worker = PipelineWorker({})  # Dummy worker just for discovery method
         
         stage1_folder = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
@@ -946,7 +1077,7 @@ class MainWindow(QMainWindow):
             return
         
         # Auto-discover Stage 2 output
-        from pipeline.batch_orchestrator import PipelineWorker
+        from src.pipeline.batch_orchestrator import PipelineWorker
         worker = PipelineWorker({})  # Dummy worker just for discovery method
         
         stage2_folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
@@ -1026,7 +1157,8 @@ class MainWindow(QMainWindow):
             'input_file': input_file,
             'output_dir': output_dir,
             'enable_stage1': self.stage1_enable.isChecked(),
-            'enable_stage2': self.stage2_enable.isChecked(),
+            'skip_transform': self.skip_transform_check.isChecked(),
+            'enable_stage2': self.stage2_enable.isChecked() and not self.skip_transform_check.isChecked(),
             'enable_stage3': self.stage3_enable.isChecked(),
             
             # Stage 1

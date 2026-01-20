@@ -9,13 +9,22 @@ import glob
 import logging
 import subprocess
 import time
+import os
 from pathlib import Path
 from typing import Dict, Optional, List, Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import cv2
 import json
 from datetime import datetime
 from PIL import Image
 import numpy as np
+
+try:
+    import torch
+    from ..transforms.e2p_transform import TorchE2PTransform
+    HAS_TORCH_TRANSFORM = True
+except ImportError:
+    HAS_TORCH_TRANSFORM = False
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -30,6 +39,72 @@ from ..config.defaults import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def process_frame_cpu(frame_data):
+    """
+    Worker function for CPU parallel processing of Stage 2.
+    Must be at module level for pickling.
+    """
+    frame_path, frame_idx, cameras, output_dir, width, height, fmt = frame_data
+    
+    # Re-import locally to ensure clean process state
+    import cv2
+    from PIL import Image
+    from ..transforms import E2PTransform
+    from .metadata_handler import MetadataHandler
+    
+    transformer = E2PTransform()
+    meta_handler = MetadataHandler()
+    
+    results = []
+    
+    try:
+        equirect_img = cv2.imread(str(frame_path))
+        if equirect_img is None:
+            return {'success': False, 'error': f"Failed to load {frame_path}"}
+            
+        for cam_idx, camera in enumerate(cameras):
+            yaw = camera['yaw']
+            pitch = camera.get('pitch', 0)
+            roll = camera.get('roll', 0)
+            fov = camera.get('fov', 90)
+            
+            perspective_img = transformer.equirect_to_pinhole(
+                equirect_img, yaw, pitch, roll, fov, None, width, height
+            )
+            
+            ext = fmt if fmt in ['png', 'jpg', 'jpeg'] else 'png'
+            out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
+            out_path = Path(output_dir) / out_name
+            
+            # Save logic
+            success = False
+            if ext == 'png':
+                try:
+                    rgb = cv2.cvtColor(perspective_img, cv2.COLOR_BGR2RGB)
+                    pil_img = Image.fromarray(rgb)
+                    pil_img.save(str(out_path), 'PNG', compress_level=6)
+                    pil_img.close()
+                    success = True
+                except Exception:
+                    success = cv2.imwrite(str(out_path), perspective_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+            elif ext in ['jpg', 'jpeg']:
+                success = cv2.imwrite(str(out_path), perspective_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            else:
+                success = cv2.imwrite(str(out_path), perspective_img)
+                
+            if success:
+                try:
+                    meta_handler.embed_camera_orientation(str(out_path), yaw, pitch, roll, fov)
+                except Exception:
+                    pass
+                results.append(str(out_path))
+                
+        return {'success': True, 'files': results}
+        
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
 
 
 class PipelineWorker(QThread):
@@ -153,8 +228,21 @@ class PipelineWorker(QThread):
                     self.finished.emit(results)
                     return
             
-            # Stage 2: Split Perspectives
-            if self.config.get('enable_stage2', True):
+            # Stage 2: Split Perspectives (Skip if direct masking mode)
+            skip_transform = self.config.get('skip_transform', False)
+            
+            if skip_transform:
+                logger.info("=== Stage 2: SKIPPED (Direct Masking Mode) ===")
+                logger.info("Stage 1 frames will be used directly for Stage 3 masking")
+                # Pass Stage 1 output to Stage 3 input
+                results['stage2'] = {
+                    'success': True,
+                    'skipped': True,
+                    'message': 'Transform skipped - using equirectangular/fisheye frames directly'
+                }
+                stages_executed.append(2)  # Mark as executed (but skipped)
+                self.stage_complete.emit(2, results['stage2'])
+            elif self.config.get('enable_stage2', True):
                 if self.is_cancelled:
                     logger.info("Pipeline cancelled before Stage 2")
                     results['stages_executed'] = stages_executed
@@ -414,122 +502,226 @@ class PipelineWorker(QThread):
             return {'success': False, 'error': str(e), 'output_files': []}
     
     def _execute_stage2_perspective(self, input_frames, cameras, output_dir, output_width, output_height) -> Dict:
-        """Execute Stage 2 in perspective mode (E2P)"""
+        """Execute Stage 2 in perspective mode (E2P) with GPU/CPU optimization"""
         try:
             output_files = []
-            operation_count = 0
-            total_operations = len(input_frames) * len(cameras)
+            total_frames = len(input_frames)
+            total_operations = total_frames * len(cameras)
+            image_format = self.config.get('stage2_format', 'png')
             
-            
-            for frame_idx, frame_path in enumerate(input_frames):
-                # Check for cancellation between frames
-                if self.is_cancelled:
-                    logger.info(f"Pipeline cancelled during perspective generation")
-                    return {'success': False, 'error': 'Cancelled by user'}
-                
-                # Load equirectangular image
-                equirect_img = cv2.imread(str(frame_path))
-                
-                if equirect_img is None:
-                    logger.warning(f"Failed to load {frame_path}")
-                    continue
-                
-                # Extract camera metadata
-                camera_metadata = self.metadata_handler.extract_camera_metadata(str(frame_path))
-                
-                # Process each camera view
-                for cam_idx, camera in enumerate(cameras):
-                    if self.is_cancelled:
-                        return {'success': False, 'error': 'Cancelled by user'}
-                    
-                    yaw = camera['yaw']
-                    pitch = camera.get('pitch', 0)
-                    roll = camera.get('roll', 0)
-                    fov = camera.get('fov', DEFAULT_H_FOV)
-                    
-                    # Transform to perspective
-                    perspective_img = self.e2p_transform.equirect_to_pinhole(
-                        equirect_img,
-                        yaw=yaw,
-                        pitch=pitch,
-                        roll=roll,
-                        h_fov=fov,
-                        output_width=output_width,
-                        output_height=output_height
-                    )
-                    
-                    # Save perspective image with configured format
-                    image_format = self.config.get('stage2_format', 'png')
-                    extension = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
-                    output_filename = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{extension}"
-                    output_path = output_dir / output_filename
-                    
-                    # Save image - use PIL for PNG (prevents corruption), cv2 for JPEG
-                    success = False
-                    if extension == 'png':
-                        # Use PIL for PNG to prevent chunk corruption
-                        try:
-                            # Convert BGR to RGB
-                            perspective_rgb = cv2.cvtColor(perspective_img, cv2.COLOR_BGR2RGB)
-                            pil_img = Image.fromarray(perspective_rgb)
-                            pil_img.save(str(output_path), 'PNG', compress_level=6)
-                            # Explicitly close file handle to prevent WinError 32 on metadata embedding
-                            pil_img.close()
-                            del pil_img
-                            time.sleep(0.01)  # 10ms delay for Windows file lock release
-                            success = True
-                        except Exception as e:
-                            logger.warning(f"PIL PNG save failed for {output_filename}: {e}, falling back to cv2")
-                            success = cv2.imwrite(str(output_path), perspective_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
-                    elif extension in ['jpg', 'jpeg']:
-                        # JPEG: Use quality parameter
-                        success = cv2.imwrite(str(output_path), perspective_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    else:
-                        success = cv2.imwrite(str(output_path), perspective_img)
-                    
-                    if not success:
-                        logger.warning(f"Failed to save {output_filename}")
-                        continue
-                    
-                    # Verify file was written correctly before embedding metadata
-                    if not output_path.exists() or output_path.stat().st_size == 0:
-                        logger.warning(f"Saved file is empty or missing: {output_filename}")
-                        continue
-                    
-                    # Embed camera orientation in EXIF (skip if embedding fails)
+            # Check for GPU acceleration with comprehensive compatibility testing
+            use_gpu = False
+            if HAS_TORCH_TRANSFORM and torch.cuda.is_available():
+                try:
+                    # Get GPU info
+                    device_name = torch.cuda.get_device_name(0)
                     try:
-                        self.metadata_handler.embed_camera_orientation(
-                            str(output_path),
-                            yaw=yaw,
-                            pitch=pitch,
-                            roll=roll,
-                            h_fov=fov
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to embed metadata in {output_filename}: {e}")
-                        # Continue anyway - file is saved, just without metadata
+                        compute_capability = torch.cuda.get_device_capability(0)
+                        compute_cap_str = f"sm_{compute_capability[0]}{compute_capability[1]}"
+                    except Exception:
+                        compute_cap_str = "unknown"
                     
-                    output_files.append(str(output_path))
-                    operation_count += 1
+                    # Test GPU with actual kernel execution (not just memory allocation)
+                    # This catches RTX 50-series "no kernel image available" errors early
+                    test_tensor = torch.zeros(10, 10, device='cuda')
+                    test_result = test_tensor + 1  # Force CUDA kernel execution
+                    test_mean = test_result.mean().item()  # Force device synchronization
+                    del test_tensor, test_result
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
                     
-                    # Check for cancellation between cameras
-                    if self.is_cancelled:
-                        logger.info(f"Pipeline cancelled during perspective generation")
-                        return
+                    use_gpu = True
+                    logger.info(f"[OK] GPU acceleration enabled for Stage 2: {device_name} ({compute_cap_str})")
+                except RuntimeError as e:
+                    error_msg = str(e).lower()
+                    if "no kernel image" in error_msg or "cuda capability" in error_msg or "sm_" in error_msg:
+                        logger.error(f"[!] GPU incompatibility detected for Stage 2")
+                        logger.error(f"   GPU: {device_name} ({compute_cap_str})")
+                        logger.error(f"   PyTorch CUDA kernels not available for this GPU architecture")
+                        if "sm_12" in compute_cap_str or "RTX 50" in device_name:
+                            logger.error(f"   RTX 50-series requires PyTorch nightly build")
+                        logger.warning(f"=> Using CPU multiprocessing instead")
+                    else:
+                        logger.warning(f"GPU check failed: {e}. Falling back to CPU.")
+                    torch.cuda.empty_cache()
+                except Exception as e:
+                    logger.warning(f"GPU test failed: {e}. Falling back to CPU.")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+            
+            # GPU Execution Block
+            if use_gpu:
+                try:
+                    # GPU Path: Batch processing for massive speedup
+                    transformer = TorchE2PTransform()
                     
-                    # Check for pause
-                    while self.is_paused:
+                    # Get sample image dimensions for batch size calculation
+                    sample_img = cv2.imread(str(input_frames[0]))
+                    if sample_img is None:
+                        raise RuntimeError("Failed to load sample image for batch size calculation")
+                    
+                    input_height, input_width = sample_img.shape[:2]
+                    batch_size = transformer.get_optimal_batch_size(
+                        input_height, input_width, output_height, output_width
+                    )
+                    logger.info(f"Using batch size: {batch_size} frames")
+                    
+                    del sample_img  # Free memory
+                    
+                    # Process frames in batches
+                    for batch_start in range(0, total_frames, batch_size):
                         if self.is_cancelled:
-                            return
-                        self.msleep(100)
+                            return {'success': False, 'error': 'Cancelled by user'}
+                        
+                        batch_end = min(batch_start + batch_size, total_frames)
+                        batch_paths = input_frames[batch_start:batch_end]
+                        current_batch_size = len(batch_paths)
+                        
+                        # Load batch to GPU
+                        batch_tensors = []
+                        batch_frame_indices = []
+                        
+                        for frame_idx, frame_path in enumerate(batch_paths, start=batch_start):
+                            equirect_img = cv2.imread(str(frame_path))
+                            if equirect_img is None:
+                                logger.warning(f"Failed to load {frame_path}")
+                                continue
+                            
+                            # Convert to tensor (H, W, C) -> (C, H, W) and normalize
+                            # Optimize: do conversion on GPU-pinned memory for faster transfer
+                            img_tensor = torch.from_numpy(equirect_img).permute(2, 0, 1).float()
+                            batch_tensors.append(img_tensor)
+                            batch_frame_indices.append(frame_idx)
+                        
+                        if not batch_tensors:
+                            continue
+                        
+                        # Stack and transfer to GPU in one operation, then normalize on GPU
+                        # This is faster than normalizing on CPU then transferring
+                        batch = torch.stack(batch_tensors)
+                        del batch_tensors  # Free CPU memory immediately
+                        
+                        batch = batch.to(transformer.device, non_blocking=True) / 255.0  # Transfer + normalize on GPU
+                        torch.cuda.synchronize()  # Wait for async transfer
+                        
+                        # Process all cameras for this batch
+                        for cam_idx, camera in enumerate(cameras):
+                            if self.is_cancelled:
+                                del batch
+                                torch.cuda.empty_cache()
+                                return {'success': False, 'error': 'Cancelled'}
+                            
+                            yaw = camera['yaw']
+                            pitch = camera.get('pitch', 0)
+                            roll = camera.get('roll', 0)
+                            fov = camera.get('fov', DEFAULT_H_FOV)
+                            
+                            # Batch transform on GPU (all frames at once)
+                            out_batch = transformer.batch_equirect_to_pinhole(
+                                batch, yaw, pitch, roll, fov, None, output_width, output_height
+                            )  # Returns (N, 3, H_out, W_out)
+                            
+                            # Save each image in the batch
+                            for batch_idx, frame_idx in enumerate(batch_frame_indices):
+                                # Extract single image from batch
+                                out_tensor = out_batch[batch_idx]  # (3, H, W)
+                                
+                                # Download to CPU and convert to numpy
+                                out_img = out_tensor.permute(1, 2, 0).cpu().numpy()
+                                out_img = (out_img * 255).clip(0, 255).astype(np.uint8)
+                                
+                                # Save
+                                ext = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
+                                out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
+                                out_path = output_dir / out_name
+                                
+                                success = False
+                                if ext == 'png':
+                                    try:
+                                        rgb = cv2.cvtColor(out_img, cv2.COLOR_BGR2RGB)
+                                        pil_img = Image.fromarray(rgb)
+                                        pil_img.save(str(out_path), 'PNG', compress_level=6)
+                                        pil_img.close()
+                                        success = True
+                                    except Exception:
+                                        success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+                                elif ext in ['jpg', 'jpeg']:
+                                    success = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                else:
+                                    success = cv2.imwrite(str(out_path), out_img)
+                                
+                                if success:
+                                    try:
+                                        self.metadata_handler.embed_camera_orientation(str(out_path), yaw, pitch, roll, fov)
+                                    except: pass
+                                    output_files.append(str(out_path))
+                            
+                            # Progress update
+                            current_op = batch_end * len(cameras) + cam_idx + 1
+                            if current_op % 10 == 0:
+                                self.progress.emit(current_op, total_operations, 
+                                    f"Stage 2 (GPU Batch): Frames {batch_start}-{batch_end}/{total_frames}")
+                            
+                            del out_batch  # Free GPU memory after each camera
+                        
+                        # Free batch memory
+                        del batch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     
-                    # Progress update
-                    if operation_count % 10 == 0:
-                        self.progress.emit(
-                            operation_count,
-                            total_operations,
-                            f"Stage 2: Frame {frame_idx+1}/{len(input_frames)}, Camera {cam_idx+1}/{len(cameras)}"
-                        )
+                    # Completed successfully on GPU
+                    logger.info(f"[OK] GPU batch processing complete: {len(output_files)} perspectives created")
+                    return {
+                        'success': True,
+                        'perspective_count': len(output_files),
+                        'output_files': output_files,
+                        'output_dir': str(output_dir)
+                    }
+
+                except RuntimeError as e:
+                    if "no kernel image" in str(e) or "CUDA error" in str(e):
+                        logger.warning(f"GPU Stage 2 failed (RTX 50-series incompatibility): {e}")
+                        logger.warning("Falling back to CPU Multiprocessing...")
+                        use_gpu = False # Fall through to CPU block
+                        output_files = [] # Reset output files
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    else:
+                        raise e # Re-raise other errors
+
+            # CPU Execution Block (Fallback or Default)
+            if not use_gpu:
+                # CPU Path: Multiprocessing
+                # Limit workers to avoid OOM with 8K images. 
+                # 8K image ~100MB. 20 workers = 2GB. Safe.
+                max_workers = min(os.cpu_count(), 12) 
+                logger.info(f"Using CPU Multiprocessing for Stage 2 ({max_workers} workers)")
+                
+                # Prepare tasks
+                tasks = []
+                for idx, path in enumerate(input_frames):
+                    tasks.append((
+                        str(path), idx, cameras, str(output_dir), 
+                        output_width, output_height, image_format
+                    ))
+                
+                completed_ops = 0
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(process_frame_cpu, task): task for task in tasks}
+                    
+                    for future in as_completed(futures):
+                        if self.is_cancelled:
+                            executor.shutdown(wait=False)
+                            return {'success': False, 'error': 'Cancelled'}
+                            
+                        result = future.result()
+                        if result['success']:
+                            output_files.extend(result['files'])
+                            completed_ops += len(cameras)
+                            self.progress.emit(completed_ops, total_operations, 
+                                f"Stage 2 (CPU): {completed_ops}/{total_operations} views")
+                        else:
+                            logger.error(f"Frame processing failed: {result.get('error')}")
             
             return {
                 'success': True,
@@ -765,6 +957,19 @@ class PipelineWorker(QThread):
     def _execute_stage3(self) -> Dict:
         """Execute Stage 3: AI Masking"""
         try:
+            # Determine input directory based on skip_transform flag
+            skip_transform = self.config.get('skip_transform', False)
+            
+            if skip_transform:
+                # Use Stage 1 output (equirectangular/fisheye frames) directly
+                input_dir = Path(self.config['output_dir']) / 'stage1_frames'
+                logger.info("[Direct Masking] Using Stage 1 frames (equirectangular/fisheye) for masking")
+            else:
+                # Use Stage 2 output (perspective images)
+                input_dir = Path(self.config.get('stage3_input_dir', 
+                                               str(Path(self.config['output_dir']) / 'stage2_perspectives')))
+                logger.info(f"Using Stage 2 perspectives for masking: {input_dir}")
+            
             # Initialize masker if not done
             if self.masker is None:
                 model_size = self.config.get('model_size', 'small')
@@ -895,10 +1100,17 @@ class PipelineWorker(QThread):
                     animals=categories.get('animals', True)
                 )
             
-            # Get input images (auto-discovery runs ONLY ONCE)
-            if self.config.get('enable_stage2', True):
-                # Stage 2 was enabled - use its output directly
+            # Get input images based on skip_transform flag
+            skip_transform = self.config.get('skip_transform', False)
+            
+            if skip_transform:
+                # Direct Masking Mode - use Stage 1 frames (equirectangular/fisheye)
+                input_dir = Path(self.config['output_dir']) / 'stage1_frames'
+                logger.info(f"[Direct Masking] Using Stage 1 frames directly: {input_dir}")
+            elif self.config.get('enable_stage2', True):
+                # Stage 2 was enabled - use its output (perspective images)
                 input_dir = Path(self.config['output_dir']) / 'stage2_perspectives'
+                logger.info(f"Using Stage 2 perspectives: {input_dir}")
             else:
                 # Stage 2 disabled - check for explicit input or auto-discover ONCE
                 stage3_input = self.config.get('stage3_input_dir')
@@ -907,6 +1119,7 @@ class PipelineWorker(QThread):
                     discovered = self.discover_stage_input_folder(3, self.config['output_dir'])
                     if discovered:
                         input_dir = discovered
+                        logger.info(f"Auto-discovered Stage 3 input: {input_dir}")
                     else:
                         return {
                             'success': False,
@@ -917,6 +1130,7 @@ class PipelineWorker(QThread):
                         }
                 else:
                     input_dir = Path(stage3_input)
+                    logger.info(f"Using specified Stage 3 input: {input_dir}")
             
             output_dir = Path(self.config['output_dir']) / 'stage3_masks'
             save_visualization = self.config.get('save_visualization', False)

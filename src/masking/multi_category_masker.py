@@ -106,7 +106,7 @@ class MultiCategoryMasker:
         self._initialize_model()
         
     def _select_device(self, use_gpu: bool) -> str:
-        """Select compute device (CUDA or CPU)"""
+        """Select compute device (CUDA or CPU) with comprehensive compatibility checking"""
         if not TORCH_AVAILABLE:
             if use_gpu:
                 logger.warning("GPU requested but PyTorch not available. Using CPU.")
@@ -122,8 +122,49 @@ class MultiCategoryMasker:
                 
                 if cuda_available and device_count > 0:
                     device_name = torch.cuda.get_device_name(0)
-                    logger.info(f"Using CUDA device: {device_name}")
-                    return 'cuda:0'
+                    
+                    # Get compute capability
+                    try:
+                        compute_capability = torch.cuda.get_device_capability(0)
+                        compute_cap_str = f"sm_{compute_capability[0]}{compute_capability[1]}"
+                        logger.info(f"GPU Device: {device_name} (Compute Capability: {compute_cap_str})")
+                    except Exception:
+                        compute_cap_str = "unknown"
+                        logger.info(f"GPU Device: {device_name}")
+                    
+                    # Test GPU compatibility with actual tensor operations
+                    try:
+                        test_tensor = torch.zeros(1, device='cuda')
+                        test_result = test_tensor + 1
+                        del test_tensor, test_result
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                        logger.info("[OK] GPU compatibility verified - CUDA operations successful")
+                        return 'cuda:0'
+                    except RuntimeError as e:
+                        error_msg = str(e).lower()
+                        
+                        # Detect specific compatibility issues
+                        if "sm_" in error_msg or "cuda capability" in error_msg or "no kernel image" in error_msg:
+                            logger.error(f"[!] GPU architecture incompatibility detected")
+                            logger.error(f"   GPU: {device_name} ({compute_cap_str})")
+                            logger.error(f"   PyTorch was compiled for older CUDA compute capabilities")
+                            
+                            if "sm_12" in compute_cap_str or "RTX 50" in device_name:
+                                logger.error(f"   RTX 50-series (Blackwell) requires PyTorch 2.7+ or nightly build")
+                                logger.error(f"   Install: pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128")
+                            else:
+                                logger.error(f"   Try: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124")
+                            
+                            logger.warning(f"=> Falling back to CPU for masking operations")
+                        else:
+                            logger.warning(f"GPU test failed: {e}. Falling back to CPU.")
+                        
+                        torch.cuda.empty_cache()
+                        return 'cpu'
+                    except Exception as e:
+                        logger.warning(f"GPU initialization error: {e}. Falling back to CPU.")
+                        return 'cpu'
                 else:
                     logger.warning(f"GPU requested but CUDA not available (version={cuda_version}, devices={device_count}). Using CPU.")
                     return 'cpu'
@@ -131,6 +172,7 @@ class MultiCategoryMasker:
                 logger.warning(f"Error detecting CUDA: {e}. Falling back to CPU.")
                 return 'cpu'
         else:
+            logger.info("CPU mode selected (GPU disabled in settings)")
             return 'cpu'
     
     def _initialize_model(self):
@@ -240,6 +282,30 @@ class MultiCategoryMasker:
             logger.error(f"Error generating mask for {image_path}: {e}")
             return None
     
+    def _safe_predict(self, image, **kwargs):
+        """
+        Run model prediction with automatic fallback to CPU if CUDA fails.
+        Handles 'no kernel image is available' error for unsupported GPUs (e.g. RTX 50-series).
+        """
+        try:
+            # Ensure device is passed in kwargs or use self.device
+            if 'device' not in kwargs:
+                kwargs['device'] = self.device
+                
+            return self.model.predict(image, **kwargs)
+        except RuntimeError as e:
+            error_msg = str(e)
+            if "CUDA error" in error_msg or "no kernel image" in error_msg:
+                if self.device != 'cpu':
+                    logger.warning(f"CUDA inference failed: {error_msg}")
+                    logger.warning("Falling back to CPU for remaining operations.")
+                    self.device = 'cpu'
+                    # Retry with CPU
+                    kwargs['device'] = 'cpu'
+                    return self.model.predict(image, **kwargs)
+            # Re-raise if it's not a CUDA error or if we were already on CPU
+            raise e
+
     def generate_mask_from_array(self, image: np.ndarray) -> Optional[np.ndarray]:
         """
         Generate binary mask from numpy array.
@@ -261,13 +327,12 @@ class MultiCategoryMasker:
                 logger.warning("No masking categories enabled")
                 return np.full((h, w), MASK_VALUE_KEEP, dtype=np.uint8)
             
-            # Run YOLOv8 inference
-            results = self.model.predict(
+            # Run YOLOv8 inference with safe fallback
+            results = self._safe_predict(
                 image,
                 classes=target_classes,
                 conf=self.confidence_threshold,
-                verbose=False,
-                device=self.device
+                verbose=False
             )
             
             # Extract masks
@@ -336,13 +401,12 @@ class MultiCategoryMasker:
             if not target_classes:
                 return False
             
-            # Run YOLOv8 inference
-            results = self.model.predict(
+            # Run YOLOv8 inference with safe fallback
+            results = self._safe_predict(
                 image,
                 classes=target_classes,
                 conf=self.confidence_threshold,
-                verbose=False,
-                device=self.device
+                verbose=False
             )
             
             # Check if any objects detected
@@ -385,9 +449,12 @@ class MultiCategoryMasker:
         image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
         image_files = []
         
+        # Search recursively for images (supports dual-lens subdirectories like lens_1/, lens_2/)
         for ext in image_extensions:
-            image_files.extend(input_path.glob(ext))
-            image_files.extend(input_path.glob(ext.upper()))
+            image_files.extend(input_path.glob(ext))  # Direct files
+            image_files.extend(input_path.glob(ext.upper()))  # Uppercase
+            image_files.extend(input_path.glob(f'**/{ext}'))  # Subdirectories (lowercase)
+            image_files.extend(input_path.glob(f'**/{ext.upper()}'))  # Subdirectories (uppercase)
         
         total = len(image_files)
         successful = 0
