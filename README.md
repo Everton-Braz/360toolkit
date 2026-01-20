@@ -93,11 +93,11 @@ The complete source code is available under MIT License. See [Build from Source]
 - **AI Model v2 Support**: Best quality preset now uses AI stitcher model v2 for superior blending
 - **Fixed ONNX Model Compatibility**: Re-exported YOLOv8 model with opset 17 for onnxruntime 1.20.1 compatibility
 - **Optimized Masking Pipeline**: ONNX-based inference for lightweight, fast processing without PyTorch dependency
-- **Fixed SDK Black Image Issue**: Resolved path resolution errors for SDK models.
-- **RTX 50-Series Compatibility**: Added automatic CPU fallback for masking on unsupported GPUs (e.g., RTX 5070 Ti).
+- **Fixed SDK Black Image Issue**: Resolved path resolution errors for SDK models
+- **RTX 50-Series Compatibility**: Added automatic CPU fallback for masking on unsupported GPUs (e.g., RTX 5070 Ti)
 - **Performance Boost**: 
-  - **Stage 2 GPU Acceleration**: Uses PyTorch for ultra-fast perspective splitting (10x faster).
-  - **Stage 2 CPU Parallelism**: Uses all CPU cores when GPU is unavailable.
+  - **Stage 2 GPU Acceleration**: Uses PyTorch for ultra-fast perspective splitting (10x faster)
+  - **Stage 2 CPU Parallelism**: Uses all CPU cores when GPU is unavailable
 
 ---
 
