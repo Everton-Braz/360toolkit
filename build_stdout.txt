@@ -1,0 +1,43 @@
+
+======================================================================
+360ToolkitGS Build Configuration - FULL-GPU
+======================================================================
+SDK Path: C:\Users\Everton-PC\Documents\Windows_CameraSDK-2.1.1_MediaSDK-3.1.0\MediaSDK-3.1.0.0-20250904-win64\MediaSDK
+SDK Exists: True
+FFmpeg Path: C:\Users\Everton-PC\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-essentials_build\bin
+FFmpeg Exists: True
+======================================================================
+
+[OK] SDK binaries: C:\Users\Everton-PC\Documents\Windows_CameraSDK-2.1.1_MediaSDK-3.1.0\MediaSDK-3.1.0.0-20250904-win64\MediaSDK\bin
+[OK] ffmpeg.exe: C:\Users\Everton-PC\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-essentials_build\bin\ffmpeg.exe
+[OK] ffprobe.exe: C:\Users\Everton-PC\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-essentials_build\bin\ffprobe.exe
+[OK] ONNX Model: yolov8n-seg.onnx (13.2 MB)
+[OK] ONNX Model: yolov8s-seg.onnx (45.3 MB)
+[OK] ONNX Model: yolov8m-seg.onnx (104.3 MB)
+[OK] ONNX Model: yolo26n-seg.onnx (10.7 MB)
+[OK] ONNX Model: yolo26s-seg.onnx (40.0 MB)
+[OK] ONNX Model: yolo26m-seg.onnx (90.2 MB)
+
+Collecting PyTorch with CUDA support...
+PyTorch path: C:\Users\Everton-PC\AppData\Local\Programs\Python\Python311\Lib\site-packages\torch
+PyTorch version: 2.11.0.dev20260106+cu128
+CUDA available: True
+CUDA version: 12.8
+GPU: NVIDIA GeForce RTX 5070 Ti
+[OK] PyTorch libs collected from C:\Users\Everton-PC\AppData\Local\Programs\Python\Python311\Lib\site-packages\torch\lib
+[OK] Collected 16 CUDA DLLs from PyTorch
+
+Collecting ONNX Runtime with CUDA support...
+ONNX Runtime path: C:\Users\Everton-PC\AppData\Local\Programs\Python\Python311\Lib\site-packages\onnxruntime
+ONNX Runtime version: 1.23.2
+Available providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+  -> onnxruntime.dll
+  -> onnxruntime_providers_cuda.dll
+  -> onnxruntime_providers_shared.dll
+  -> onnxruntime_providers_tensorrt.dll
+[OK] ONNX Runtime collected
+
+======================================================================
+Starting PyInstaller Analysis (Full GPU Build)...
+======================================================================
+

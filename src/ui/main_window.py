@@ -25,7 +25,9 @@ from src.config.defaults import (
     DEFAULT_SDK_QUALITY
 )
 from src.config.settings import get_settings
+from src.config.config_manager import get_config_manager
 from src.ui.settings_dialog import SettingsDialog
+from src.ui.config_dialog import ConfigManagementDialog, SaveConfigDialog
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         
         self.settings = get_settings()
+        self.config_manager = get_config_manager()
         self.orchestrator = BatchOrchestrator()
         self.pipeline_config = {}
         
@@ -51,16 +54,42 @@ class MainWindow(QMainWindow):
         """Initialize the user interface - HYBRID APPROACH with responsive design"""
         
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
-        self.setMinimumSize(1100, 700)  # Reasonable minimum for usability
-        self.resize(1400, 950)  # Default comfortable size
+        
+        # Detect screen size and set appropriate defaults
+        screen = self.screen()
+        screen_geometry = screen.geometry()
+        screen_width = screen_geometry.width()
+        screen_height = screen_geometry.height()
+        
+        logger.info(f"Screen detected: {screen_width}×{screen_height}")
+        
+        # Responsive sizing based on screen resolution
+        if screen_width >= 3840:  # 4K or higher
+            self.setMinimumSize(1600, 1000)
+            self.resize(2400, 1400)
+            self.base_font_size = 12
+        elif screen_width >= 2560:  # 2K
+            self.setMinimumSize(1400, 900)
+            self.resize(2000, 1200)
+            self.base_font_size = 11
+        elif screen_width >= 1920:  # Full HD
+            self.setMinimumSize(1200, 800)
+            self.resize(1600, 1000)
+            self.base_font_size = 10
+        else:  # HD or lower
+            self.setMinimumSize(1024, 768)
+            self.resize(1280, 900)
+            self.base_font_size = 9
+        
+        logger.info(f"Window size: {self.width()}×{self.height()}, Font size: {self.base_font_size}pt")
         
         # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(10)
         
         # TOP SECTION: Input/Output + Pipeline Overview (fixed at top)
         top_section = self.create_top_section()
@@ -91,6 +120,25 @@ class MainWindow(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+        
+        # Config menu
+        config_menu = menubar.addMenu("&Configuration")
+        
+        save_config_action = QAction("💾 &Save Configuration...", self)
+        save_config_action.setShortcut("Ctrl+S")
+        save_config_action.triggered.connect(self.save_configuration)
+        config_menu.addAction(save_config_action)
+        
+        load_config_action = QAction("📂 &Load Configuration...", self)
+        load_config_action.setShortcut("Ctrl+L")
+        load_config_action.triggered.connect(self.load_configuration)
+        config_menu.addAction(load_config_action)
+        
+        config_menu.addSeparator()
+        
+        manage_config_action = QAction("🗂️ &Manage Configurations...", self)
+        manage_config_action.triggered.connect(self.manage_configurations)
+        config_menu.addAction(manage_config_action)
         
         # Settings menu
         settings_menu = menubar.addMenu("&Settings")
@@ -169,6 +217,139 @@ Extract -> Split -> Mask in one streamlined workflow.
 Copyright (c) 2026
 License: MIT"""
         QMessageBox.about(self, f"About {APP_NAME}", about_text)
+    
+    def save_configuration(self):
+        """Save current pipeline configuration"""
+        config = self.get_current_config()
+        
+        dialog = SaveConfigDialog(config, self)
+        dialog.exec()
+    
+    def load_configuration(self):
+        """Load a saved configuration"""
+        dialog = ConfigManagementDialog(self)
+        dialog.config_loaded.connect(self.apply_loaded_config)
+        dialog.exec()
+    
+    def manage_configurations(self):
+        """Open configuration management dialog"""
+        dialog = ConfigManagementDialog(self)
+        dialog.config_loaded.connect(self.apply_loaded_config)
+        dialog.exec()
+    
+    def get_current_config(self) -> dict:
+        """Get current UI configuration as dictionary"""
+        return {
+            # I/O
+            'input_file': self.input_file_edit.text(),
+            'output_dir': self.output_dir_edit.text(),
+            
+            # Stage 1
+            'stage1_enabled': self.stage1_enable.isChecked(),
+            'fps_interval': self.fps_spin.value(),
+            'extraction_method': list(EXTRACTION_METHODS.keys())[self.extraction_method_combo.currentIndex()],
+            'sdk_quality': self.sdk_quality_combo.currentText().split(' (')[0].lower(),
+            'output_format': 'png',
+            
+            # Stage 2
+            'stage2_enabled': self.stage2_enable.isChecked(),
+            'transform_type': self.stage2_method_combo.currentData(),
+            'split_count': self.split_count_spin.value(),
+            'h_fov': self.fov_spin.value(),  # FIXED: h_fov_spin -> fov_spin
+            'output_width': self.stage2_width_spin.value(),  # FIXED: output_width_spin -> stage2_width_spin
+            'output_height': self.stage2_height_spin.value(),  # FIXED: output_height_spin -> stage2_height_spin
+            'cubemap_face_size': getattr(self, 'cubemap_face_spin', None).value() if hasattr(self, 'cubemap_face_spin') else 1920,
+            'cubemap_overlap': getattr(self, 'cubemap_overlap_spin', None).value() if hasattr(self, 'cubemap_overlap_spin') else 10,
+            'cubemap_fov': getattr(self, 'cubemap_fov_spin', None).value() if hasattr(self, 'cubemap_fov_spin') else 110,
+            'skip_transform': self.skip_transform_check.isChecked(),
+            
+            # Stage 3
+            'stage3_enabled': self.stage3_enable.isChecked(),
+            'model_size': list(YOLOV8_MODELS.keys())[self.model_size_combo.currentIndex()],
+            'confidence_threshold': self.confidence_spin.value(),
+            'use_gpu': self.use_gpu_check.isChecked(),
+            'masking_categories': {
+                'persons': self.persons_group.isChecked(),
+                'personal_objects': self.objects_group.isChecked(),
+                'animals': self.animals_group.isChecked()
+            },
+            
+            # Stage 4
+            'stage4_enabled': getattr(self, 'stage4_enable', QCheckBox()).isChecked(),
+            'alignment_tool': 'glomap',
+            'use_gpu_colmap': True,
+            
+            # Stage 5
+            'stage5_enabled': getattr(self, 'stage5_enable', QCheckBox()).isChecked(),
+            'export_lithcfeld': True,
+            'export_realityscan': True,
+            'export_colmap': False,
+        }
+    
+    def apply_loaded_config(self, config: dict):
+        """Apply a loaded configuration to the UI"""
+        try:
+            # I/O
+            if 'input_file' in config:
+                self.input_file_edit.setText(config['input_file'])
+            if 'output_dir' in config:
+                self.output_dir_edit.setText(config['output_dir'])
+            
+            # Stage 1
+            if 'stage1_enabled' in config:
+                self.stage1_enable.setChecked(config['stage1_enabled'])
+            if 'fps_interval' in config:
+                self.fps_spin.setValue(config['fps_interval'])
+            if 'extraction_method' in config:
+                methods = list(EXTRACTION_METHODS.keys())
+                if config['extraction_method'] in methods:
+                    self.extraction_method_combo.setCurrentIndex(methods.index(config['extraction_method']))
+            
+            # Stage 2
+            if 'stage2_enabled' in config:
+                self.stage2_enable.setChecked(config['stage2_enabled'])
+            if 'split_count' in config:
+                self.split_count_spin.setValue(config['split_count'])
+            if 'h_fov' in config:
+                self.fov_spin.setValue(config['h_fov'])  # FIXED: h_fov_spin -> fov_spin
+            if 'output_width' in config:
+                self.stage2_width_spin.setValue(config['output_width'])  # FIXED: output_width_spin -> stage2_width_spin
+            if 'output_height' in config:
+                self.stage2_height_spin.setValue(config['output_height'])  # FIXED: output_height_spin -> stage2_height_spin
+            if 'skip_transform' in config:
+                self.skip_transform_check.setChecked(config['skip_transform'])
+            
+            # Stage 3
+            if 'stage3_enabled' in config:
+                self.stage3_enable.setChecked(config['stage3_enabled'])
+            if 'model_size' in config:
+                models = list(YOLOV8_MODELS.keys())
+                if config['model_size'] in models:
+                    self.model_size_combo.setCurrentIndex(models.index(config['model_size']))
+            if 'confidence_threshold' in config:
+                self.confidence_spin.setValue(config['confidence_threshold'])
+            if 'use_gpu' in config:
+                self.use_gpu_check.setChecked(config['use_gpu'])
+            if 'masking_categories' in config:
+                cats = config['masking_categories']
+                self.persons_group.setChecked(cats.get('persons', True))
+                self.objects_group.setChecked(cats.get('personal_objects', True))
+                self.animals_group.setChecked(cats.get('animals', True))
+            
+            logger.info("Configuration applied successfully")
+            QMessageBox.information(
+                self,
+                "Configuration Loaded",
+                "Configuration has been applied to all settings."
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to apply configuration: {e}")
+            QMessageBox.critical(
+                self,
+                "Load Failed",
+                f"Failed to apply configuration: {str(e)}"
+            )
     
     def create_splitter_section(self) -> QSplitter:
         """Create splitter with tabs (top) and log panel (bottom) - resizable"""
@@ -748,65 +929,178 @@ License: MIT"""
         return tab
     
     def create_stage3_config_tab(self) -> QWidget:
-        """Create Stage 3 configuration tab (Masking Settings)"""
+        """Create Stage 3 configuration tab (Masking Settings with YOLO26)"""
         
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        
+        # === YOLO26 HEADER ===
+        header_widget = QWidget()
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 8)
+        
+        yolo_label = QLabel("🚀 YOLO26 AI Masking")
+        yolo_label.setStyleSheet("""
+            font-size: 16px;
+            font-weight: bold;
+            color: #4a9eff;
+        """)
+        header_layout.addWidget(yolo_label)
+        
+        yolo_info = QLabel("(NMS-Free • 3-4x Faster • GPU Accelerated)")
+        yolo_info.setStyleSheet("color: #888; font-size: 11px;")
+        header_layout.addWidget(yolo_info)
+        header_layout.addStretch()
+        layout.addWidget(header_widget)
         
         # Enable masking
         self.enable_masking_check = QCheckBox("Enable AI Masking")
         self.enable_masking_check.setChecked(True)
+        self.enable_masking_check.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.enable_masking_check)
         
-        # Categories
-        categories_group = QGroupBox("Masking Categories")
-        categories_layout = QVBoxLayout()
+        # === PERSONS CATEGORY ===
+        persons_group = QGroupBox("👤 Persons")
+        persons_group.setCheckable(True)
+        persons_group.setChecked(True)
+        persons_layout = QVBoxLayout()
+        persons_layout.setSpacing(4)
         
-        self.persons_check = QCheckBox("Persons")
-        self.persons_check.setChecked(True)
-        categories_layout.addWidget(self.persons_check)
+        self.person_check = QCheckBox("Person (class 0)")
+        self.person_check.setChecked(True)
+        persons_layout.addWidget(self.person_check)
         
-        self.objects_check = QCheckBox("Personal Objects (backpack, phone, etc.)")
-        self.objects_check.setChecked(True)
-        categories_layout.addWidget(self.objects_check)
+        persons_group.setLayout(persons_layout)
+        layout.addWidget(persons_group)
+        self.persons_group = persons_group  # Store reference
         
-        self.animals_check = QCheckBox("Animals")
-        self.animals_check.setChecked(False)  # CHANGED: Animals unchecked by default
-        categories_layout.addWidget(self.animals_check)
+        # === PERSONAL OBJECTS CATEGORY ===
+        objects_group = QGroupBox("🎒 Personal Objects")
+        objects_group.setCheckable(True)
+        objects_group.setChecked(True)
+        objects_layout = QVBoxLayout()
+        objects_layout.setSpacing(4)
         
-        categories_group.setLayout(categories_layout)
-        layout.addWidget(categories_group)
+        # Individual object checkboxes (COCO classes)
+        self.backpack_check = QCheckBox("Backpack (class 24)")
+        self.backpack_check.setChecked(True)
+        objects_layout.addWidget(self.backpack_check)
         
-        # Model settings
-        model_group = QGroupBox("Model Settings")
+        self.umbrella_check = QCheckBox("Umbrella (class 25)")
+        self.umbrella_check.setChecked(True)
+        objects_layout.addWidget(self.umbrella_check)
+        
+        self.handbag_check = QCheckBox("Handbag (class 26)")
+        self.handbag_check.setChecked(True)
+        objects_layout.addWidget(self.handbag_check)
+        
+        self.tie_check = QCheckBox("Tie (class 27)")
+        self.tie_check.setChecked(True)
+        objects_layout.addWidget(self.tie_check)
+        
+        self.suitcase_check = QCheckBox("Suitcase (class 28)")
+        self.suitcase_check.setChecked(True)
+        objects_layout.addWidget(self.suitcase_check)
+        
+        self.cell_phone_check = QCheckBox("Cell Phone (class 67)")
+        self.cell_phone_check.setChecked(True)
+        objects_layout.addWidget(self.cell_phone_check)
+        
+        objects_group.setLayout(objects_layout)
+        layout.addWidget(objects_group)
+        self.objects_group = objects_group  # Store reference
+        
+        # === ANIMALS CATEGORY ===
+        animals_group = QGroupBox("🐕 Animals")
+        animals_group.setCheckable(True)
+        animals_group.setChecked(False)  # Disabled by default
+        animals_layout = QVBoxLayout()
+        animals_layout.setSpacing(4)
+        
+        self.bird_check = QCheckBox("Bird (class 14)")
+        self.bird_check.setChecked(True)
+        animals_layout.addWidget(self.bird_check)
+        
+        self.cat_check = QCheckBox("Cat (class 15)")
+        self.cat_check.setChecked(True)
+        animals_layout.addWidget(self.cat_check)
+        
+        self.dog_check = QCheckBox("Dog (class 16)")
+        self.dog_check.setChecked(True)
+        animals_layout.addWidget(self.dog_check)
+        
+        self.horse_check = QCheckBox("Horse (class 17)")
+        self.horse_check.setChecked(True)
+        animals_layout.addWidget(self.horse_check)
+        
+        # Other animals in one row
+        other_animals_label = QLabel("Other: sheep, cow, elephant, bear, zebra, giraffe")
+        other_animals_label.setStyleSheet("color: #888; font-size: 10px; margin-left: 20px;")
+        animals_layout.addWidget(other_animals_label)
+        
+        animals_group.setLayout(animals_layout)
+        layout.addWidget(animals_group)
+        self.animals_group = animals_group  # Store reference
+        
+        # === MODEL SETTINGS ===
+        model_group = QGroupBox("⚙️ Model Settings")
         model_layout = QVBoxLayout()
+        model_layout.setSpacing(8)
         
         # Model size
         size_layout = QHBoxLayout()
-        size_layout.addWidget(QLabel("Model Size:"))
+        size_label = QLabel("Model Size:")
+        size_label.setMinimumWidth(120)
+        size_layout.addWidget(size_label)
         self.model_size_combo = QComboBox()
-        for size, info in YOLOV8_MODELS.items():
-            label = f"{size.capitalize()} ({info['size_mb']}MB, ~{info['speed_seconds']}s)"
-            self.model_size_combo.addItem(label, size)
-        self.model_size_combo.setCurrentIndex(2)  # CHANGED: Default to 'medium' (index 2)
+        # YOLO26 models
+        self.model_size_combo.addItem("Nano (10MB, ~0.2s) - Fastest", "nano")
+        self.model_size_combo.addItem("Small (40MB, ~0.4s) - Balanced", "small")
+        self.model_size_combo.addItem("Medium (90MB, ~0.7s) - Best Quality", "medium")
+        self.model_size_combo.setCurrentIndex(2)  # Default to 'medium'
+        self.model_size_combo.setMinimumWidth(250)
         size_layout.addWidget(self.model_size_combo)
         size_layout.addStretch()
         model_layout.addLayout(size_layout)
         
         # Confidence
         conf_layout = QHBoxLayout()
-        conf_layout.addWidget(QLabel("Confidence Threshold:"))
+        conf_label = QLabel("Confidence:")
+        conf_label.setMinimumWidth(120)
+        conf_layout.addWidget(conf_label)
         self.confidence_spin = QDoubleSpinBox()
         self.confidence_spin.setRange(0.0, 1.0)
-        self.confidence_spin.setValue(0.6)  # CHANGED: Default confidence 0.6
+        self.confidence_spin.setValue(0.6)
         self.confidence_spin.setSingleStep(0.05)
+        self.confidence_spin.setMinimumWidth(80)
         conf_layout.addWidget(self.confidence_spin)
+        
+        conf_info = QLabel("(0.5-0.7 recommended)")
+        conf_info.setStyleSheet("color: #888;")
+        conf_layout.addWidget(conf_info)
         conf_layout.addStretch()
         model_layout.addLayout(conf_layout)
         
         model_group.setLayout(model_layout)
         layout.addWidget(model_group)
+        
+        # === GPU ACCELERATION ===
+        gpu_group = QGroupBox("🚀 GPU Acceleration")
+        gpu_layout = QVBoxLayout()
+        
+        self.use_gpu_check = QCheckBox("Enable GPU Acceleration (CUDA)")
+        self.use_gpu_check.setChecked(True)
+        self.use_gpu_check.setToolTip("Use GPU for faster masking (requires CUDA)")
+        gpu_layout.addWidget(self.use_gpu_check)
+        
+        gpu_info = QLabel("⚡ 3-4x faster with GPU enabled")
+        gpu_info.setStyleSheet("color: #4a9eff; font-size: 10px; margin-left: 20px;")
+        gpu_layout.addWidget(gpu_info)
+        
+        gpu_group.setLayout(gpu_layout)
+        layout.addWidget(gpu_group)
         
         layout.addStretch()
         
@@ -1230,14 +1524,55 @@ License: MIT"""
         
         # Stage 3 (if enabled)
         if self.stage3_enable.isChecked():
+            # Build list of enabled person classes
+            person_classes = []
+            if self.persons_group.isChecked() and self.person_check.isChecked():
+                person_classes.append(0)  # person
+            
+            # Build list of enabled personal object classes
+            object_classes = []
+            if self.objects_group.isChecked():
+                if self.backpack_check.isChecked():
+                    object_classes.append(24)
+                if self.umbrella_check.isChecked():
+                    object_classes.append(25)
+                if self.handbag_check.isChecked():
+                    object_classes.append(26)
+                if self.tie_check.isChecked():
+                    object_classes.append(27)
+                if self.suitcase_check.isChecked():
+                    object_classes.append(28)
+                if self.cell_phone_check.isChecked():
+                    object_classes.append(67)
+            
+            # Build list of enabled animal classes
+            animal_classes = []
+            if self.animals_group.isChecked():
+                if self.bird_check.isChecked():
+                    animal_classes.append(14)
+                if self.cat_check.isChecked():
+                    animal_classes.append(15)
+                if self.dog_check.isChecked():
+                    animal_classes.append(16)
+                if self.horse_check.isChecked():
+                    animal_classes.append(17)
+                # Add remaining animals (sheep through giraffe)
+                animal_classes.extend([18, 19, 20, 21, 22, 23])
+            
             self.pipeline_config.update({
                 'model_size': self.model_size_combo.currentData(),
                 'confidence_threshold': self.confidence_spin.value(),
                 'use_gpu': True,
                 'masking_categories': {
-                    'persons': self.persons_check.isChecked(),
-                    'personal_objects': self.objects_check.isChecked(),
-                    'animals': self.animals_check.isChecked()
+                    'persons': len(person_classes) > 0,
+                    'personal_objects': len(object_classes) > 0,
+                    'animals': len(animal_classes) > 0
+                },
+                # Pass specific class IDs for fine-grained control
+                'masking_classes': {
+                    'persons': person_classes,
+                    'personal_objects': object_classes,
+                    'animals': animal_classes
                 }
             })
         
@@ -1384,35 +1719,55 @@ License: MIT"""
         return cameras
     
     def apply_dark_theme(self):
-        """Apply dark theme stylesheet"""
+        """Apply dark theme stylesheet with improved 4K scaling"""
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #2b2b2b;
                 color: #e0e0e0;
+                font-size: 11px;
             }
             QWidget {
                 background-color: #2b2b2b;
                 color: #e0e0e0;
+                font-size: 11px;
             }
             QGroupBox {
                 border: 1px solid #555555;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 8px;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding: 12px;
+                padding-top: 16px;
                 font-weight: bold;
+                font-size: 12px;
             }
             QGroupBox::title {
                 color: #e0e0e0;
                 subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 3px;
+                left: 12px;
+                padding: 0 6px;
+                font-size: 12px;
+            }
+            QLabel {
+                font-size: 11px;
+                padding: 2px;
+            }
+            QCheckBox {
+                font-size: 11px;
+                spacing: 8px;
+                padding: 4px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
             }
             QPushButton {
                 background-color: #3c3c3c;
                 border: 1px solid #555555;
                 border-radius: 4px;
-                padding: 8px 16px;
+                padding: 10px 20px;
                 color: #e0e0e0;
+                font-size: 12px;
+                min-height: 24px;
             }
             QPushButton:hover {
                 background-color: #4a9eff;
@@ -1430,6 +1785,7 @@ License: MIT"""
                 font-weight: bold;
                 font-size: 14px;
                 color: white;
+                min-height: 36px;
             }
             QPushButton#startButton:hover {
                 background-color: #34ce57;
@@ -1444,6 +1800,7 @@ License: MIT"""
                 font-weight: bold;
                 font-size: 13px;
                 color: #212529;
+                min-height: 36px;
             }
             QPushButton#pauseButton:hover {
                 background-color: #ffca2c;
@@ -1458,6 +1815,7 @@ License: MIT"""
                 font-weight: bold;
                 font-size: 13px;
                 color: white;
+                min-height: 36px;
             }
             QPushButton#stopButton:hover {
                 background-color: #e4606d;
@@ -1476,6 +1834,8 @@ License: MIT"""
                 background-color: #2b2b2b;
                 text-align: center;
                 color: #e0e0e0;
+                font-size: 12px;
+                min-height: 24px;
             }
             QProgressBar::chunk {
                 background-color: #4a9eff;
@@ -1484,13 +1844,27 @@ License: MIT"""
                 background-color: #3c3c3c;
                 border: 1px solid #555555;
                 border-radius: 4px;
-                padding: 4px;
+                padding: 6px 8px;
                 color: #e0e0e0;
+                font-size: 11px;
+                min-height: 24px;
+            }
+            QComboBox {
+                min-width: 120px;
+            }
+            QComboBox::drop-down {
+                width: 24px;
+            }
+            QSpinBox::up-button, QSpinBox::down-button,
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+                width: 20px;
             }
             QTextEdit {
                 background-color: #1e1e1e;
                 border: 1px solid #555555;
                 color: #e0e0e0;
+                font-family: Consolas, Monaco, monospace;
+                font-size: 10px;
             }
             QTabWidget::pane {
                 border: 1px solid #555555;
@@ -1499,10 +1873,28 @@ License: MIT"""
             QTabBar::tab {
                 background-color: #3c3c3c;
                 border: 1px solid #555555;
-                padding: 8px 16px;
+                padding: 10px 20px;
                 color: #e0e0e0;
+                font-size: 12px;
+                min-width: 140px;
             }
             QTabBar::tab:selected {
                 background-color: #4a9eff;
+                font-weight: bold;
+            }
+            QScrollArea {
+                border: none;
+            }
+            QScrollBar:vertical {
+                width: 14px;
+                background: #2b2b2b;
+            }
+            QScrollBar::handle:vertical {
+                background: #555555;
+                min-height: 30px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #666666;
             }
         """)

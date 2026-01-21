@@ -162,7 +162,7 @@ MASKING_CATEGORIES = {
     },
     'personal_objects': {
         'name': 'Personal Objects',
-        'classes': [24, 26, 28, 67],  # backpack, handbag, suitcase, cell phone
+        'classes': [24, 25, 26, 27, 28, 67],  # backpack, umbrella, handbag, tie, suitcase, cell phone
         'enabled': True  # CHANGED: Personal objects enabled by default
     },
     'animals': {

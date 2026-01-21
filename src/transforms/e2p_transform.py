@@ -13,10 +13,10 @@ import logging
 
 try:
     import torch
-    import torch.nn.functional as F
     HAS_TORCH = True
 except ImportError:
     HAS_TORCH = False
+    torch = None
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,7 @@ class TorchE2PTransform:
         Returns:
             Perspective view tensor (1, 3, H_out, W_out)
         """
+        import torch.nn.functional as F
         if v_fov is None:
             v_fov = h_fov * output_height / output_width
 
@@ -100,6 +101,7 @@ class TorchE2PTransform:
         Returns:
             Batch of perspective views (N, 3, H_out, W_out)
         """
+        import torch.nn.functional as F
         if v_fov is None:
             v_fov = h_fov * output_height / output_width
 

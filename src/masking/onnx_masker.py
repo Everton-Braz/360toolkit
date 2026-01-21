@@ -1,6 +1,10 @@
 """
 ONNX-based Multi-Category Masking Module
-Lightweight replacement for PyTorch-based YOLOv8 masking.
+Lightweight replacement for PyTorch-based YOLO masking.
+
+Supports both YOLOv8 and YOLO26 models:
+- YOLOv8: [1, 116, 8400] output - requires NMS post-processing
+- YOLO26: [1, 300, 38] output - NMS-free end-to-end inference (faster)
 
 This module uses ONNX Runtime instead of PyTorch, resulting in:
 - ~90% smaller binary size (300-500 MB vs 6-8 GB)
@@ -9,13 +13,17 @@ This module uses ONNX Runtime instead of PyTorch, resulting in:
 - Compatible with GPU (CUDA) and CPU
 
 Usage:
-1. Export YOLOv8 model to ONNX format (one-time setup):
+1. Export YOLO model to ONNX format (one-time setup):
    from ultralytics import YOLO
+   # For YOLOv8:
    model = YOLO('yolov8s-seg.pt')
+   model.export(format='onnx', simplify=True)
+   # For YOLO26 (recommended, faster):
+   model = YOLO('yolo26s-seg.pt')
    model.export(format='onnx', simplify=True)
 
 2. Use ONNXMasker instead of MultiCategoryMasker:
-   masker = ONNXMasker(model_path='yolov8s-seg.onnx')
+   masker = ONNXMasker(model_path='yolo26s-seg.onnx')  # or yolov8s-seg.onnx
    mask = masker.generate_mask(image_path)
 
 Mask Format (RealityScan Compatible):
@@ -70,11 +78,15 @@ class ONNXMasker:
     Lightweight replacement for PyTorch-based MultiCategoryMasker.
     """
     
-    def __init__(self, model_path: str = 'yolov8s-seg.onnx',
+    def __init__(self, model_path: str = 'yolo26s-seg.onnx',
                  confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
                  use_gpu: bool = DEFAULT_USE_GPU):
         """
-        Initialize ONNXMasker with YOLOv8 ONNX model.
+        Initialize ONNXMasker with YOLO ONNX model.
+        
+        Supports both YOLOv8 and YOLO26 models:
+        - YOLO26: Faster (NMS-free), recommended for production
+        - YOLOv8: Widely used, good accuracy
         
         Args:
             model_path: Path to ONNX model file (.onnx)
@@ -111,21 +123,44 @@ class ONNXMasker:
         self.input_height = input_shape[2] if len(input_shape) > 2 else 640
         self.input_width = input_shape[3] if len(input_shape) > 3 else 640
         
-        logger.info(f"ONNX model loaded: {self.model_path.name}, input: {self.input_width}×{self.input_height}")
+        # Log active providers
+        active_providers = self.session.get_providers()
+        logger.info(f"[ONNX] Model loaded: {self.model_path.name}, input: {self.input_width}×{self.input_height}")
+        logger.info(f"[ONNX] Active providers: {active_providers}")
+        if 'CUDAExecutionProvider' in active_providers:
+            logger.info("[ONNX] 🚀 GPU acceleration ACTIVE")
+        else:
+            logger.warning("[ONNX] ⚠️ Running on CPU (GPU not active)")
     
     def _select_providers(self, use_gpu: bool) -> List[str]:
         """Select ONNX Runtime execution providers (GPU or CPU)"""
         if use_gpu:
             # Try CUDA provider first, fallback to CPU
             available_providers = ort.get_available_providers()
+            logger.info(f"[ONNX] Available providers: {available_providers}")
             
+            # Try CUDAExecutionProvider with proper options
             if 'CUDAExecutionProvider' in available_providers:
-                logger.info("CUDA provider available - using GPU acceleration")
-                return ['CUDAExecutionProvider', 'CPUExecutionProvider']
+                logger.info("[ONNX] ✅ CUDA provider available - using GPU acceleration")
+                # Add CUDA provider options for better performance
+                cuda_options = {
+                    'device_id': 0,
+                    'arena_extend_strategy': 'kNextPowerOfTwo',
+                    'gpu_mem_limit': 4 * 1024 * 1024 * 1024,  # 4GB limit
+                    'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                    'do_copy_in_default_stream': True,
+                }
+                return [
+                    ('CUDAExecutionProvider', cuda_options),
+                    'CPUExecutionProvider'
+                ]
             else:
-                logger.warning("GPU requested but CUDA provider not available. Using CPU.")
+                logger.warning("[ONNX] ⚠️ GPU requested but CUDA provider not available. Using CPU.")
+                logger.warning(f"[ONNX] Available: {available_providers}")
+                logger.warning("[ONNX] Install: pip install onnxruntime-gpu")
                 return ['CPUExecutionProvider']
         else:
+            logger.info("[ONNX] CPU mode selected (GPU disabled in settings)")
             return ['CPUExecutionProvider']
     
     def _load_model(self):
@@ -170,6 +205,42 @@ class ONNXMasker:
         enabled = [k for k, v in self.enabled_categories.items() if v]
         logger.info(f"Enabled masking categories: {', '.join(enabled)}")
     
+    def set_specific_classes(self, persons_classes: List[int] = None, 
+                             objects_classes: List[int] = None,
+                             animals_classes: List[int] = None):
+        """
+        Set specific COCO class IDs to detect for each category.
+        This allows fine-grained control over which objects are masked.
+        
+        Args:
+            persons_classes: List of class IDs for persons (e.g., [0])
+            objects_classes: List of class IDs for personal objects (e.g., [24, 26, 67])
+            animals_classes: List of class IDs for animals (e.g., [15, 16])
+        """
+        if not hasattr(self, '_custom_classes'):
+            self._custom_classes = {}
+        
+        if persons_classes is not None:
+            self._custom_classes['persons'] = persons_classes
+            self.enabled_categories['persons'] = len(persons_classes) > 0
+            
+        if objects_classes is not None:
+            self._custom_classes['personal_objects'] = objects_classes
+            self.enabled_categories['personal_objects'] = len(objects_classes) > 0
+            
+        if animals_classes is not None:
+            self._custom_classes['animals'] = animals_classes
+            self.enabled_categories['animals'] = len(animals_classes) > 0
+        
+        # Log what classes are enabled
+        all_classes = []
+        for cat, classes in self._custom_classes.items():
+            if classes:
+                all_classes.extend(classes)
+                logger.info(f"Custom {cat} classes: {classes}")
+        
+        logger.info(f"Total target classes: {sorted(set(all_classes))}")
+    
     def request_cancellation(self):
         """Request cancellation of current batch processing"""
         self.cancelled = True
@@ -178,16 +249,24 @@ class ONNXMasker:
     def get_target_classes(self) -> List[int]:
         """
         Get list of COCO class IDs to detect based on enabled categories.
+        Uses custom classes if set via set_specific_classes(), otherwise uses defaults.
         
         Returns:
             List of class IDs
         """
         target_classes = []
         
-        for category, enabled in self.enabled_categories.items():
-            if enabled:
-                classes = MASKING_CATEGORIES[category]['classes']
-                target_classes.extend(classes)
+        # Check if custom classes were set
+        if hasattr(self, '_custom_classes') and self._custom_classes:
+            for category, classes in self._custom_classes.items():
+                if self.enabled_categories.get(category, False) and classes:
+                    target_classes.extend(classes)
+        else:
+            # Use default classes from MASKING_CATEGORIES
+            for category, enabled in self.enabled_categories.items():
+                if enabled:
+                    classes = MASKING_CATEGORIES[category]['classes']
+                    target_classes.extend(classes)
         
         # Remove duplicates and sort
         target_classes = sorted(list(set(target_classes)))
@@ -235,6 +314,7 @@ class ONNXMasker:
     def _postprocess(self, outputs: List[np.ndarray], original_shape: Tuple[int, int]) -> Optional[np.ndarray]:
         """
         Postprocess ONNX model outputs to extract masks.
+        Supports both YOLOv8 and YOLO26 output formats.
         
         Args:
             outputs: Raw ONNX model outputs
@@ -243,10 +323,6 @@ class ONNXMasker:
         Returns:
             Combined binary mask (0=remove, 255=keep) or None if no detections
         """
-        # YOLOv8-seg ONNX output format:
-        # outputs[0]: Detection boxes (1, num_detections, 4+num_classes+num_mask_coeffs)
-        # outputs[1]: Segmentation masks (1, num_masks, mask_h, mask_w)
-        
         if len(outputs) < 2:
             logger.warning("Unexpected ONNX output format")
             return None
@@ -257,11 +333,19 @@ class ONNXMasker:
         # DIAGNOSTIC: Log shapes
         logger.debug(f"ONNX Output Shapes - Detections: {detections.shape}, Proto: {proto_masks.shape if proto_masks is not None else 'None'}")
         
-        # YOLOv8 Output is usually (Channels, Anchors) e.g. (116, 8400)
-        # We need (Anchors, Channels) to iterate over detections
-        if detections.shape[0] < detections.shape[1]:
-            detections = detections.T
-            logger.debug(f"Transposed detections to: {detections.shape}")
+        # Detect YOLO version based on output shape
+        # YOLO26: [300, 38] - 300 max detections, 38 values (already post-NMS)
+        # YOLOv8: [116, 8400] or transposed - needs NMS, 116 = 4+80+32
+        is_yolo26 = (len(detections.shape) == 2 and 
+                     detections.shape[0] <= 300 and 
+                     detections.shape[1] < 100)
+        
+        if not is_yolo26:
+            # YOLOv8 Output is usually (Channels, Anchors) e.g. (116, 8400)
+            # We need (Anchors, Channels) to iterate over detections
+            if detections.shape[0] < detections.shape[1]:
+                detections = detections.T
+                logger.debug(f"Transposed detections to: {detections.shape}")
 
         # Get target classes
         target_classes = self.get_target_classes()
@@ -277,36 +361,61 @@ class ONNXMasker:
         num_detections = 0
         
         for detection in detections:
-            # Detection format: [x, y, w, h, conf_class0, conf_class1, ..., mask_coeff0, mask_coeff1, ...]
-            # For YOLOv8: [x, y, w, h, conf, class_id] + mask coefficients
-            
-            # Extract confidence and class (simplified - adjust based on actual ONNX output)
-            class_scores = detection[4:84]  # 80 COCO classes
-            max_conf = np.max(class_scores)
-            class_id = np.argmax(class_scores)
-            
-            # Filter by confidence and class
-            if max_conf < self.confidence_threshold or class_id not in target_classes:
-                continue
-            
-            # Extract box coordinates
-            x_center, y_center, width, height = detection[:4]
-            
-            # Convert to pixel coordinates
-            x1 = int((x_center - width / 2) * w_orig / self.input_width)
-            y1 = int((y_center - height / 2) * h_orig / self.input_height)
-            x2 = int((x_center + width / 2) * w_orig / self.input_width)
-            y2 = int((y_center + height / 2) * h_orig / self.input_height)
+            if is_yolo26:
+                # YOLO26 format: [x1, y1, x2, y2, conf, class_id, mask_coeff0..31]
+                # Already in xyxy format and post-NMS
+                if len(detection) < 38:
+                    continue
+                    
+                x1_norm, y1_norm, x2_norm, y2_norm = detection[0:4]
+                confidence = detection[4]
+                class_id = int(detection[5])
+                mask_coeffs = detection[6:38]  # 32 mask coefficients
+                
+                # YOLO26 boxes are in pixel coords for input size (640x640)
+                x1 = int(x1_norm * w_orig / self.input_width)
+                y1 = int(y1_norm * h_orig / self.input_height)
+                x2 = int(x2_norm * w_orig / self.input_width)
+                y2 = int(y2_norm * h_orig / self.input_height)
+                
+                # Filter by confidence and class
+                if confidence < self.confidence_threshold:
+                    continue
+                if class_id not in target_classes:
+                    continue
+            else:
+                # YOLOv8 format: [x_center, y_center, w, h, class0_conf, class1_conf, ..., mask_coeff0..31]
+                # Extract confidence and class (80 COCO classes)
+                class_scores = detection[4:84]
+                max_conf = np.max(class_scores)
+                class_id = np.argmax(class_scores)
+                
+                # Filter by confidence and class
+                if max_conf < self.confidence_threshold or class_id not in target_classes:
+                    continue
+                
+                confidence = max_conf
+                mask_coeffs = detection[-32:]
+                
+                # Extract box coordinates (xywh format)
+                x_center, y_center, width, height = detection[:4]
+                
+                # Convert to pixel coordinates
+                x1 = int((x_center - width / 2) * w_orig / self.input_width)
+                y1 = int((y_center - height / 2) * h_orig / self.input_height)
+                x2 = int((x_center + width / 2) * w_orig / self.input_width)
+                y2 = int((y_center + height / 2) * h_orig / self.input_height)
             
             # Ensure coordinates are within bounds
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w_orig, x2), min(h_orig, y2)
             
+            # Skip invalid boxes
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
             # Process segmentation mask if available
-            if proto_masks is not None:
-                # Get mask coefficients for this detection (last 32 values)
-                mask_coeffs = detection[-32:]
-                
+            if proto_masks is not None and len(mask_coeffs) == 32:
                 # Matrix multiplication: (1, 32) @ (32, 160*160) -> (1, 160*160)
                 # Reshape proto_masks to (32, 160*160)
                 proto_flat = proto_masks.reshape(32, -1)
@@ -339,6 +448,7 @@ class ONNXMasker:
                 combined_mask[y1:y2, x1:x2] = MASK_VALUE_REMOVE
             
             num_detections += 1
+            logger.debug(f"Detection: class={class_id} conf={confidence:.2f} box=({x1},{y1},{x2},{y2})")
         
         if num_detections == 0:
             return None

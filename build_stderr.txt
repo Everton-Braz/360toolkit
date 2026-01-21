@@ -1,0 +1,34 @@
+143 INFO: PyInstaller: 6.18.0, contrib hooks: 2026.0
+143 INFO: Python: 3.11.9
+175 INFO: Platform: Windows-10-10.0.26200-SP0
+175 INFO: Python environment: C:\Users\Everton-PC\AppData\Local\Programs\Python\Python311
+3230 INFO: Module search paths (PYTHONPATH):
+['C:\\Users\\Everton-PC\\Documents\\APLICATIVOS\\360toolkit',
+ 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\python311.zip',
+ 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\DLLs',
+ 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\Lib',
+ 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311',
+ 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages',
+ 'C:\\Users\\Everton-PC\\Documents\\APLICATIVOS\\360toolkit',
+ 'C:\\Users\\Everton-PC\\Documents\\APLICATIVOS\\360toolkit\\src']
+3555 INFO: Appending 'binaries' from .spec
+3555 INFO: Appending 'datas' from .spec
+3571 INFO: checking Analysis
+3715 INFO: Building because excludes changed
+3715 INFO: Looking for Python shared library...
+3715 INFO: Using Python shared library: C:\Users\Everton-PC\AppData\Local\Programs\Python\Python311\python311.dll
+3715 INFO: Running Analysis Analysis-00.toc
+3715 INFO: Target bytecode optimization level: 0
+3715 INFO: Initializing module dependency graph...
+3729 INFO: Initializing module graph hook caches...
+3730 INFO: Analyzing modules for base_library.zip ...
+4656 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\PyInstaller\\hooks'
+4705 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\PyInstaller\\hooks'
+6225 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\PyInstaller\\hooks'
+7639 INFO: Caching module dependency graph...
+7687 INFO: Analyzing C:\Users\Everton-PC\Documents\APLICATIVOS\360toolkit\src\main.py
+7799 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\PyInstaller\\hooks'
+8096 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\PyInstaller\\hooks'
+8335 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\Everton-PC\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages\\PyInstaller\\hooks'
+8383 INFO: Processing standard module hook 'hook-PyQt6.py' from 'C:\\Users\\Everton-PC\\Documents\\APLICATIVOS\\360toolkit\\hooks'
+Aborted by user request.

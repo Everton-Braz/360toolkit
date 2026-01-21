@@ -867,6 +867,34 @@ class SDKExtractor:
             # Default to 8K for best quality
             cmd.extend(["-output_size", "7680x3840"])
         
+        # ===== GPU ACCELERATION FLAGS (CRITICAL for performance) =====
+        # Reference: https://github.com/Insta360Develop/Desktop-MediaSDK-Cpp
+        
+        # 1. ENABLE CUDA (default is "true" which means "disable CUDA" - confusing!)
+        #    Set to "false" to ENABLE CUDA acceleration
+        cmd.extend(["-disable_cuda", "false"])  # FALSE = CUDA ENABLED
+        logger.info("[SDK GPU] CUDA acceleration ENABLED (disable_cuda=false)")
+        
+        # 2. USE HARDWARE ENCODER (not software)
+        #    Default is false, set to false to use GPU encoder
+        cmd.extend(["-enable_soft_encode", "false"])  # Hardware encoder
+        logger.info("[SDK GPU] Hardware encoder enabled (GPU H.264/H.265)")
+        
+        # 3. USE HARDWARE DECODER (not software)
+        #    Default is false, set to false to use GPU decoder
+        cmd.extend(["-enable_soft_decode", "false"])  # Hardware decoder
+        logger.info("[SDK GPU] Hardware decoder enabled (GPU video decode)")
+        
+        # 4. IMAGE PROCESSING ACCELERATION (auto = GPU if available)
+        cmd.extend(["-image_processing_accel", "auto"])  # Auto-detect GPU/Vulkan
+        logger.info("[SDK GPU] Image processing acceleration: AUTO (GPU/Vulkan)")
+        
+        # 5. OPTIONAL: Enable H.265 encoder for better compression (GPU-accelerated)
+        #    Only if output is video (not needed for image sequences, but doesn't hurt)
+        # cmd.append("-enable_h265_encoder")  # Uncomment if you want H.265
+        
+        logger.info("[SDK GPU] All GPU acceleration features enabled")
+        
         return cmd
     
     def _collect_frame_paths(
