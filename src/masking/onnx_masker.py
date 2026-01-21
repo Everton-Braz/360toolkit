@@ -477,24 +477,38 @@ class ONNXMasker:
         logger.debug(f"Detected {num_detections} object(s)")
         return combined_mask
     
-    def generate_mask(self, image_path: str) -> Optional[np.ndarray]:
+    def generate_mask(self, image_path, output_path: Optional[Path] = None) -> Optional[np.ndarray]:
         """
         Generate binary mask for a single image.
         
         Args:
-            image_path: Path to input image
+            image_path: Path to input image (str or Path)
+            output_path: Optional path to save mask (auto-generated if None)
             
         Returns:
             Binary mask as numpy array (uint8, 0 or 255), or None if failed
         """
         try:
+            # Convert to Path if string
+            if isinstance(image_path, str):
+                image_path = Path(image_path)
+            
             # Read image
-            image = cv2.imread(image_path)
+            image = cv2.imread(str(image_path))
             if image is None:
                 logger.error(f"Failed to load image: {image_path}")
                 return None
             
-            return self.generate_mask_from_array(image)
+            mask = self.generate_mask_from_array(image)
+            
+            # Save mask if output path provided
+            if mask is not None and output_path:
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(output_path), mask)
+                logger.info(f"[ONNX] Saved mask: {output_path.name}")
+            
+            return mask
             
         except Exception as e:
             logger.error(f"Error generating mask for {image_path}: {e}")

@@ -1049,8 +1049,32 @@ License: MIT"""
         model_layout = QVBoxLayout()
         model_layout.setSpacing(8)
         
-        # Model size
-        size_layout = QHBoxLayout()
+        # Masking engine selection
+        engine_layout = QHBoxLayout()
+        engine_label = QLabel("Masking Engine:")
+        engine_label.setMinimumWidth(120)
+        engine_layout.addWidget(engine_label)
+        self.masking_engine_combo = QComboBox()
+        self.masking_engine_combo.addItem("🚀 YOLO (ONNX) - Fast & Lightweight", "yolo_onnx")
+        self.masking_engine_combo.addItem("🔥 YOLO (PyTorch) - Full Featured", "yolo_pytorch")
+        self.masking_engine_combo.addItem("✨ SAM ViT-B - Best Quality", "sam_vitb")
+        self.masking_engine_combo.addItem("⭐ YOLO+SAM Hybrid - Best Results", "hybrid")
+        self.masking_engine_combo.setCurrentIndex(0)  # Default to ONNX
+        self.masking_engine_combo.setMinimumWidth(300)
+        self.masking_engine_combo.currentIndexChanged.connect(self.on_masking_engine_changed)
+        engine_layout.addWidget(self.masking_engine_combo)
+        engine_layout.addStretch()
+        model_layout.addLayout(engine_layout)
+        
+        # Engine description
+        self.engine_description_label = QLabel("NMS-free inference • 3-4x faster • CUDA accelerated")
+        self.engine_description_label.setStyleSheet("color: #888; font-size: 10px; margin-left: 125px; margin-bottom: 8px;")
+        model_layout.addWidget(self.engine_description_label)
+        
+        # Model size (for YOLO only)
+        self.model_size_container = QWidget()
+        size_layout = QHBoxLayout(self.model_size_container)
+        size_layout.setContentsMargins(0, 0, 0, 0)
         size_label = QLabel("Model Size:")
         size_label.setMinimumWidth(120)
         size_layout.addWidget(size_label)
@@ -1063,7 +1087,7 @@ License: MIT"""
         self.model_size_combo.setMinimumWidth(250)
         size_layout.addWidget(self.model_size_combo)
         size_layout.addStretch()
-        model_layout.addLayout(size_layout)
+        model_layout.addWidget(self.model_size_container)
         
         # Confidence
         conf_layout = QHBoxLayout()
@@ -1270,6 +1294,38 @@ License: MIT"""
         overlap_degrees = (overlap_percent / 100.0) * step_size
         fov = step_size + overlap_degrees
         self.overlap_fov_label.setText(f"→ FOV: ~{fov:.0f}°")
+    
+    def on_masking_engine_changed(self, index: int):
+        """Handle masking engine selection change"""
+        engine = self.masking_engine_combo.currentData()
+        
+        if engine == "sam_vitb":
+            # SAM mode: hide model size, show SAM info
+            self.model_size_container.setVisible(False)
+            self.engine_description_label.setText(
+                "Superior segmentation quality • Best edge precision • Automatic mask generation"
+            )
+            self.confidence_spin.setEnabled(False)  # SAM doesn't use confidence threshold
+        elif engine == "hybrid":
+            # Hybrid mode: hide model size, enable confidence
+            self.model_size_container.setVisible(False)
+            self.engine_description_label.setText(
+                "YOLO detection + SAM segmentation • 95-98% quality • Pixel-perfect edges"
+            )
+            self.confidence_spin.setEnabled(True)  # YOLO detection uses confidence
+        else:
+            # YOLO mode: show model size
+            self.model_size_container.setVisible(True)
+            self.confidence_spin.setEnabled(True)
+            
+            if engine == "yolo_onnx":
+                self.engine_description_label.setText(
+                    "NMS-free inference • 3-4x faster • CUDA accelerated"
+                )
+            else:  # yolo_pytorch
+                self.engine_description_label.setText(
+                    "Full-featured YOLO • PyTorch backend • Ultralytics framework"
+                )
     
     def browse_output_dir(self):
         """Browse for output directory"""
@@ -1560,6 +1616,7 @@ License: MIT"""
                 animal_classes.extend([18, 19, 20, 21, 22, 23])
             
             self.pipeline_config.update({
+                'masking_engine': self.masking_engine_combo.currentData(),
                 'model_size': self.model_size_combo.currentData(),
                 'confidence_threshold': self.confidence_spin.value(),
                 'use_gpu': True,

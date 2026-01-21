@@ -1182,156 +1182,251 @@ class PipelineWorker(QThread):
                 model_size = self.config.get('model_size', 'small')
                 confidence = self.config.get('confidence_threshold', 0.5)
                 use_gpu = self.config.get('use_gpu', True)
+                masking_engine = self.config.get('masking_engine', 'yolo_onnx')
                 
-                # Check for ONNX model availability - prefer YOLO26 (faster, NMS-free)
-                # YOLO26 is 3-4x faster than YOLOv8 with same accuracy
-                model_map_yolo26 = {
-                    'nano': 'yolo26n-seg.onnx',
-                    'small': 'yolo26s-seg.onnx',
-                    'medium': 'yolo26m-seg.onnx',
-                    'large': 'yolo26m-seg.onnx',   # Fallback to medium (no large YOLO26)
-                    'xlarge': 'yolo26m-seg.onnx'   # Fallback to medium (no xlarge YOLO26)
-                }
-                model_map_yolov8 = {
-                    'nano': 'yolov8n-seg.onnx',
-                    'small': 'yolov8s-seg.onnx',
-                    'medium': 'yolov8m-seg.onnx',
-                    'large': 'yolov8l-seg.onnx',
-                    'xlarge': 'yolov8x-seg.onnx'
-                }
-                
-                # Try YOLO26 first, then YOLOv8
-                onnx_model_name = model_map_yolo26.get(model_size, 'yolo26s-seg.onnx')
-                onnx_path = get_resource_path(onnx_model_name)
-                
-                if not onnx_path.exists():
-                    # Fallback to YOLOv8
-                    onnx_model_name = model_map_yolov8.get(model_size, 'yolov8s-seg.onnx')
-                    onnx_path = get_resource_path(onnx_model_name)
-                    logger.info(f"YOLO26 not found, falling back to YOLOv8: {onnx_model_name}")
-                else:
-                    logger.info(f"Using YOLO26 model (3-4x faster): {onnx_model_name}")
-                
-                use_onnx = False
-                onnx_error = "Unknown error"
-                
-                if onnx_path.exists():
+                # Handle SAM engine separately
+                if masking_engine == 'sam_vitb':
                     try:
-                        # CRITICAL FIX: Add DLL directory for ONNX Runtime in frozen app
-                        import sys
-                        import os
+                        logger.info("Initializing SAM ViT-B masker...")
+                        from ..masking.sam_masker import SAMMasker, download_sam_checkpoint
                         
-                        # Determine base path for frozen app (onedir mode)
-                        if getattr(sys, 'frozen', False):
-                            # In onedir mode, sys.executable is the .exe
-                            # The _internal folder is usually next to it (PyInstaller 6+)
-                            # or dependencies are in the same folder
-                            exe_dir = Path(sys.executable).parent
-                            internal_dir = exe_dir / '_internal'
-                            
-                            # DIAGNOSTIC: List what DLLs we have
-                            logger.info("=== ONNX Runtime DLL Diagnostics ===")
-                            ort_capi_path = internal_dir / 'onnxruntime' / 'capi'
-                            if ort_capi_path.exists():
-                                logger.info(f"ONNX capi folder exists: {ort_capi_path}")
-                                dlls = list(glob.glob(str(ort_capi_path / '*.dll')))
-                                logger.info(f"DLLs in capi: {[os.path.basename(d) for d in dlls]}")
-                                
-                                pyds = list(glob.glob(str(ort_capi_path / '*.pyd')))
-                                logger.info(f"PYDs in capi: {[os.path.basename(d) for d in pyds]}")
-                            else:
-                                logger.warning(f"ONNX capi folder NOT FOUND: {ort_capi_path}")
-                            
-                            # Check for MSVC runtimes
-                            msvc_dlls = list(glob.glob(str(internal_dir / 'msvcp*.dll')))
-                            msvc_dlls += list(glob.glob(str(internal_dir / 'vcruntime*.dll')))
-                            logger.info(f"MSVC runtimes in _internal: {[os.path.basename(d) for d in msvc_dlls]}")
-                            
-                            # Check current PATH
-                            logger.info(f"Current PATH dirs: {os.environ.get('PATH', '').split(os.pathsep)[:5]}")
-                            logger.info("=== End Diagnostics ===")
-                            
-                            # Add _internal/onnxruntime/capi to DLL search path
-                            if ort_capi_path.exists():
-                                logger.info(f"Adding ONNX DLL path: {ort_capi_path}")
-                                os.add_dll_directory(str(ort_capi_path))
-                            
-                            # Add _internal root (for msvcp140.dll etc)
-                            if internal_dir.exists():
-                                logger.info(f"Adding Internal DLL path: {internal_dir}")
-                                os.add_dll_directory(str(internal_dir))
-                                
-                            # Add exe dir (just in case)
-                            logger.info(f"Adding Exe DLL path: {exe_dir}")
-                            os.add_dll_directory(str(exe_dir))
-
-                        logger.info("Attempting to import onnxruntime...")
-                        import onnxruntime
-                        logger.info(f"Successfully imported onnxruntime {onnxruntime.__version__}")
-                        from ..masking.onnx_masker import ONNXMasker
-                        logger.info(f"Found ONNX model {onnx_path}, using ONNXMasker")
-                        self.masker = ONNXMasker(
-                            model_path=str(onnx_path),
-                            confidence_threshold=confidence,
+                        # Check if checkpoint exists, download if needed
+                        sam_checkpoint = Path('sam_vit_b_01ec64.pth')
+                        if not sam_checkpoint.exists():
+                            logger.warning("SAM checkpoint not found. Attempting download...")
+                            sam_checkpoint = download_sam_checkpoint('vit_b', Path('.'))
+                        
+                        self.masker = SAMMasker(
+                            model_checkpoint=str(sam_checkpoint),
                             use_gpu=use_gpu,
-                            mask_dilation_pixels=15  # Expand boundaries by 15 pixels (includes backpack!)
+                            mask_dilation_pixels=15
                         )
-                        use_onnx = True
-                    except ImportError as e:
-                        onnx_error = f"ImportError: {e}"
-                        logger.warning(f"ONNX model found but onnxruntime not installed/working. Error: {e}")
-                    except Exception as e:
-                        onnx_error = f"InitError: {e}"
-                        logger.warning(f"Failed to initialize ONNXMasker: {e}. Falling back to PyTorch.")
-                else:
-                    onnx_error = f"File not found at {onnx_path}"
-                    logger.warning(f"ONNX model file not found at: {onnx_path}")
-
-                if not use_onnx:
-                    logger.info(f"ONNX initialization failed ({onnx_error}). Attempting PyTorch fallback.")
-                    
-                    # Lazy import to avoid loading torch during PyInstaller analysis
-                    try:
-                        from ..masking import MultiCategoryMasker
+                        logger.info("SAM ViT-B masker initialized successfully")
+                        use_onnx = False  # Skip ONNX/PyTorch fallback
                         
-                        self.masker = MultiCategoryMasker(
-                            model_size=model_size,
-                            confidence_threshold=confidence,
-                            use_gpu=use_gpu
-                        )
+                        # Set enabled categories
+                        categories = self.config.get('masking_categories', {})
+                        self.masker.set_enabled_categories(categories)
+                        
                     except ImportError as e:
-                        # If we are here, it means we failed to use ONNX AND failed to use PyTorch
-                        error_msg = (
-                            f"Stage 3 Initialization Failed: Could not load masking engine.\n"
-                            f"1. ONNX Model check: Failed ({onnx_error})\n"
-                            f"2. PyTorch fallback: Failed ({str(e)})\n"
-                            f"Ensure '{onnx_model_name}' is present in the application folder."
-                        )
-                        logger.error(error_msg)
+                        logger.error(f"SAM not available: {e}. Install with: pip install segment-anything")
                         return {
                             'success': False,
-                            'error': error_msg,
+                            'error': f'SAM not installed: {e}',
                             'masks_created': 0,
                             'skipped': 0,
                             'failed': 0
                         }
-                
-                # Set enabled categories
-                categories = self.config.get('masking_categories', {})
-                self.masker.set_enabled_categories(
-                    persons=categories.get('persons', True),
-                    personal_objects=categories.get('personal_objects', True),
-                    animals=categories.get('animals', True)
-                )
-                
-                # Set specific class IDs if provided (fine-grained control from UI)
-                masking_classes = self.config.get('masking_classes', {})
-                if masking_classes:
-                    self.masker.set_specific_classes(
-                        persons_classes=masking_classes.get('persons'),
-                        objects_classes=masking_classes.get('personal_objects'),
-                        animals_classes=masking_classes.get('animals')
+                    except Exception as e:
+                        logger.error(f"Failed to initialize SAM: {e}", exc_info=True)
+                        return {
+                            'success': False,
+                            'error': f'SAM initialization failed: {e}',
+                            'masks_created': 0,
+                            'skipped': 0,
+                            'failed': 0
+                        }
+                        
+                elif masking_engine == 'hybrid':
+                    # YOLO+SAM Hybrid engine (RECOMMENDED)
+                    try:
+                        logger.info("Initializing YOLO+SAM Hybrid masker...")
+                        from ..masking.hybrid_yolo_sam_masker import HybridYOLOSAMMasker
+                        
+                        # Check if SAM checkpoint exists, download if needed
+                        sam_checkpoint = Path('sam_vit_b_01ec64.pth')
+                        if not sam_checkpoint.exists():
+                            logger.warning("SAM checkpoint not found. Attempting download...")
+                            from ..masking.sam_masker import download_sam_checkpoint
+                            sam_checkpoint = download_sam_checkpoint('vit_b', Path('.'))
+                        
+                        # Use YOLOv8m for detection (or YOLO26 if available)
+                        yolo_model = 'yolov8m.pt'
+                        
+                        self.masker = HybridYOLOSAMMasker(
+                            yolo_model=yolo_model,
+                            sam_checkpoint=str(sam_checkpoint),
+                            use_gpu=use_gpu,
+                            mask_dilation_pixels=15,
+                            yolo_confidence=confidence
+                        )
+                        logger.info("YOLO+SAM Hybrid masker initialized successfully")
+                        use_onnx = False  # Skip ONNX/PyTorch fallback
+                        
+                        # Set enabled categories
+                        categories = self.config.get('masking_categories', {})
+                        self.masker.set_enabled_categories(categories)
+                        
+                    except ImportError as e:
+                        logger.error(f"Hybrid masker not available: {e}. Install with: pip install segment-anything ultralytics")
+                        return {
+                            'success': False,
+                            'error': f'Hybrid masker not installed: {e}',
+                            'masks_created': 0,
+                            'skipped': 0,
+                            'failed': 0
+                        }
+                    except Exception as e:
+                        logger.error(f"Failed to initialize Hybrid masker: {e}", exc_info=True)
+                        return {
+                            'success': False,
+                            'error': f'Hybrid masker initialization failed: {e}',
+                            'masks_created': 0,
+                            'skipped': 0,
+                            'failed': 0
+                        }
+                        
+                else:
+                    # YOLO engines (ONNX or PyTorch)
+                    # Check for ONNX model availability - prefer YOLO26 (faster, NMS-free)
+                    # YOLO26 is 3-4x faster than YOLOv8 with same accuracy
+                    model_map_yolo26 = {
+                        'nano': 'yolo26n-seg.onnx',
+                        'small': 'yolo26s-seg.onnx',
+                        'medium': 'yolo26m-seg.onnx',
+                        'large': 'yolo26m-seg.onnx',   # Fallback to medium (no large YOLO26)
+                        'xlarge': 'yolo26m-seg.onnx'   # Fallback to medium (no xlarge YOLO26)
+                    }
+                    model_map_yolov8 = {
+                        'nano': 'yolov8n-seg.onnx',
+                        'small': 'yolov8s-seg.onnx',
+                        'medium': 'yolov8m-seg.onnx',
+                        'large': 'yolov8l-seg.onnx',
+                        'xlarge': 'yolov8x-seg.onnx'
+                    }
+                    
+                    # Try YOLO26 first, then YOLOv8
+                    onnx_model_name = model_map_yolo26.get(model_size, 'yolo26s-seg.onnx')
+                    onnx_path = get_resource_path(onnx_model_name)
+                    
+                    if not onnx_path.exists():
+                        # Fallback to YOLOv8
+                        onnx_model_name = model_map_yolov8.get(model_size, 'yolov8s-seg.onnx')
+                        onnx_path = get_resource_path(onnx_model_name)
+                        logger.info(f"YOLO26 not found, falling back to YOLOv8: {onnx_model_name}")
+                    else:
+                        logger.info(f"Using YOLO26 model (3-4x faster): {onnx_model_name}")
+                    
+                    use_onnx = False
+                    onnx_error = "Unknown error"
+                    
+                    if onnx_path.exists():
+                        try:
+                            # CRITICAL FIX: Add DLL directory for ONNX Runtime in frozen app
+                            import sys
+                            import os
+                            
+                            # Determine base path for frozen app (onedir mode)
+                            if getattr(sys, 'frozen', False):
+                                # In onedir mode, sys.executable is the .exe
+                                # The _internal folder is usually next to it (PyInstaller 6+)
+                                # or dependencies are in the same folder
+                                exe_dir = Path(sys.executable).parent
+                                internal_dir = exe_dir / '_internal'
+                                
+                                # DIAGNOSTIC: List what DLLs we have
+                                logger.info("=== ONNX Runtime DLL Diagnostics ===")
+                                ort_capi_path = internal_dir / 'onnxruntime' / 'capi'
+                                if ort_capi_path.exists():
+                                    logger.info(f"ONNX capi folder exists: {ort_capi_path}")
+                                    dlls = list(glob.glob(str(ort_capi_path / '*.dll')))
+                                    logger.info(f"DLLs in capi: {[os.path.basename(d) for d in dlls]}")
+                                    
+                                    pyds = list(glob.glob(str(ort_capi_path / '*.pyd')))
+                                    logger.info(f"PYDs in capi: {[os.path.basename(d) for d in pyds]}")
+                                else:
+                                    logger.warning(f"ONNX capi folder NOT FOUND: {ort_capi_path}")
+                                
+                                # Check for MSVC runtimes
+                                msvc_dlls = list(glob.glob(str(internal_dir / 'msvcp*.dll')))
+                                msvc_dlls += list(glob.glob(str(internal_dir / 'vcruntime*.dll')))
+                                logger.info(f"MSVC runtimes in _internal: {[os.path.basename(d) for d in msvc_dlls]}")
+                                
+                                # Check current PATH
+                                logger.info(f"Current PATH dirs: {os.environ.get('PATH', '').split(os.pathsep)[:5]}")
+                                logger.info("=== End Diagnostics ===")
+                                
+                                # Add _internal/onnxruntime/capi to DLL search path
+                                if ort_capi_path.exists():
+                                    logger.info(f"Adding ONNX DLL path: {ort_capi_path}")
+                                    os.add_dll_directory(str(ort_capi_path))
+                                
+                                # Add _internal root (for msvcp140.dll etc)
+                                if internal_dir.exists():
+                                    logger.info(f"Adding Internal DLL path: {internal_dir}")
+                                    os.add_dll_directory(str(internal_dir))
+                                    
+                                # Add exe dir (just in case)
+                                logger.info(f"Adding Exe DLL path: {exe_dir}")
+                                os.add_dll_directory(str(exe_dir))
+
+                            logger.info("Attempting to import onnxruntime...")
+                            import onnxruntime
+                            logger.info(f"Successfully imported onnxruntime {onnxruntime.__version__}")
+                            from ..masking.onnx_masker import ONNXMasker
+                            logger.info(f"Found ONNX model {onnx_path}, using ONNXMasker")
+                            self.masker = ONNXMasker(
+                                model_path=str(onnx_path),
+                                confidence_threshold=confidence,
+                                use_gpu=use_gpu,
+                                mask_dilation_pixels=15  # Expand boundaries by 15 pixels (includes backpack!)
+                            )
+                            use_onnx = True
+                        except ImportError as e:
+                            onnx_error = f"ImportError: {e}"
+                            logger.warning(f"ONNX model found but onnxruntime not installed/working. Error: {e}")
+                        except Exception as e:
+                            onnx_error = f"InitError: {e}"
+                            logger.warning(f"Failed to initialize ONNXMasker: {e}. Falling back to PyTorch.")
+                    else:
+                        onnx_error = f"File not found at {onnx_path}"
+                        logger.warning(f"ONNX model file not found at: {onnx_path}")
+
+                    if not use_onnx:
+                        logger.info(f"ONNX initialization failed ({onnx_error}). Attempting PyTorch fallback.")
+                        
+                        # Lazy import to avoid loading torch during PyInstaller analysis
+                        try:
+                            from ..masking import MultiCategoryMasker
+                            
+                            self.masker = MultiCategoryMasker(
+                                model_size=model_size,
+                                confidence_threshold=confidence,
+                                use_gpu=use_gpu
+                            )
+                        except ImportError as e:
+                            # If we are here, it means we failed to use ONNX AND failed to use PyTorch
+                            error_msg = (
+                                f"Stage 3 Initialization Failed: Could not load masking engine.\n"
+                                f"1. ONNX Model check: Failed ({onnx_error})\n"
+                                f"2. PyTorch fallback: Failed ({str(e)})\n"
+                                f"Ensure '{onnx_model_name}' is present in the application folder."
+                            )
+                            logger.error(error_msg)
+                            return {
+                                'success': False,
+                                'error': error_msg,
+                                'masks_created': 0,
+                                'skipped': 0,
+                                'failed': 0
+                            }
+                    
+                    # Set enabled categories (YOLO only - SAM/Hybrid already set above)
+                    categories = self.config.get('masking_categories', {})
+                    self.masker.set_enabled_categories(
+                        persons=categories.get('persons', True),
+                        personal_objects=categories.get('personal_objects', True),
+                        animals=categories.get('animals', True)
                     )
+                    
+                    # Set specific class IDs if provided (fine-grained control from UI)
+                    masking_classes = self.config.get('masking_classes', {})
+                    if masking_classes:
+                        self.masker.set_specific_classes(
+                            persons_classes=masking_classes.get('persons'),
+                            objects_classes=masking_classes.get('personal_objects'),
+                            animals_classes=masking_classes.get('animals')
+                        )
             
             # Get input images based on skip_transform flag
             skip_transform = self.config.get('skip_transform', False)

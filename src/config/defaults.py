@@ -217,6 +217,36 @@ DEFAULT_BATCH_SIZE = 4  # Images per GPU batch
 BATCH_SIZE_MIN = 1
 BATCH_SIZE_MAX = 16
 
+# Masking engine selection
+MASKING_ENGINES = {
+    'yolo_onnx': {
+        'name': 'YOLO (ONNX)',
+        'description': 'Fast, lightweight YOLO with ONNX Runtime',
+        'requires': ['onnxruntime'],
+        'default_model': 'yolo26s-seg.onnx'
+    },
+    'yolo_pytorch': {
+        'name': 'YOLO (PyTorch)',
+        'description': 'Full-featured YOLO with PyTorch/Ultralytics',
+        'requires': ['torch', 'ultralytics'],
+        'default_model': 'yolov8m-seg.pt'
+    },
+    'sam_vitb': {
+        'name': 'SAM ViT-B',
+        'description': 'Superior segmentation quality with Segment Anything',
+        'requires': ['torch', 'segment-anything'],
+        'default_model': 'sam_vit_b_01ec64.pth'
+    }
+}
+
+DEFAULT_MASKING_ENGINE = 'yolo_onnx'  # Default to YOLO ONNX for best balance
+
+# SAM-specific settings
+SAM_CHECKPOINT_URL = 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth'
+SAM_POINTS_PER_SIDE = 32  # Default sampling grid density
+SAM_PRED_IOU_THRESH = 0.88  # IoU threshold for mask filtering
+SAM_STABILITY_SCORE_THRESH = 0.95  # Stability score threshold
+
 # Mask output settings
 MASK_SUFFIX = '_mask'
 MASK_FORMAT = 'png'
