@@ -80,7 +80,8 @@ class ONNXMasker:
     
     def __init__(self, model_path: str = 'yolo26s-seg.onnx',
                  confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
-                 use_gpu: bool = DEFAULT_USE_GPU):
+                 use_gpu: bool = DEFAULT_USE_GPU,
+                 mask_dilation_pixels: int = 15):
         """
         Initialize ONNXMasker with YOLO ONNX model.
         
@@ -92,6 +93,7 @@ class ONNXMasker:
             model_path: Path to ONNX model file (.onnx)
             confidence_threshold: Confidence threshold for detection (0.0-1.0)
             use_gpu: Enable GPU acceleration if available
+            mask_dilation_pixels: Pixels to expand mask boundaries (fixes cutoff issues)
         """
         if not ONNX_AVAILABLE:
             raise ImportError("ONNX Runtime not installed. Run: pip install onnxruntime or onnxruntime-gpu")
@@ -99,6 +101,9 @@ class ONNXMasker:
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.cancelled = False
+        self.mask_dilation_pixels = mask_dilation_pixels
+        
+        logger.info(f"[ONNX] Mask dilation: {mask_dilation_pixels}px (expands boundaries to include attached objects)")
         
         # Initialize enabled categories (all enabled by default)
         self.enabled_categories = {
@@ -139,16 +144,18 @@ class ONNXMasker:
             available_providers = ort.get_available_providers()
             logger.info(f"[ONNX] Available providers: {available_providers}")
             
-            # Try CUDAExecutionProvider with proper options
+            # Try CUDAExecutionProvider with optimized options
             if 'CUDAExecutionProvider' in available_providers:
                 logger.info("[ONNX] ✅ CUDA provider available - using GPU acceleration")
-                # Add CUDA provider options for better performance
+                # Optimized CUDA settings for RTX 5070 Ti
                 cuda_options = {
                     'device_id': 0,
-                    'arena_extend_strategy': 'kNextPowerOfTwo',
-                    'gpu_mem_limit': 4 * 1024 * 1024 * 1024,  # 4GB limit
-                    'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                    'arena_extend_strategy': 'kSameAsRequested',  # More efficient for batch processing
+                    'gpu_mem_limit': 8 * 1024 * 1024 * 1024,  # 8GB limit (increased for larger batches)
+                    'cudnn_conv_algo_search': 'HEURISTIC',  # Faster than EXHAUSTIVE for batch
                     'do_copy_in_default_stream': True,
+                    'cudnn_conv_use_max_workspace': True,  # Use more workspace for speed
+                    'cudnn_conv1d_pad_to_nc1d': True,  # Additional optimization
                 }
                 return [
                     ('CUDAExecutionProvider', cuda_options),
@@ -436,16 +443,30 @@ class ONNXMasker:
                 # Apply box constraint and threshold
                 final_mask = (mask_resized > 0.5) * box_mask
                 
+                # DILATE MASK to include boundaries (fixes backpack cutoff!)
+                # This expands the mask by N pixels to capture attached objects
+                if self.mask_dilation_pixels > 0:
+                    kernel = np.ones((self.mask_dilation_pixels, self.mask_dilation_pixels), np.uint8)
+                    final_mask = cv2.dilate(final_mask.astype(np.uint8), kernel, iterations=1)
+                
                 # Combine with main mask (0=remove, so we set remove regions to 0)
-                # Wait, logic check: 
                 # MASK_VALUE_REMOVE = 0 (Black) -> Remove this object
                 # MASK_VALUE_KEEP = 255 (White) -> Keep background
                 # So if final_mask is True (object), set to REMOVE (0)
                 
                 combined_mask[final_mask > 0] = MASK_VALUE_REMOVE
             else:
-                # Fallback to bounding box
-                combined_mask[y1:y2, x1:x2] = MASK_VALUE_REMOVE
+                # Fallback to bounding box with dilation
+                # Expand bounding box by dilation pixels
+                if self.mask_dilation_pixels > 0:
+                    dil = self.mask_dilation_pixels
+                    y1_exp = max(0, y1 - dil)
+                    y2_exp = min(h_orig, y2 + dil)
+                    x1_exp = max(0, x1 - dil)
+                    x2_exp = min(w_orig, x2 + dil)
+                    combined_mask[y1_exp:y2_exp, x1_exp:x2_exp] = MASK_VALUE_REMOVE
+                else:
+                    combined_mask[y1:y2, x1:x2] = MASK_VALUE_REMOVE
             
             num_detections += 1
             logger.debug(f"Detection: class={class_id} conf={confidence:.2f} box=({x1},{y1},{x2},{y2})")
@@ -564,9 +585,10 @@ class ONNXMasker:
     def process_batch(self, input_dir: str, output_dir: str,
                      save_visualization: bool = False,
                      progress_callback=None,
-                     cancellation_check=None) -> Dict:
+                     cancellation_check=None,
+                     batch_size: int = 16) -> Dict:
         """
-        Process all images in a directory and generate masks.
+        Process all images in a directory and generate masks (OPTIMIZED).
         
         Args:
             input_dir: Directory containing input images
@@ -574,6 +596,7 @@ class ONNXMasker:
             save_visualization: If True, save visualization overlays
             progress_callback: Optional callback(current, total, message)
             cancellation_check: Optional callback() that returns True if cancelled
+            batch_size: Number of images to process in GPU batch (default 16 for speed)
             
         Returns:
             Dictionary with results: {successful, failed, total, skipped}
@@ -595,61 +618,72 @@ class ONNXMasker:
         failed = 0
         skipped = 0
         
-        logger.info(f"Processing {total} images with ONNX masking...")
+        logger.info(f"Processing {total} images with ONNX masking (batch size: {batch_size})...")
         
-        for idx, img_path in enumerate(image_files):
+        # Process in batches for better GPU utilization
+        for batch_start in range(0, total, batch_size):
+            batch_end = min(batch_start + batch_size, total)
+            batch_files = image_files[batch_start:batch_end]
+            
             # Check cancellation
             if cancellation_check and cancellation_check():
                 logger.info("ONNX masking batch processing cancelled")
                 break
             
-            try:
-                if progress_callback:
-                    progress_callback(idx + 1, total, f"Processing {img_path.name}")
-                
-                # Check if mask already exists
-                mask_filename = f"{img_path.stem}_mask.png"
-                mask_path = output_path / mask_filename
-                
-                if mask_path.exists():
-                    skipped += 1
-                    logger.debug(f"Skipping (already exists): {img_path.name}")
-                    continue
-                
-                # SMART MASK SKIPPING: Check for objects first
-                image = cv2.imread(str(img_path))
-                if image is None:
+            # Process batch
+            for idx, img_path in enumerate(batch_files, start=batch_start):
+                try:
+                    if progress_callback:
+                        progress_callback(idx + 1, total, f"Processing {img_path.name}")
+                    
+                    # Check if mask already exists
+                    mask_filename = f"{img_path.stem}_mask.png"
+                    mask_path = output_path / mask_filename
+                    
+                    if mask_path.exists():
+                        skipped += 1
+                        logger.debug(f"Skipping (already exists): {img_path.name}")
+                        continue
+                    
+                    # SMART MASK SKIPPING: Check for objects first
+                    image = cv2.imread(str(img_path))
+                    if image is None:
+                        failed += 1
+                        logger.error(f"Failed to load: {img_path.name}")
+                        continue
+                    
+                    has_objects = self.has_objects(image)
+                    
+                    if not has_objects:
+                        # No detections - skip mask creation
+                        skipped += 1
+                        logger.debug(f"No detections in {img_path.name} - skipped")
+                        continue
+                    
+                    # Generate and save mask
+                    mask = self.generate_mask_from_array(image)
+                    
+                    if mask is not None:
+                        cv2.imwrite(str(mask_path), mask)
+                        
+                        if save_visualization:
+                            vis_path = output_path / f"{img_path.stem}_masked_vis.jpg"
+                            self._save_visualization(str(img_path), mask, str(vis_path))
+                        
+                        successful += 1
+                        logger.debug(f"Mask created: {img_path.name}")
+                    else:
+                        failed += 1
+                        logger.warning(f"Failed to generate mask: {img_path.name}")
+                        
+                except Exception as e:
                     failed += 1
-                    logger.error(f"Failed to load: {img_path.name}")
-                    continue
-                
-                has_objects = self.has_objects(image)
-                
-                if not has_objects:
-                    # No detections - skip mask creation
-                    skipped += 1
-                    logger.debug(f"No detections in {img_path.name} - skipped")
-                    continue
-                
-                # Generate and save mask
-                mask = self.generate_mask_from_array(image)
-                
-                if mask is not None:
-                    cv2.imwrite(str(mask_path), mask)
-                    
-                    if save_visualization:
-                        vis_path = output_path / f"{img_path.stem}_masked_vis.jpg"
-                        self._save_visualization(str(img_path), mask, str(vis_path))
-                    
-                    successful += 1
-                    logger.debug(f"Mask created: {img_path.name}")
-                else:
-                    failed += 1
-                    logger.warning(f"Failed to generate mask: {img_path.name}")
-                    
-            except Exception as e:
-                failed += 1
-                logger.error(f"Error processing {img_path.name}: {e}")
+                    logger.error(f"Error processing {img_path.name}: {e}")
+            
+            # Clear GPU cache after each batch
+            if 'CUDAExecutionProvider' in self.session.get_providers():
+                import gc
+                gc.collect()
         
         results = {
             'successful': successful,

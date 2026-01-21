@@ -1273,7 +1273,8 @@ class PipelineWorker(QThread):
                         self.masker = ONNXMasker(
                             model_path=str(onnx_path),
                             confidence_threshold=confidence,
-                            use_gpu=use_gpu
+                            use_gpu=use_gpu,
+                            mask_dilation_pixels=15  # Expand boundaries by 15 pixels (includes backpack!)
                         )
                         use_onnx = True
                     except ImportError as e:
