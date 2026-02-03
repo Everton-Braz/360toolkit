@@ -1,6 +1,10 @@
 """
 ONNX-based Multi-Category Masking Module
-Lightweight replacement for PyTorch-based YOLOv8 masking.
+Lightweight replacement for PyTorch-based YOLO masking.
+
+Supports both YOLOv8 and YOLO26 models:
+- YOLOv8: [1, 116, 8400] output - requires NMS post-processing
+- YOLO26: [1, 300, 38] output - NMS-free end-to-end inference (faster)
 
 This module uses ONNX Runtime instead of PyTorch, resulting in:
 - ~90% smaller binary size (300-500 MB vs 6-8 GB)
@@ -9,13 +13,17 @@ This module uses ONNX Runtime instead of PyTorch, resulting in:
 - Compatible with GPU (CUDA) and CPU
 
 Usage:
-1. Export YOLOv8 model to ONNX format (one-time setup):
+1. Export YOLO model to ONNX format (one-time setup):
    from ultralytics import YOLO
+   # For YOLOv8:
    model = YOLO('yolov8s-seg.pt')
+   model.export(format='onnx', simplify=True)
+   # For YOLO26 (recommended, faster):
+   model = YOLO('yolo26s-seg.pt')
    model.export(format='onnx', simplify=True)
 
 2. Use ONNXMasker instead of MultiCategoryMasker:
-   masker = ONNXMasker(model_path='yolov8s-seg.onnx')
+   masker = ONNXMasker(model_path='yolo26s-seg.onnx')  # or yolov8s-seg.onnx
    mask = masker.generate_mask(image_path)
 
 Mask Format (RealityScan Compatible):
@@ -70,16 +78,22 @@ class ONNXMasker:
     Lightweight replacement for PyTorch-based MultiCategoryMasker.
     """
     
-    def __init__(self, model_path: str = 'yolov8s-seg.onnx',
+    def __init__(self, model_path: str = 'yolo26s-seg.onnx',
                  confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
-                 use_gpu: bool = DEFAULT_USE_GPU):
+                 use_gpu: bool = DEFAULT_USE_GPU,
+                 mask_dilation_pixels: int = 15):
         """
-        Initialize ONNXMasker with YOLOv8 ONNX model.
+        Initialize ONNXMasker with YOLO ONNX model.
+        
+        Supports both YOLOv8 and YOLO26 models:
+        - YOLO26: Faster (NMS-free), recommended for production
+        - YOLOv8: Widely used, good accuracy
         
         Args:
             model_path: Path to ONNX model file (.onnx)
             confidence_threshold: Confidence threshold for detection (0.0-1.0)
             use_gpu: Enable GPU acceleration if available
+            mask_dilation_pixels: Pixels to expand mask boundaries (fixes cutoff issues)
         """
         if not ONNX_AVAILABLE:
             raise ImportError("ONNX Runtime not installed. Run: pip install onnxruntime or onnxruntime-gpu")
@@ -87,6 +101,9 @@ class ONNXMasker:
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.cancelled = False
+        self.mask_dilation_pixels = mask_dilation_pixels
+        
+        logger.info(f"[ONNX] Mask dilation: {mask_dilation_pixels}px (expands boundaries to include attached objects)")
         
         # Initialize enabled categories (all enabled by default)
         self.enabled_categories = {
@@ -111,21 +128,46 @@ class ONNXMasker:
         self.input_height = input_shape[2] if len(input_shape) > 2 else 640
         self.input_width = input_shape[3] if len(input_shape) > 3 else 640
         
-        logger.info(f"ONNX model loaded: {self.model_path.name}, input: {self.input_width}×{self.input_height}")
+        # Log active providers
+        active_providers = self.session.get_providers()
+        logger.info(f"[ONNX] Model loaded: {self.model_path.name}, input: {self.input_width}×{self.input_height}")
+        logger.info(f"[ONNX] Active providers: {active_providers}")
+        if 'CUDAExecutionProvider' in active_providers:
+            logger.info("[ONNX] 🚀 GPU acceleration ACTIVE")
+        else:
+            logger.warning("[ONNX] ⚠️ Running on CPU (GPU not active)")
     
     def _select_providers(self, use_gpu: bool) -> List[str]:
         """Select ONNX Runtime execution providers (GPU or CPU)"""
         if use_gpu:
             # Try CUDA provider first, fallback to CPU
             available_providers = ort.get_available_providers()
+            logger.info(f"[ONNX] Available providers: {available_providers}")
             
+            # Try CUDAExecutionProvider with optimized options
             if 'CUDAExecutionProvider' in available_providers:
-                logger.info("CUDA provider available - using GPU acceleration")
-                return ['CUDAExecutionProvider', 'CPUExecutionProvider']
+                logger.info("[ONNX] ✅ CUDA provider available - using GPU acceleration")
+                # Optimized CUDA settings for RTX 5070 Ti
+                cuda_options = {
+                    'device_id': 0,
+                    'arena_extend_strategy': 'kSameAsRequested',  # More efficient for batch processing
+                    'gpu_mem_limit': 8 * 1024 * 1024 * 1024,  # 8GB limit (increased for larger batches)
+                    'cudnn_conv_algo_search': 'HEURISTIC',  # Faster than EXHAUSTIVE for batch
+                    'do_copy_in_default_stream': True,
+                    'cudnn_conv_use_max_workspace': True,  # Use more workspace for speed
+                    'cudnn_conv1d_pad_to_nc1d': True,  # Additional optimization
+                }
+                return [
+                    ('CUDAExecutionProvider', cuda_options),
+                    'CPUExecutionProvider'
+                ]
             else:
-                logger.warning("GPU requested but CUDA provider not available. Using CPU.")
+                logger.warning("[ONNX] ⚠️ GPU requested but CUDA provider not available. Using CPU.")
+                logger.warning(f"[ONNX] Available: {available_providers}")
+                logger.warning("[ONNX] Install: pip install onnxruntime-gpu")
                 return ['CPUExecutionProvider']
         else:
+            logger.info("[ONNX] CPU mode selected (GPU disabled in settings)")
             return ['CPUExecutionProvider']
     
     def _load_model(self):
@@ -170,6 +212,42 @@ class ONNXMasker:
         enabled = [k for k, v in self.enabled_categories.items() if v]
         logger.info(f"Enabled masking categories: {', '.join(enabled)}")
     
+    def set_specific_classes(self, persons_classes: List[int] = None, 
+                             objects_classes: List[int] = None,
+                             animals_classes: List[int] = None):
+        """
+        Set specific COCO class IDs to detect for each category.
+        This allows fine-grained control over which objects are masked.
+        
+        Args:
+            persons_classes: List of class IDs for persons (e.g., [0])
+            objects_classes: List of class IDs for personal objects (e.g., [24, 26, 67])
+            animals_classes: List of class IDs for animals (e.g., [15, 16])
+        """
+        if not hasattr(self, '_custom_classes'):
+            self._custom_classes = {}
+        
+        if persons_classes is not None:
+            self._custom_classes['persons'] = persons_classes
+            self.enabled_categories['persons'] = len(persons_classes) > 0
+            
+        if objects_classes is not None:
+            self._custom_classes['personal_objects'] = objects_classes
+            self.enabled_categories['personal_objects'] = len(objects_classes) > 0
+            
+        if animals_classes is not None:
+            self._custom_classes['animals'] = animals_classes
+            self.enabled_categories['animals'] = len(animals_classes) > 0
+        
+        # Log what classes are enabled
+        all_classes = []
+        for cat, classes in self._custom_classes.items():
+            if classes:
+                all_classes.extend(classes)
+                logger.info(f"Custom {cat} classes: {classes}")
+        
+        logger.info(f"Total target classes: {sorted(set(all_classes))}")
+    
     def request_cancellation(self):
         """Request cancellation of current batch processing"""
         self.cancelled = True
@@ -178,16 +256,24 @@ class ONNXMasker:
     def get_target_classes(self) -> List[int]:
         """
         Get list of COCO class IDs to detect based on enabled categories.
+        Uses custom classes if set via set_specific_classes(), otherwise uses defaults.
         
         Returns:
             List of class IDs
         """
         target_classes = []
         
-        for category, enabled in self.enabled_categories.items():
-            if enabled:
-                classes = MASKING_CATEGORIES[category]['classes']
-                target_classes.extend(classes)
+        # Check if custom classes were set
+        if hasattr(self, '_custom_classes') and self._custom_classes:
+            for category, classes in self._custom_classes.items():
+                if self.enabled_categories.get(category, False) and classes:
+                    target_classes.extend(classes)
+        else:
+            # Use default classes from MASKING_CATEGORIES
+            for category, enabled in self.enabled_categories.items():
+                if enabled:
+                    classes = MASKING_CATEGORIES[category]['classes']
+                    target_classes.extend(classes)
         
         # Remove duplicates and sort
         target_classes = sorted(list(set(target_classes)))
@@ -235,6 +321,7 @@ class ONNXMasker:
     def _postprocess(self, outputs: List[np.ndarray], original_shape: Tuple[int, int]) -> Optional[np.ndarray]:
         """
         Postprocess ONNX model outputs to extract masks.
+        Supports both YOLOv8 and YOLO26 output formats.
         
         Args:
             outputs: Raw ONNX model outputs
@@ -243,10 +330,6 @@ class ONNXMasker:
         Returns:
             Combined binary mask (0=remove, 255=keep) or None if no detections
         """
-        # YOLOv8-seg ONNX output format:
-        # outputs[0]: Detection boxes (1, num_detections, 4+num_classes+num_mask_coeffs)
-        # outputs[1]: Segmentation masks (1, num_masks, mask_h, mask_w)
-        
         if len(outputs) < 2:
             logger.warning("Unexpected ONNX output format")
             return None
@@ -257,11 +340,19 @@ class ONNXMasker:
         # DIAGNOSTIC: Log shapes
         logger.debug(f"ONNX Output Shapes - Detections: {detections.shape}, Proto: {proto_masks.shape if proto_masks is not None else 'None'}")
         
-        # YOLOv8 Output is usually (Channels, Anchors) e.g. (116, 8400)
-        # We need (Anchors, Channels) to iterate over detections
-        if detections.shape[0] < detections.shape[1]:
-            detections = detections.T
-            logger.debug(f"Transposed detections to: {detections.shape}")
+        # Detect YOLO version based on output shape
+        # YOLO26: [300, 38] - 300 max detections, 38 values (already post-NMS)
+        # YOLOv8: [116, 8400] or transposed - needs NMS, 116 = 4+80+32
+        is_yolo26 = (len(detections.shape) == 2 and 
+                     detections.shape[0] <= 300 and 
+                     detections.shape[1] < 100)
+        
+        if not is_yolo26:
+            # YOLOv8 Output is usually (Channels, Anchors) e.g. (116, 8400)
+            # We need (Anchors, Channels) to iterate over detections
+            if detections.shape[0] < detections.shape[1]:
+                detections = detections.T
+                logger.debug(f"Transposed detections to: {detections.shape}")
 
         # Get target classes
         target_classes = self.get_target_classes()
@@ -277,36 +368,61 @@ class ONNXMasker:
         num_detections = 0
         
         for detection in detections:
-            # Detection format: [x, y, w, h, conf_class0, conf_class1, ..., mask_coeff0, mask_coeff1, ...]
-            # For YOLOv8: [x, y, w, h, conf, class_id] + mask coefficients
-            
-            # Extract confidence and class (simplified - adjust based on actual ONNX output)
-            class_scores = detection[4:84]  # 80 COCO classes
-            max_conf = np.max(class_scores)
-            class_id = np.argmax(class_scores)
-            
-            # Filter by confidence and class
-            if max_conf < self.confidence_threshold or class_id not in target_classes:
-                continue
-            
-            # Extract box coordinates
-            x_center, y_center, width, height = detection[:4]
-            
-            # Convert to pixel coordinates
-            x1 = int((x_center - width / 2) * w_orig / self.input_width)
-            y1 = int((y_center - height / 2) * h_orig / self.input_height)
-            x2 = int((x_center + width / 2) * w_orig / self.input_width)
-            y2 = int((y_center + height / 2) * h_orig / self.input_height)
+            if is_yolo26:
+                # YOLO26 format: [x1, y1, x2, y2, conf, class_id, mask_coeff0..31]
+                # Already in xyxy format and post-NMS
+                if len(detection) < 38:
+                    continue
+                    
+                x1_norm, y1_norm, x2_norm, y2_norm = detection[0:4]
+                confidence = detection[4]
+                class_id = int(detection[5])
+                mask_coeffs = detection[6:38]  # 32 mask coefficients
+                
+                # YOLO26 boxes are in pixel coords for input size (640x640)
+                x1 = int(x1_norm * w_orig / self.input_width)
+                y1 = int(y1_norm * h_orig / self.input_height)
+                x2 = int(x2_norm * w_orig / self.input_width)
+                y2 = int(y2_norm * h_orig / self.input_height)
+                
+                # Filter by confidence and class
+                if confidence < self.confidence_threshold:
+                    continue
+                if class_id not in target_classes:
+                    continue
+            else:
+                # YOLOv8 format: [x_center, y_center, w, h, class0_conf, class1_conf, ..., mask_coeff0..31]
+                # Extract confidence and class (80 COCO classes)
+                class_scores = detection[4:84]
+                max_conf = np.max(class_scores)
+                class_id = np.argmax(class_scores)
+                
+                # Filter by confidence and class
+                if max_conf < self.confidence_threshold or class_id not in target_classes:
+                    continue
+                
+                confidence = max_conf
+                mask_coeffs = detection[-32:]
+                
+                # Extract box coordinates (xywh format)
+                x_center, y_center, width, height = detection[:4]
+                
+                # Convert to pixel coordinates
+                x1 = int((x_center - width / 2) * w_orig / self.input_width)
+                y1 = int((y_center - height / 2) * h_orig / self.input_height)
+                x2 = int((x_center + width / 2) * w_orig / self.input_width)
+                y2 = int((y_center + height / 2) * h_orig / self.input_height)
             
             # Ensure coordinates are within bounds
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w_orig, x2), min(h_orig, y2)
             
+            # Skip invalid boxes
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
             # Process segmentation mask if available
-            if proto_masks is not None:
-                # Get mask coefficients for this detection (last 32 values)
-                mask_coeffs = detection[-32:]
-                
+            if proto_masks is not None and len(mask_coeffs) == 32:
                 # Matrix multiplication: (1, 32) @ (32, 160*160) -> (1, 160*160)
                 # Reshape proto_masks to (32, 160*160)
                 proto_flat = proto_masks.reshape(32, -1)
@@ -327,18 +443,33 @@ class ONNXMasker:
                 # Apply box constraint and threshold
                 final_mask = (mask_resized > 0.5) * box_mask
                 
+                # DILATE MASK to include boundaries (fixes backpack cutoff!)
+                # This expands the mask by N pixels to capture attached objects
+                if self.mask_dilation_pixels > 0:
+                    kernel = np.ones((self.mask_dilation_pixels, self.mask_dilation_pixels), np.uint8)
+                    final_mask = cv2.dilate(final_mask.astype(np.uint8), kernel, iterations=1)
+                
                 # Combine with main mask (0=remove, so we set remove regions to 0)
-                # Wait, logic check: 
                 # MASK_VALUE_REMOVE = 0 (Black) -> Remove this object
                 # MASK_VALUE_KEEP = 255 (White) -> Keep background
                 # So if final_mask is True (object), set to REMOVE (0)
                 
                 combined_mask[final_mask > 0] = MASK_VALUE_REMOVE
             else:
-                # Fallback to bounding box
-                combined_mask[y1:y2, x1:x2] = MASK_VALUE_REMOVE
+                # Fallback to bounding box with dilation
+                # Expand bounding box by dilation pixels
+                if self.mask_dilation_pixels > 0:
+                    dil = self.mask_dilation_pixels
+                    y1_exp = max(0, y1 - dil)
+                    y2_exp = min(h_orig, y2 + dil)
+                    x1_exp = max(0, x1 - dil)
+                    x2_exp = min(w_orig, x2 + dil)
+                    combined_mask[y1_exp:y2_exp, x1_exp:x2_exp] = MASK_VALUE_REMOVE
+                else:
+                    combined_mask[y1:y2, x1:x2] = MASK_VALUE_REMOVE
             
             num_detections += 1
+            logger.debug(f"Detection: class={class_id} conf={confidence:.2f} box=({x1},{y1},{x2},{y2})")
         
         if num_detections == 0:
             return None
@@ -346,24 +477,38 @@ class ONNXMasker:
         logger.debug(f"Detected {num_detections} object(s)")
         return combined_mask
     
-    def generate_mask(self, image_path: str) -> Optional[np.ndarray]:
+    def generate_mask(self, image_path, output_path: Optional[Path] = None) -> Optional[np.ndarray]:
         """
         Generate binary mask for a single image.
         
         Args:
-            image_path: Path to input image
+            image_path: Path to input image (str or Path)
+            output_path: Optional path to save mask (auto-generated if None)
             
         Returns:
             Binary mask as numpy array (uint8, 0 or 255), or None if failed
         """
         try:
+            # Convert to Path if string
+            if isinstance(image_path, str):
+                image_path = Path(image_path)
+            
             # Read image
-            image = cv2.imread(image_path)
+            image = cv2.imread(str(image_path))
             if image is None:
                 logger.error(f"Failed to load image: {image_path}")
                 return None
             
-            return self.generate_mask_from_array(image)
+            mask = self.generate_mask_from_array(image)
+            
+            # Save mask if output path provided
+            if mask is not None and output_path:
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(output_path), mask)
+                logger.info(f"[ONNX] Saved mask: {output_path.name}")
+            
+            return mask
             
         except Exception as e:
             logger.error(f"Error generating mask for {image_path}: {e}")
@@ -454,9 +599,10 @@ class ONNXMasker:
     def process_batch(self, input_dir: str, output_dir: str,
                      save_visualization: bool = False,
                      progress_callback=None,
-                     cancellation_check=None) -> Dict:
+                     cancellation_check=None,
+                     batch_size: int = 16) -> Dict:
         """
-        Process all images in a directory and generate masks.
+        Process all images in a directory and generate masks (OPTIMIZED).
         
         Args:
             input_dir: Directory containing input images
@@ -464,6 +610,7 @@ class ONNXMasker:
             save_visualization: If True, save visualization overlays
             progress_callback: Optional callback(current, total, message)
             cancellation_check: Optional callback() that returns True if cancelled
+            batch_size: Number of images to process in GPU batch (default 16 for speed)
             
         Returns:
             Dictionary with results: {successful, failed, total, skipped}
@@ -485,61 +632,72 @@ class ONNXMasker:
         failed = 0
         skipped = 0
         
-        logger.info(f"Processing {total} images with ONNX masking...")
+        logger.info(f"Processing {total} images with ONNX masking (batch size: {batch_size})...")
         
-        for idx, img_path in enumerate(image_files):
+        # Process in batches for better GPU utilization
+        for batch_start in range(0, total, batch_size):
+            batch_end = min(batch_start + batch_size, total)
+            batch_files = image_files[batch_start:batch_end]
+            
             # Check cancellation
             if cancellation_check and cancellation_check():
                 logger.info("ONNX masking batch processing cancelled")
                 break
             
-            try:
-                if progress_callback:
-                    progress_callback(idx + 1, total, f"Processing {img_path.name}")
-                
-                # Check if mask already exists
-                mask_filename = f"{img_path.stem}_mask.png"
-                mask_path = output_path / mask_filename
-                
-                if mask_path.exists():
-                    skipped += 1
-                    logger.debug(f"Skipping (already exists): {img_path.name}")
-                    continue
-                
-                # SMART MASK SKIPPING: Check for objects first
-                image = cv2.imread(str(img_path))
-                if image is None:
+            # Process batch
+            for idx, img_path in enumerate(batch_files, start=batch_start):
+                try:
+                    if progress_callback:
+                        progress_callback(idx + 1, total, f"Processing {img_path.name}")
+                    
+                    # Check if mask already exists
+                    mask_filename = f"{img_path.stem}_mask.png"
+                    mask_path = output_path / mask_filename
+                    
+                    if mask_path.exists():
+                        skipped += 1
+                        logger.debug(f"Skipping (already exists): {img_path.name}")
+                        continue
+                    
+                    # SMART MASK SKIPPING: Check for objects first
+                    image = cv2.imread(str(img_path))
+                    if image is None:
+                        failed += 1
+                        logger.error(f"Failed to load: {img_path.name}")
+                        continue
+                    
+                    has_objects = self.has_objects(image)
+                    
+                    if not has_objects:
+                        # No detections - skip mask creation
+                        skipped += 1
+                        logger.debug(f"No detections in {img_path.name} - skipped")
+                        continue
+                    
+                    # Generate and save mask
+                    mask = self.generate_mask_from_array(image)
+                    
+                    if mask is not None:
+                        cv2.imwrite(str(mask_path), mask)
+                        
+                        if save_visualization:
+                            vis_path = output_path / f"{img_path.stem}_masked_vis.jpg"
+                            self._save_visualization(str(img_path), mask, str(vis_path))
+                        
+                        successful += 1
+                        logger.debug(f"Mask created: {img_path.name}")
+                    else:
+                        failed += 1
+                        logger.warning(f"Failed to generate mask: {img_path.name}")
+                        
+                except Exception as e:
                     failed += 1
-                    logger.error(f"Failed to load: {img_path.name}")
-                    continue
-                
-                has_objects = self.has_objects(image)
-                
-                if not has_objects:
-                    # No detections - skip mask creation
-                    skipped += 1
-                    logger.debug(f"No detections in {img_path.name} - skipped")
-                    continue
-                
-                # Generate and save mask
-                mask = self.generate_mask_from_array(image)
-                
-                if mask is not None:
-                    cv2.imwrite(str(mask_path), mask)
-                    
-                    if save_visualization:
-                        vis_path = output_path / f"{img_path.stem}_masked_vis.jpg"
-                        self._save_visualization(str(img_path), mask, str(vis_path))
-                    
-                    successful += 1
-                    logger.debug(f"Mask created: {img_path.name}")
-                else:
-                    failed += 1
-                    logger.warning(f"Failed to generate mask: {img_path.name}")
-                    
-            except Exception as e:
-                failed += 1
-                logger.error(f"Error processing {img_path.name}: {e}")
+                    logger.error(f"Error processing {img_path.name}: {e}")
+            
+            # Clear GPU cache after each batch
+            if 'CUDAExecutionProvider' in self.session.get_providers():
+                import gc
+                gc.collect()
         
         results = {
             'successful': successful,

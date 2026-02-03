@@ -445,13 +445,17 @@ class MultiCategoryMasker:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        # Supported image formats
-        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
-        image_files = []
+        # Supported image formats (case-insensitive via rglob)
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
         
-        for ext in image_extensions:
-            image_files.extend(input_path.glob(ext))
-            image_files.extend(input_path.glob(ext.upper()))
+        # Use set to avoid duplicates, then convert to sorted list
+        image_files_set = set()
+        for f in input_path.rglob('*'):
+            if f.is_file() and f.suffix.lower() in image_extensions:
+                image_files_set.add(f)
+        
+        # Sort for consistent ordering
+        image_files = sorted(image_files_set, key=lambda x: x.name)
         
         total = len(image_files)
         successful = 0

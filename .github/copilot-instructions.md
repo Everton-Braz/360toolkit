@@ -633,3 +633,13 @@ python src/main.py
 **Last Updated**: November 2025  
 **Target Folder**: `C:\Users\User\Documents\APLICATIVOS\360ToolKit\`  
 **Development Approach**: Spec-driven, minimalist UI, batch-first workflow
+
+
+----
+
+INPUT FOR TESTS: "G:\.shortcut-targets-by-id\12X9Cn_caDGuRMIO-hF6196FMdQyGNUDA\PROJETOS - CHICO SOMBRA\VIDEOS 360\VID_20251215_170106_00_211.insv"
+
+CREATE FOLDERS AT
+OUTPUT: C:\Users\Everton-PC\Documents\ARQUIVOS_TESTE
+
+MAKE THE TEST, RUN THE SCRIPTS, AND CHECK IF THE OUTPUT IS CORRECT. FIX THE ERRORS, RUN THE TEST AGAIN, UNTIL EVERYTHING IS CORRECT.

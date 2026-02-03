@@ -4,6 +4,14 @@ Unified photogrammetry preprocessing pipeline.
 """
 
 import sys
+import os
+import multiprocessing
+
+# CRITICAL: Must be called at the very start for PyInstaller on Windows
+# This prevents child processes from spawning new GUI windows
+if __name__ == '__main__':
+    multiprocessing.freeze_support()
+
 import logging
 from pathlib import Path
 
@@ -27,13 +35,25 @@ def main():
     logger.info("=" * 60)
     
     try:
+        # Enable High-DPI scaling BEFORE creating QApplication
+        # This is essential for 4K monitors
+        os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
+        os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
+        
         from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QFont
         from src.ui.main_window import MainWindow
         
         # Create Qt application
         app = QApplication(sys.argv)
         app.setApplicationName("360toolkit")
         app.setOrganizationName("360toolkit Development Team")
+        
+        # Set default font size for better readability on high-DPI
+        font = app.font()
+        font.setPointSize(10)  # Slightly larger default font
+        app.setFont(font)
         
         # Create and show main window
         window = MainWindow()

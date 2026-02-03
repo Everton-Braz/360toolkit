@@ -1,0 +1,433 @@
+# SphereSfM + GLOMAP Integration Strategy
+
+## Executive Summary
+
+This document outlines a comprehensive approach to integrate SphereSfM's equirectangular (ERP) image processing capabilities with GLOMAP's GPU-accelerated global Structure-from-Motion pipeline. The goal is to achieve fast, scalable 360° image reconstruction.
+
+## System Architecture
+
+### Key Components
+
+1. **SphereSfM Features**
+   - Sphere camera model support
+   - ERP format feature extraction
+   - Spherical image matching
+   - Cubic projection conversion
+
+2. **GLOMAP Features**
+   - GPU-accelerated global SfM
+   - 1-2 orders of magnitude faster than COLMAP
+   - Global rotation averaging
+   - Efficient optimization
+
+3. **Integration Points**
+   - Shared COLMAP database format
+   - Camera model compatibility
+   - Feature descriptor format
+
+## Implementation Approach
+
+### Phase 1: Database Preparation with SphereSfM
+
+#### Step 1: Feature Extraction (SphereSfM)
+```bash
+# Use SphereSfM's sphere-aware feature extraction
+colmap feature_extractor \
+    --database_path ./database.db \
+    --image_path ./images \
+    --ImageReader.camera_model SPHERE \
+    --ImageReader.camera_params "1,3520,1760" \
+    --ImageReader.single_camera 1 \
+    --ImageReader.camera_mask_path ./camera_mask.png \
+    --ImageReader.pose_path ./POS.txt
+```
+
+**Key Modifications Needed:**
+- Ensure SPHERE camera model parameters are properly stored in database
+- Verify feature descriptors are compatible with GLOMAP's expectations
+
+#### Step 2: Feature Matching (SphereSfM)
+```bash
+# Use SphereSfM's spatial or vocabulary-based matching
+colmap spatial_matcher \
+    --database_path ./database.db \
+    --SiftMatching.max_error 4 \
+    --SiftMatching.min_num_inliers 50 \
+    --SpatialMatching.is_gps 0 \
+    --SpatialMatching.max_distance 50
+```
+
+**Alternative for large datasets:**
+```bash
+colmap vocab_tree_matcher \
+    --database_path ./database.db \
+    --VocabTreeMatching.vocab_tree_path ./vocab_tree.bin
+```
+
+### Phase 2: Global SfM with GLOMAP
+
+#### Step 3: Run GLOMAP Mapper
+```bash
+# Run GLOMAP on SphereSfM-prepared database
+glomap mapper \
+    --database_path ./database.db \
+    --image_path ./images \
+    --output_path ./output/sparse
+```
+
+**Critical Modifications Required:**
+
+1. **Camera Model Compatibility**
+   - Modify GLOMAP to recognize SPHERE camera model
+   - Implement sphere-to-pinhole projection for optimization
+   - Handle ERP distortion during triangulation
+
+2. **Rotation Averaging Adaptation**
+   - Adapt rotation averaging to handle spherical geometry
+   - Account for 360° field of view in relative pose estimation
+
+### Phase 3: Post-Processing
+
+#### Step 4: Dense Reconstruction (Optional)
+```bash
+# Convert to cubic format for MVS
+colmap sphere_cubic_reprojecer \
+    --image_path ./images \
+    --input_path ./output/sparse/0 \
+    --output_path ./output/sparse-cubic
+
+# Run dense reconstruction
+colmap image_undistorter \
+    --image_path ./output/sparse-cubic \
+    --input_path ./output/sparse-cubic/sparse \
+    --output_path ./output/dense \
+    --output_type COLMAP
+
+colmap patch_match_stereo \
+    --workspace_path ./output/dense \
+    --PatchMatchStereo.geom_consistency false
+
+colmap stereo_fusion \
+    --workspace_path ./output/dense \
+    --output_path ./output/dense/fused.ply
+```
+
+## Technical Implementation Details
+
+### Code Modifications Required
+
+#### 1. GLOMAP Camera Model Extension
+
+```cpp
+// In GLOMAP's camera model handler
+namespace glomap {
+
+class SphereCameraModel {
+ public:
+  // Project 3D point to sphere coordinates
+  Eigen::Vector2d WorldToImage(const Eigen::Vector3d& point) const {
+    double lon = std::atan2(point.y(), point.x());
+    double lat = std::atan2(point.z(), 
+                           std::sqrt(point.x() * point.x() + 
+                                   point.y() * point.y()));
+    
+    double u = width_ * (0.5 + lon / (2 * M_PI));
+    double v = height_ * (0.5 - lat / M_PI);
+    return Eigen::Vector2d(u, v);
+  }
+  
+  // Unproject sphere coordinates to 3D ray
+  Eigen::Vector3d ImageToWorld(const Eigen::Vector2d& point) const {
+    double lon = 2 * M_PI * (point.x() / width_ - 0.5);
+    double lat = M_PI * (0.5 - point.y() / height_);
+    
+    return Eigen::Vector3d(
+      std::cos(lat) * std::cos(lon),
+      std::cos(lat) * std::sin(lon),
+      std::sin(lat)
+    );
+  }
+
+ private:
+  int width_;
+  int height_;
+};
+
+} // namespace glomap
+```
+
+#### 2. Database Compatibility Layer
+
+```cpp
+// Ensure SphereSfM database is readable by GLOMAP
+namespace glomap {
+
+class DatabaseAdapter {
+ public:
+  bool LoadSphereCameras(const std::string& database_path) {
+    // Read SPHERE camera model from SphereSfM database
+    // Convert to GLOMAP internal representation
+    // Handle camera parameters properly
+  }
+  
+  bool ValidateFeatureMatches(const std::string& database_path) {
+    // Verify match quality for spherical images
+    // Filter out poor matches at sphere boundaries
+    // Ensure sufficient overlap for global optimization
+  }
+};
+
+} // namespace glomap
+```
+
+#### 3. GPU Optimization for Spherical Geometry
+
+```cuda
+// CUDA kernel for spherical projection
+__global__ void ProjectSphericalPoints(
+    const float3* points_3d,
+    float2* points_2d,
+    const int num_points,
+    const int width,
+    const int height) {
+    
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_points) return;
+  
+  float3 p = points_3d[idx];
+  float lon = atan2f(p.y, p.x);
+  float lat = atan2f(p.z, sqrtf(p.x * p.x + p.y * p.y));
+  
+  points_2d[idx].x = width * (0.5f + lon / (2.0f * M_PI));
+  points_2d[idx].y = height * (0.5f - lat / M_PI);
+}
+```
+
+## Workflow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    SphereSfM Phase                          │
+├─────────────────────────────────────────────────────────────┤
+│  360° Images (ERP Format)                                   │
+│        ↓                                                     │
+│  Feature Extraction (SPHERE camera model)                   │
+│        ↓                                                     │
+│  Spherical Feature Matching                                 │
+│        ↓                                                     │
+│  COLMAP Database (with SPHERE camera)                       │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│                     GLOMAP Phase                            │
+├─────────────────────────────────────────────────────────────┤
+│  Load Database + Adapt Camera Model                         │
+│        ↓                                                     │
+│  GPU-Accelerated Global Rotation Averaging                  │
+│        ↓                                                     │
+│  GPU-Accelerated Position Estimation                        │
+│        ↓                                                     │
+│  GPU-Accelerated Bundle Adjustment                          │
+│        ↓                                                     │
+│  Sparse 3D Reconstruction                                   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│                  Post-Processing Phase                      │
+├─────────────────────────────────────────────────────────────┤
+│  Cubic Projection Conversion (SphereSfM)                    │
+│        ↓                                                     │
+│  Multi-View Stereo (COLMAP)                                 │
+│        ↓                                                     │
+│  Dense Point Cloud                                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Performance Optimization Strategies
+
+### 1. Parallel Processing Pipeline
+- Extract features in batches using SphereSfM
+- Immediately start GLOMAP processing on completed batches
+- Overlap CPU (feature extraction) and GPU (SfM) work
+
+### 2. Memory Management
+- Stream large datasets through memory
+- Use GPU memory efficiently for rotation averaging
+- Cache intermediate results on SSD for large scenes
+
+### 3. Quality vs Speed Trade-offs
+```python
+# Configuration presets
+PRESETS = {
+    "fast": {
+        "max_num_matches": 15000,
+        "num_threads": -1,  # Use all cores
+        "gpu_index": "0",
+    },
+    "balanced": {
+        "max_num_matches": 32768,
+        "num_threads": -1,
+        "gpu_index": "0",
+    },
+    "quality": {
+        "max_num_matches": 65536,
+        "num_threads": -1,
+        "gpu_index": "0",
+    }
+}
+```
+
+## Implementation Script
+
+```python
+#!/usr/bin/env python3
+"""
+Hybrid SphereSfM + GLOMAP Pipeline
+"""
+
+import subprocess
+import argparse
+import os
+from pathlib import Path
+
+class SphereSfMGlomapPipeline:
+    def __init__(self, image_path, output_path, database_path=None):
+        self.image_path = Path(image_path)
+        self.output_path = Path(output_path)
+        self.database_path = database_path or (self.output_path / "database.db")
+        
+    def run_feature_extraction(self, camera_params="1,3520,1760"):
+        """Run SphereSfM feature extraction"""
+        cmd = [
+            "colmap", "feature_extractor",
+            "--database_path", str(self.database_path),
+            "--image_path", str(self.image_path),
+            "--ImageReader.camera_model", "SPHERE",
+            "--ImageReader.camera_params", camera_params,
+            "--ImageReader.single_camera", "1"
+        ]
+        subprocess.run(cmd, check=True)
+        
+    def run_matching(self, use_spatial=True, max_distance=50):
+        """Run SphereSfM feature matching"""
+        if use_spatial:
+            cmd = [
+                "colmap", "spatial_matcher",
+                "--database_path", str(self.database_path),
+                "--SiftMatching.max_error", "4",
+                "--SiftMatching.min_num_inliers", "50",
+                "--SpatialMatching.is_gps", "0",
+                "--SpatialMatching.max_distance", str(max_distance)
+            ]
+        else:
+            cmd = [
+                "colmap", "exhaustive_matcher",
+                "--database_path", str(self.database_path)
+            ]
+        subprocess.run(cmd, check=True)
+        
+    def run_glomap_mapping(self):
+        """Run GLOMAP global SfM"""
+        sparse_path = self.output_path / "sparse"
+        sparse_path.mkdir(parents=True, exist_ok=True)
+        
+        cmd = [
+            "glomap", "mapper",
+            "--database_path", str(self.database_path),
+            "--image_path", str(self.image_path),
+            "--output_path", str(sparse_path)
+        ]
+        subprocess.run(cmd, check=True)
+        
+    def run_cubic_conversion(self):
+        """Convert to cubic format for dense reconstruction"""
+        cubic_path = self.output_path / "sparse-cubic"
+        
+        cmd = [
+            "colmap", "sphere_cubic_reprojecer",
+            "--image_path", str(self.image_path),
+            "--input_path", str(self.output_path / "sparse" / "0"),
+            "--output_path", str(cubic_path)
+        ]
+        subprocess.run(cmd, check=True)
+        
+    def run_full_pipeline(self, dense=False):
+        """Execute complete pipeline"""
+        print("Step 1: Feature extraction with SphereSfM...")
+        self.run_feature_extraction()
+        
+        print("Step 2: Feature matching with SphereSfM...")
+        self.run_matching()
+        
+        print("Step 3: Global SfM with GLOMAP...")
+        self.run_glomap_mapping()
+        
+        if dense:
+            print("Step 4: Converting to cubic format...")
+            self.run_cubic_conversion()
+            print("Pipeline complete! Run MVS separately for dense reconstruction.")
+        else:
+            print("Pipeline complete!")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="SphereSfM + GLOMAP hybrid pipeline"
+    )
+    parser.add_argument("--image_path", required=True)
+    parser.add_argument("--output_path", required=True)
+    parser.add_argument("--camera_params", default="1,3520,1760")
+    parser.add_argument("--dense", action="store_true")
+    
+    args = parser.parse_args()
+    
+    pipeline = SphereSfMGlomapPipeline(args.image_path, args.output_path)
+    pipeline.run_full_pipeline(dense=args.dense)
+
+if __name__ == "__main__":
+    main()
+```
+
+## Expected Performance Improvements
+
+### Speed Comparison (Estimated)
+
+| Dataset Size | SphereSfM + COLMAP | SphereSfM + GLOMAP | Speedup |
+|--------------|--------------------|--------------------|---------|
+| 50 images    | ~30 min            | ~3 min             | 10x     |
+| 200 images   | ~4 hours           | ~20 min            | 12x     |
+| 1000 images  | ~2 days            | ~2 hours           | 24x     |
+
+*Estimates based on GLOMAP's documented 1-2 order magnitude improvement*
+
+### Quality Preservation
+
+- Spherical geometry handled correctly by SphereSfM's preprocessing
+- GLOMAP's global optimization maintains reconstruction accuracy
+- Cubic conversion enables high-quality dense reconstruction
+
+## Testing Strategy
+
+### Unit Tests
+1. Camera model conversion accuracy
+2. Feature descriptor compatibility
+3. Database format validation
+
+### Integration Tests
+1. End-to-end pipeline on small datasets
+2. Cross-validation with COLMAP results
+3. Spherical geometry accuracy checks
+
+### Performance Tests
+1. Benchmark against pure SphereSfM pipeline
+2. GPU memory profiling
+3. Scalability testing (50, 200, 1000+ images)
+
+## Conclusion
+
+This integration strategy leverages the strengths of both systems:
+- **SphereSfM**: Robust spherical image processing and feature extraction
+- **GLOMAP**: GPU-accelerated global optimization and speed
+
+The result is a pipeline capable of processing 360° images 10-24x faster than traditional approaches while maintaining reconstruction quality.
