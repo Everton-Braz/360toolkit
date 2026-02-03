@@ -32,13 +32,14 @@ class LichtfeldExporter:
         self.exporter = RealityScanExporter(colmap_dir, output_dir)
         self.exporter.parse_colmap_text()
         
-    def export(self, images_dir: str, fix_rotation: bool = True) -> bool:
+    def export(self, images_dir: str, fix_rotation: bool = True, masks_dir: Optional[str] = None) -> bool:
         """
         Export to Lichtfeld Studio format.
         
         Args:
             images_dir: Path to source images
             fix_rotation: Apply rotation fix for 360 images (standard for Lichtfeld)
+            masks_dir: Optional path to masks directory
             
         Returns:
             True if successful
@@ -48,7 +49,17 @@ class LichtfeldExporter:
             images_out_dir = self.output_dir / "images"
             images_out_dir.mkdir(exist_ok=True)
             
+            # Prepare masks directory if provided
+            masks_out_dir = None
+            if masks_dir:
+                masks_source_dir = Path(masks_dir)
+                if masks_source_dir.exists():
+                    masks_out_dir = self.output_dir / "masks"
+                    masks_out_dir.mkdir(exist_ok=True)
+                    logger.info(f"Copying masks from: {masks_source_dir}")
+            
             frames = []
+            masks_copied = 0
             
             # 1. Process Frames
             for image_id, image_data in self.exporter.images.items():
@@ -73,6 +84,21 @@ class LichtfeldExporter:
                         logger.warning(f"Could not copy image {src_image}: {e}")
                         continue
                 
+                # Copy and rename mask if exists
+                # LichtFeld Studio expects: image "36.jpg" → mask "36.jpg.png"
+                if masks_out_dir:
+                    # Source mask: "36_mask.png"
+                    stem = Path(name).stem
+                    src_mask = masks_source_dir / f"{stem}_mask.png"
+                    if src_mask.exists():
+                        # Target mask: "36.jpg.png"
+                        dst_mask = masks_out_dir / f"{name}.png"
+                        try:
+                            shutil.copy2(src_mask, dst_mask)
+                            masks_copied += 1
+                        except Exception as e:
+                            logger.warning(f"Could not copy mask {src_mask}: {e}")
+                
                 # Calculate transformation matrix
                 c2w = self._calculate_transform_matrix(image_data, fix_rotation)
                 
@@ -90,8 +116,12 @@ class LichtfeldExporter:
             ply_path = self._export_point_cloud(fix_rotation)
             
             # 3. Write transforms.json
+            # Get first camera model (cameras dict may not start at ID 1)
+            first_camera_id = next(iter(self.exporter.cameras.keys()))
+            first_camera = self.exporter.cameras[first_camera_id]
+            
             transforms_data = {
-                "camera_model": self._get_camera_model_string(self.exporter.cameras[1]['model']),
+                "camera_model": self._get_camera_model_string(first_camera['model']),
                 "frames": frames
             }
             if ply_path:
@@ -100,8 +130,12 @@ class LichtfeldExporter:
             output_json = self.output_dir / "transforms.json"
             with open(output_json, 'w', encoding='utf-8') as f:
                 json.dump(transforms_data, f, indent=4)
-                
+            
+            # Log summary
             logger.info(f"Lichtfeld Studio export successful: {output_json}")
+            logger.info(f"Exported {len(frames)} frames")
+            if masks_copied > 0:
+                logger.info(f"Copied {masks_copied} masks (renamed to LichtFeld Studio format: image.jpg.png)")
             return True
             
         except Exception as e:
