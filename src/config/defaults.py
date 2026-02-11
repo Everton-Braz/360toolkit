@@ -85,11 +85,35 @@ DEFAULT_OUTPUT_WIDTH = 1920  # CHANGED: 1920×1920 for Stage 2 Perspective
 DEFAULT_OUTPUT_HEIGHT = 1920
 
 # Cubemap settings
-DEFAULT_CUBEMAP_FACE_SIZE = 1920  # CHANGED: Calculated as input_height / 2 + 33% (e.g., 1440 / 2 * 1.33 ≈ 1920)
-DEFAULT_CUBEMAP_OVERLAP = 10  # Overlap percentage (0-50)
-DEFAULT_CUBEMAP_FOV = 110  # CHANGED: Default FOV for 8-tile cubemap
+DEFAULT_CUBEMAP_TILE_WIDTH = 1920  # Default: 3/4 of input width (auto-calculated)
+DEFAULT_CUBEMAP_TILE_HEIGHT = 1920  # Default: 3/4 of input height (auto-calculated)
+DEFAULT_CUBEMAP_FOV = 90  # Fixed 90° FOV for 4×2 grid (each tile covers 90° horizontally)
+DEFAULT_CUBEMAP_FACE_SIZE = 1024  # Face size for 6-face cubemap mode
+DEFAULT_CUBEMAP_OVERLAP = 10  # Overlap percent for cubemap tiles
 
-# Camera ring presets
+# Camera groups for dome-like coverage (photogrammetry)
+DEFAULT_CAMERA_GROUPS = [
+    {
+        'name': 'Horizon',
+        'camera_count': 8,
+        'pitch': 0,
+        'fov': 110
+    },
+    {
+        'name': 'Look Down',
+        'camera_count': 8,
+        'pitch': -30,
+        'fov': 110
+    },
+    {
+        'name': 'Look Up',
+        'camera_count': 8,
+        'pitch': 30,
+        'fov': 110
+    }
+]
+
+# Camera ring presets (legacy - kept for compatibility)
 DEFAULT_COMPASS_RINGS = [
     {
         'name': 'main',
@@ -337,6 +361,6 @@ PROJECT_FILE_VERSION = '1.0'
 # ============================================================================
 
 APP_NAME = '360toolkit'
-APP_VERSION = '1.1.0'
+APP_VERSION = '1.3.0'
 APP_AUTHOR = '360toolkit Development Team'
 APP_DESCRIPTION = 'Unified photogrammetry preprocessing pipeline: Extract → Split → Mask'

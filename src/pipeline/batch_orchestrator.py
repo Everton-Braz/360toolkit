@@ -24,54 +24,68 @@ import numpy as np
 HAS_TORCH_TRANSFORM = False
 HAS_TORCH_CUDA = False
 torch = None
+TorchE2PTransform = None
 logger_msg = "PyTorch not tested yet"
 
-try:
-    # Direct import - handle torch.distributed error gracefully
-    import torch as _torch
-    torch = _torch
-    
-    # Check if CUDA is available
-    if hasattr(torch, 'cuda') and torch.cuda.is_available():
+def _test_torch_cuda():
+    """Test PyTorch CUDA availability. Called lazily to avoid import-time issues."""
+    global HAS_TORCH_CUDA, HAS_TORCH_TRANSFORM, torch, TorchE2PTransform, logger_msg
+    import sys as _sys
+    try:
+        import torch as _torch
+        torch = _torch
+        
+        # Check if TorchE2PTransform is available
         try:
-            # Test actual GPU kernel execution (catches SM compatibility issues)
-            device_name = torch.cuda.get_device_name(0)
-            compute_capability = torch.cuda.get_device_capability(0)
-            compute_cap_str = f"sm_{compute_capability[0]}{compute_capability[1]}"
-            
-            # Force kernel compilation/execution
-            test_tensor = torch.zeros(10, 10, device='cuda')
-            test_result = test_tensor + 1
-            test_sum = test_result.sum().item()
-            del test_tensor, test_result
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            
-            if test_sum == 100.0:
-                HAS_TORCH_CUDA = True
-                from ..transforms.e2p_transform import TorchE2PTransform
-                HAS_TORCH_TRANSFORM = True
-                logger_msg = f"PyTorch CUDA verified: {device_name} ({compute_cap_str})"
-            else:
-                logger_msg = f"PyTorch CUDA kernel test failed (got {test_sum}, expected 100)"
+            from src.transforms.e2p_transform import TorchE2PTransform
+            HAS_TORCH_TRANSFORM = True
+        except (ImportError, Exception):
+            pass
+        
+        if hasattr(torch, 'cuda') and torch.cuda.is_available():
+            try:
+                device_name = torch.cuda.get_device_name(0)
+                compute_capability = torch.cuda.get_device_capability(0)
+                compute_cap_str = f"sm_{compute_capability[0]}{compute_capability[1]}"
                 
-        except RuntimeError as e:
-            error_msg = str(e).lower()
-            if "no kernel image" in error_msg or "cuda capability" in error_msg:
-                logger_msg = f"PyTorch CUDA kernel not available for {device_name} ({compute_cap_str}): {e}"
-            else:
-                logger_msg = f"PyTorch CUDA test failed: {e}"
-            if torch is not None:
+                test_tensor = torch.zeros(10, 10, device='cuda')
+                test_result = test_tensor + 1
+                test_sum = test_result.sum().item()
+                del test_tensor, test_result
+                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
-        except Exception as e:
-            logger_msg = f"PyTorch CUDA test error: {e}"
-    else:
-        # PyTorch available but no CUDA
-        logger_msg = "PyTorch available but CUDA not detected"
-except ImportError as e:
-    logger_msg = f"PyTorch not available: {e}"
-except Exception as e:
-    logger_msg = f"PyTorch import error: {e}"
+                
+                if test_sum == 100.0:
+                    HAS_TORCH_CUDA = True
+                    logger_msg = f"PyTorch CUDA verified: {device_name} ({compute_cap_str})"
+                else:
+                    logger_msg = f"PyTorch CUDA kernel test failed (got {test_sum}, expected 100)"
+                    
+            except RuntimeError as e:
+                error_msg = str(e).lower()
+                if "no kernel image" in error_msg or "cuda capability" in error_msg:
+                    logger_msg = f"PyTorch CUDA kernel not available for {device_name} ({compute_cap_str}): {e}"
+                else:
+                    logger_msg = f"PyTorch CUDA test failed: {e}"
+                if torch is not None:
+                    torch.cuda.empty_cache()
+            except Exception as e:
+                logger_msg = f"PyTorch CUDA test error: {e}"
+        else:
+            logger_msg = "PyTorch available but CUDA not detected"
+    except (ImportError, OSError) as e:
+        # Clean up partially-initialized torch from sys.modules
+        for key in list(_sys.modules.keys()):
+            if key == 'torch' or key.startswith('torch.'):
+                del _sys.modules[key]
+        torch = None
+        logger_msg = f"PyTorch not available: {e}"
+    except Exception as e:
+        for key in list(_sys.modules.keys()):
+            if key == 'torch' or key.startswith('torch.'):
+                del _sys.modules[key]
+        torch = None
+        logger_msg = f"PyTorch import error: {e}"
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -263,10 +277,17 @@ class PipelineWorker(QThread):
     def run(self):
         """Execute the pipeline"""
         try:
+            # Lazy test PyTorch/CUDA - only when pipeline actually runs
+            _test_torch_cuda()
+            logger.info(f"[Pipeline] PyTorch status: {logger_msg}")
+            logger.info(f"[Pipeline] HAS_TORCH_TRANSFORM={HAS_TORCH_TRANSFORM}, HAS_TORCH_CUDA={HAS_TORCH_CUDA}")
+            
             results = {
                 'stage1': {},
                 'stage2': {},
                 'stage3': {},
+                'stage4': {},
+                'stage5': {},
                 'success': False,
                 'start_time': datetime.now().isoformat()
             }
@@ -320,10 +341,24 @@ class PipelineWorker(QThread):
                 results['stage2'] = stage2_result
                 stages_executed.append(2)
                 self.stage_complete.emit(2, stage2_result)
-                
+
                 # Clean up temp Stage 1 folder if skip_intermediate_save was enabled
                 self._cleanup_temp_stage1()
-                
+
+                # Clean up GPU memory after Stage 2 to free VRAM for Stage 3
+                if HAS_TORCH_CUDA:
+                    try:
+                        import torch
+                        # Delete any transformer objects
+                        if hasattr(self, 'transformer'):
+                            del self.transformer
+                        # Force GPU memory cleanup
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                        logger.info("[GPU Cleanup] Released Stage 2 GPU memory before Stage 3")
+                    except Exception as e:
+                        logger.warning(f"[GPU Cleanup] Failed to clean GPU memory: {e}")
+
                 if not stage2_result.get('success'):
                     self.error.emit(f"Stage 2 failed: {stage2_result.get('error')}")
                     results['success'] = False
@@ -347,6 +382,48 @@ class PipelineWorker(QThread):
                 
                 if not stage3_result.get('success'):
                     self.error.emit(f"Stage 3 failed: {stage3_result.get('error')}")
+                    results['success'] = False
+                    results['stages_executed'] = stages_executed
+                    self.finished.emit(results)
+                    return
+            
+            # Stage 4: Alignment (Rig SfM / SphereSfM)
+            if self.config.get('use_rig_sfm', False):
+                if self.is_cancelled:
+                    logger.info("Pipeline cancelled before Stage 4")
+                    results['stages_executed'] = stages_executed
+                    self.finished.emit({'success': False, 'error': 'Cancelled by user'})
+                    return
+                
+                logger.info("=== Starting Stage 4: Alignment (Rig SfM) ===")
+                stage4_result = self._execute_stage4()
+                results['stage4'] = stage4_result
+                stages_executed.append(4)
+                self.stage_complete.emit(4, stage4_result)
+                
+                if not stage4_result.get('success'):
+                    self.error.emit(f"Stage 4 failed: {stage4_result.get('error')}")
+                    results['success'] = False
+                    results['stages_executed'] = stages_executed
+                    self.finished.emit(results)
+                    return
+
+            # Stage 5: Training (Lichtfeld Studio)
+            if self.config.get('train_lighting', False):
+                if self.is_cancelled:
+                    logger.info("Pipeline cancelled before Stage 5")
+                    results['stages_executed'] = stages_executed
+                    self.finished.emit({'success': False, 'error': 'Cancelled by user'})
+                    return
+                
+                logger.info("=== Starting Stage 5: Lichtfeld Training ===")
+                stage5_result = self._execute_stage5(results.get('stage4', {}))
+                results['stage5'] = stage5_result
+                stages_executed.append(5)
+                self.stage_complete.emit(5, stage5_result)
+                
+                if not stage5_result.get('success'):
+                    self.error.emit(f"Stage 5 failed: {stage5_result.get('error')}")
                     results['success'] = False
                     results['stages_executed'] = stages_executed
                     self.finished.emit(results)
@@ -429,14 +506,14 @@ class PipelineWorker(QThread):
                     
                     # Resolution mapping
                     resolution_map = {
-                        'original': None,  # SDK will use original
+                        'original': (7680, 3840),  # Explicit 2:1 equirectangular (SDK ignores None)
                         '8k': (7680, 3840),
                         '6k': (6080, 3040),
                         '4k': (3840, 1920),
                         '2k': (1920, 960)
                     }
-                    resolution_key = str(self.config.get('sdk_resolution', 'original')).lower()
-                    resolution = resolution_map.get(resolution_key, None)
+                    resolution_key = str(self.config.get('sdk_resolution', '8k')).lower()  # Default to 8k
+                    resolution = resolution_map.get(resolution_key, (7680, 3840))  # Fallback to 8K
                     
                     try:
                         # Call new MediaSDK extractor with all parameters
@@ -597,6 +674,7 @@ class PipelineWorker(QThread):
             if HAS_TORCH_TRANSFORM and HAS_TORCH_CUDA:
                 logger.info("[Stage 2 GPU] Starting GPU compatibility check...")
                 try:
+
                     # Get GPU info
                     device_name = torch.cuda.get_device_name(0)
                     try:
@@ -604,9 +682,9 @@ class PipelineWorker(QThread):
                         compute_cap_str = f"sm_{compute_capability[0]}{compute_capability[1]}"
                     except Exception:
                         compute_cap_str = "unknown"
-                    
+
                     logger.info(f"[Stage 2 GPU] Testing GPU: {device_name} ({compute_cap_str})")
-                    
+
                     # Test GPU with actual kernel execution (not just memory allocation)
                     # This catches RTX 50-series "no kernel image available" errors early
                     test_tensor = torch.zeros(10, 10, device='cuda')
@@ -615,30 +693,21 @@ class PipelineWorker(QThread):
                     del test_tensor, test_result
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
-                    
+
                     use_gpu = True
-                    logger.info(f"[Stage 2 GPU] ✅ GPU acceleration ENABLED: {device_name} ({compute_cap_str})")
-                except RuntimeError as e:
+                    logger.info(f"[Stage 2 GPU] GPU acceleration ENABLED: {device_name} ({compute_cap_str})")
+                except Exception as e:
                     error_msg = str(e).lower()
-                    logger.error(f"[Stage 2 GPU] ❌ GPU test failed: {e}")
+                    logger.warning(f"[Stage 2 GPU] GPU test failed: {e}. Falling back to CPU.")
                     if "no kernel image" in error_msg or "cuda capability" in error_msg or "sm_" in error_msg:
                         logger.error(f"[Stage 2 GPU] GPU incompatibility detected")
-                        logger.error(f"[Stage 2 GPU]    GPU: {device_name} ({compute_cap_str})")
+                        try:
+                            logger.error(f"[Stage 2 GPU]    GPU: {device_name} ({compute_cap_str})")
+                        except:
+                            pass
                         logger.error(f"[Stage 2 GPU]    PyTorch CUDA kernels not available for this GPU architecture")
-                        if "sm_12" in compute_cap_str or "RTX 50" in device_name:
-                            logger.error(f"[Stage 2 GPU]    RTX 50-series requires PyTorch nightly build")
-                        logger.warning(f"[Stage 2 GPU] => Using CPU multiprocessing instead")
-                    else:
-                        logger.warning(f"[Stage 2 GPU] GPU check failed: {e}. Falling back to CPU.")
                     try:
                         torch.cuda.empty_cache()
-                    except:
-                        pass
-                except Exception as e:
-                    logger.warning(f"[Stage 2 GPU] GPU test failed: {e}. Falling back to CPU.")
-                    try:
-                        if hasattr(torch, 'cuda') and torch.cuda.is_available():
-                            torch.cuda.empty_cache()
                     except:
                         pass
             else:
@@ -646,12 +715,12 @@ class PipelineWorker(QThread):
             
             # GPU Execution Block
             if use_gpu:
-                logger.info("[Stage 2 GPU] 🚀 Starting GPU-accelerated processing...")
+                logger.info("[Stage 2 GPU] Starting GPU-accelerated processing...")
                 try:
                     from concurrent.futures import ThreadPoolExecutor
                     import queue
                     import threading
-                    
+
                     # GPU Path: Optimized batch processing with async I/O
                     logger.info("[Stage 2 GPU] Initializing TorchE2PTransform...")
                     transformer = TorchE2PTransform()
@@ -929,16 +998,32 @@ class PipelineWorker(QThread):
                                 f"Stage 2 (CPU): {completed_ops}/{total_operations} views")
                         else:
                             logger.error(f"Frame processing failed: {result.get('error')}")
-            
+
+            # Clean up GPU resources at end of Stage 2
+            if use_gpu and HAS_TORCH_CUDA:
+                try:
+                    if 'transformer' in locals():
+                        del transformer
+                    torch.cuda.empty_cache()
+                    logger.info("[GPU Cleanup] Released GPU memory at end of Stage 2")
+                except Exception as e:
+                    logger.warning(f"[GPU Cleanup] Failed: {e}")
+
             return {
                 'success': True,
                 'perspective_count': len(output_files),
                 'output_files': output_files,
                 'output_dir': str(output_dir)
             }
-        
+
         except Exception as e:
             logger.error(f"Stage 2 PERSPECTIVE error: {e}")
+            # Clean up GPU on error
+            if HAS_TORCH_CUDA:
+                try:
+                    torch.cuda.empty_cache()
+                except:
+                    pass
             return {'success': False, 'error': str(e)}
     
     def _execute_stage2_cubemap(self, input_frames, output_dir) -> Dict:
@@ -949,21 +1034,20 @@ class PipelineWorker(QThread):
             # Get cubemap configuration
             cubemap_params = self.config.get('cubemap_params', {})
             cubemap_type = cubemap_params.get('cubemap_type', '6-face')
-            face_size = cubemap_params.get('face_size', 2048)
+            tile_width = cubemap_params.get('tile_width', 2048)
+            tile_height = cubemap_params.get('tile_height', 2048)
             fov = cubemap_params.get('fov', 90)
-            overlap_percent = cubemap_params.get('overlap_percent', 0)
-            
-            logger.info(f"Cubemap mode: {cubemap_type}, face_size={face_size}, fov={fov}, overlap={overlap_percent}%")
-            
+
+            logger.info(f"Cubemap mode: {cubemap_type}, tile_size={tile_width}×{tile_height}, fov={fov}°")
+
             # Define face names for 6-tile cubemap
             face_names_6 = ['front', 'back', 'left', 'right', 'top', 'bottom']
-            
-            # Calculate overlap degrees for 8-tile mode
+
+            # Setup tile positions for 8-tile mode (4×2 grid)
             if cubemap_type == '8-tile':
-                step_size = 360.0 / 8  # 45°
-                overlap_degrees = (overlap_percent / 100.0) * step_size
-                # 8 tiles in 4×2 grid: yaw positions 0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°
-                # Two rows: pitch 0° and pitch calculated from user params
+                # 8 tiles in 4×2 grid: 4 columns × 2 rows
+                # Each tile covers 90° horizontally (360° / 4 = 90°)
+                # Overlap is achieved through pixel-based width (tile_width controls this)
                 tile_positions = []
                 for row in range(2):
                     pitch_val = 0 if row == 0 else 30  # Top row at horizon, bottom row slightly down
@@ -972,7 +1056,7 @@ class PipelineWorker(QThread):
                         tile_positions.append({
                             'yaw': yaw_val,
                             'pitch': pitch_val,
-                            'fov': fov,
+                            'fov': fov,  # Fixed 90° FOV
                             'name': f'tile_{row}_{col}'
                         })
             
@@ -1012,8 +1096,8 @@ class PipelineWorker(QThread):
                             pitch=face_config['pitch'],
                             roll=0,
                             h_fov=90,  # Fixed 90° for standard cubemap
-                            output_width=face_size,
-                            output_height=face_size
+                            output_width=tile_width,
+                            output_height=tile_height
                         )
                         
                         # Save face with configured format - use PIL for PNG, cv2 for JPEG
@@ -1072,16 +1156,16 @@ class PipelineWorker(QThread):
                             self.msleep(100)
                 
                 else:  # 8-tile grid
-                    # Generate 8 tiles with custom FOV/overlap
+                    # Generate 8 tiles with pixel-based overlap (controlled by tile_width)
                     for tile in tile_positions:
                         tile_img = self.e2p_transform.equirect_to_pinhole(
                             equirect_img,
                             yaw=tile['yaw'],
                             pitch=tile['pitch'],
                             roll=0,
-                            h_fov=tile['fov'],
-                            output_width=face_size,
-                            output_height=face_size
+                            h_fov=tile['fov'],  # Fixed 90° FOV
+                            output_width=tile_width,
+                            output_height=tile_height
                         )
                         
                         # Save tile with configured format - use PIL for PNG, cv2 for JPEG
@@ -1164,18 +1248,22 @@ class PipelineWorker(QThread):
     def _execute_stage3(self) -> Dict:
         """Execute Stage 3: AI Masking"""
         try:
-            # Determine input directory based on skip_transform flag
+            # Determine input directory based on mask_target setting
+            mask_target = self.config.get('mask_target', 'split')
             skip_transform = self.config.get('skip_transform', False)
             
-            if skip_transform:
-                # Use Stage 1 output (equirectangular/fisheye frames) directly
+            if mask_target == 'equirect' or skip_transform:
+                # Use Stage 1 output (equirectangular frames) for masking
                 input_dir = Path(self.config['output_dir']) / 'stage1_frames'
-                logger.info("[Direct Masking] Using Stage 1 frames (equirectangular/fisheye) for masking")
+                if mask_target == 'equirect':
+                    logger.info("[Equirect Masking] Masking equirectangular frames for Rig SfM workflow")
+                else:
+                    logger.info("[Direct Masking] Using Stage 1 frames (equirectangular/fisheye) for masking")
             else:
-                # Use Stage 2 output (perspective images)
+                # Use Stage 2 output (perspective images) - traditional workflow
                 input_dir = Path(self.config.get('stage3_input_dir', 
                                                str(Path(self.config['output_dir']) / 'stage2_perspectives')))
-                logger.info(f"Using Stage 2 perspectives for masking: {input_dir}")
+                logger.info(f"[Split Masking] Masking perspective views: {input_dir}")
             
             # Initialize masker if not done
             if self.masker is None:
@@ -1257,24 +1345,27 @@ class PipelineWorker(QThread):
                         categories = self.config.get('masking_categories', {})
                         self.masker.set_enabled_categories(categories)
                         
-                    except ImportError as e:
-                        logger.error(f"Hybrid masker not available: {e}. Install with: pip install segment-anything ultralytics")
-                        return {
-                            'success': False,
-                            'error': f'Hybrid masker not installed: {e}',
-                            'masks_created': 0,
-                            'skipped': 0,
-                            'failed': 0
-                        }
-                    except Exception as e:
-                        logger.error(f"Failed to initialize Hybrid masker: {e}", exc_info=True)
-                        return {
-                            'success': False,
-                            'error': f'Hybrid masker initialization failed: {e}',
-                            'masks_created': 0,
-                            'skipped': 0,
-                            'failed': 0
-                        }
+                    except (ImportError, Exception) as e:
+                        logger.warning(f"Hybrid masker not available: {e}")
+                        logger.info("Falling back to YOLO-only masker (MultiCategoryMasker)...")
+                        try:
+                            from ..masking import MultiCategoryMasker
+                            self.masker = MultiCategoryMasker(
+                                model_size=model_size,
+                                confidence_threshold=confidence,
+                                use_gpu=use_gpu
+                            )
+                            use_onnx = False
+                            logger.info("[OK] YOLO-only fallback initialized successfully")
+                        except Exception as e2:
+                            logger.error(f"YOLO-only fallback also failed: {e2}", exc_info=True)
+                            return {
+                                'success': False,
+                                'error': f'All masking engines failed. Hybrid: {e}. YOLO fallback: {e2}',
+                                'masks_created': 0,
+                                'skipped': 0,
+                                'failed': 0
+                            }
                         
                 else:
                     # YOLO engines (ONNX or PyTorch)
@@ -1490,6 +1581,147 @@ class PipelineWorker(QThread):
         
         except Exception as e:
             logger.error(f"Stage 3 error: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def _execute_stage4(self) -> Dict:
+        """Execute Stage 4: Alignment (Mode A: SphereSfM or Mode B: Rig SfM or Mode C: Pose Transfer)"""
+        try:
+             # Lazy import
+             from .colmap_stage import ColmapStage, ColmapSettings, ALIGNMENT_MODE_SPHERE_SFM, ALIGNMENT_MODE_RIG_SFM, ALIGNMENT_MODE_POSE_TRANSFER
+             
+             # Determine input directory (usually from Stage 1)
+             if self.config.get('enable_stage1', True):
+                 input_dir = Path(self.config['output_dir']) / 'stage1_frames'
+             else:
+                 # Auto-discovery or config
+                 discovered = self.discover_stage_input_folder(2, self.config['output_dir']) # Re-use stage 2 discovery (equirectangulars)
+                 if discovered:
+                     input_dir = discovered
+                 else:
+                     return {'success': False, 'error': 'Stage 4 input (equirectangular frames) not found'}
+             
+             output_dir = Path(self.config['output_dir']) / 'stage4_alignment'
+             
+             # Check if equirectangular masking was used (Stage 3)
+             masks_dir = None
+             mask_target = self.config.get('mask_target', 'split')
+             if mask_target == 'equirect' and self.config.get('stage3_enabled', False):
+                 # Use masks from Stage 3 (applied to equirectangular frames)
+                 potential_masks_dir = Path(self.config['output_dir']) / 'stage3_masks'
+                 if potential_masks_dir.exists():
+                     masks_dir = potential_masks_dir
+                     logger.info(f"[Stage 4] Using equirectangular masks from Stage 3: {masks_dir}")
+                 else:
+                     logger.warning("[Stage 4] Equirect masking enabled but no masks found. Proceeding without masks.")
+             
+             # Determine alignment mode from config
+             alignment_mode = self.config.get('alignment_mode', ALIGNMENT_MODE_RIG_SFM)
+             logger.info(f"[Stage 4] Using alignment mode: {alignment_mode}")
+             
+             # Settings
+             settings = ColmapSettings(
+                 alignment_mode=alignment_mode,
+                 use_rig_sfm=(alignment_mode == ALIGNMENT_MODE_RIG_SFM),
+                 use_gpu=self.config.get('use_gpu', True)
+             )
+             
+             stage = ColmapStage(settings)
+             
+             def progress_callback(msg):
+                 self.progress.emit(0, 0, f"Stage 4: {msg}")
+                 
+             result = stage.run(
+                 frames_dir=input_dir,
+                 masks_dir=masks_dir,  # Pass masks if equirectangular masking was used
+                 output_dir=output_dir,
+                 progress_callback=progress_callback
+             )
+             
+             # Export to LichtFeld Studio if enabled
+             if result.get('success') and self.config.get('export_lichtfeld', True):
+                 try:
+                     logger.info("[Stage 4] Exporting to LichtFeld Studio format...")
+                     self.progress.emit(0, 0, "Stage 4: Exporting to LichtFeld Studio...")
+                     
+                     from .export_formats import LichtfeldExporter
+                     
+                     sparse_dir = Path(result['colmap_output'])
+                     lichtfeld_dir = output_dir / 'lichtfeld_export'
+                     
+                     # Determine images directory
+                     images_dir = output_dir / 'images'
+                     if not images_dir.exists():
+                         images_dir = input_dir  # Fallback to input frames
+                     
+                     # Determine masks directory for export
+                     export_masks_dir = None
+                     if self.config.get('export_include_masks', True):
+                         if mask_target == 'equirect' and masks_dir:
+                             export_masks_dir = masks_dir
+                         else:
+                             # Check for Stage 3 split masks
+                             split_masks = Path(self.config['output_dir']) / 'stage3_masks'
+                             if split_masks.exists():
+                                 export_masks_dir = split_masks
+                     
+                     exporter = LichtfeldExporter(
+                         colmap_dir=str(sparse_dir),
+                         output_dir=str(lichtfeld_dir)
+                     )
+                     
+                     export_success = exporter.export(
+                         images_dir=str(images_dir),
+                         fix_rotation=True,
+                         masks_dir=str(export_masks_dir) if export_masks_dir else None
+                     )
+                     
+                     if export_success:
+                         logger.info(f"[Stage 4] LichtFeld Studio export complete: {lichtfeld_dir}")
+                         result['lichtfeld_export'] = str(lichtfeld_dir)
+                     else:
+                         logger.warning("[Stage 4] LichtFeld Studio export failed")
+                 
+                 except Exception as e:
+                     logger.error(f"[Stage 4] LichtFeld export error: {e}", exc_info=True)
+             
+             return result
+
+        except Exception as e:
+            logger.error(f"Stage 4 error: {e}", exc_info=True)
+            return {'success': False, 'error': str(e)}
+
+    def _execute_stage5(self, stage4_result: Dict) -> Dict:
+        """Execute Stage 5: Lichtfeld Training"""
+        try:
+            from .lichtfeld_stage import LichtfeldTrainingStage
+            
+            # Get COLMAP model path
+            colmap_model = None
+            if stage4_result.get('success') and stage4_result.get('colmap_output'):
+                colmap_model = Path(stage4_result['colmap_output'])
+            
+            # Fallback path if stage 4 wasn't just run but we want to train on existing
+            if not colmap_model:
+                 possible_path = Path(self.config['output_dir']) / 'stage4_alignment' / 'sparse' / '0'
+                 if possible_path.exists():
+                     colmap_model = possible_path
+            
+            if not colmap_model or not colmap_model.exists():
+                return {'success': False, 'error': 'No aligned COLMAP model found for training'}
+            
+            # Images path (perspectives used in alignment)
+            # Rig SfM puts them in stage4_alignment/images
+            images_path = Path(self.config['output_dir']) / 'stage4_alignment' / 'images'
+            if not images_path.exists():
+                # Try finding from result
+                 if stage4_result.get('perspectives_dir'):
+                     images_path = Path(stage4_result['perspectives_dir'])
+            
+            stage = LichtfeldTrainingStage(lichtfeld_path=self.config.get('lichtfeld_path'))
+            return stage.run(colmap_model, images_path)
+            
+        except Exception as e:
+            logger.error(f"Stage 5 error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
     
     def _get_default_cameras(self) -> List[Dict]:

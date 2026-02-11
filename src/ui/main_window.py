@@ -1,21 +1,26 @@
 """
-360FrameTools - Main Window
-PyQt6-based minimalist interface for the 3-stage pipeline.
+360FrameTools - Main Window (Full-Screen UI/UX Rewrite)
+Modern PyQt6 interface with sidebar navigation, full-screen layout,
+and polished dark theme for professional photogrammetry workflow.
 """
 
 import sys
+import os
 import logging
 from pathlib import Path
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QProgressBar, QTabWidget,
     QFileDialog, QMessageBox, QTextEdit, QGroupBox,
     QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox,
-    QLineEdit, QSplitter, QScrollArea, QSizePolicy
+    QLineEdit, QSplitter, QScrollArea, QSizePolicy,
+    QRadioButton, QButtonGroup, QFrame, QStackedWidget,
+    QApplication, QToolButton, QGridLayout, QSpacerItem
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont, QAction
+from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal
+from PyQt6.QtGui import QFont, QAction, QIcon, QPainter, QColor, QPen, QPixmap
 
 from src.pipeline.batch_orchestrator import BatchOrchestrator
 from src.config.defaults import (
@@ -31,9 +36,104 @@ from src.ui.config_dialog import ConfigManagementDialog, SaveConfigDialog
 
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# STYLE CONSTANTS
+# ============================================================================
+COLORS = {
+    'bg_dark': '#1a1a2e',
+    'bg_medium': '#16213e',
+    'bg_light': '#1e2d4a',
+    'bg_card': '#0f3460',
+    'bg_input': '#162447',
+    'accent': '#4a9eff',
+    'accent_hover': '#5cb3ff',
+    'accent_dark': '#3a7fd5',
+    'green': '#00d68f',
+    'green_hover': '#00e09a',
+    'green_dark': '#00b377',
+    'yellow': '#ffaa00',
+    'yellow_hover': '#ffbb33',
+    'red': '#ff3d71',
+    'red_hover': '#ff5a8a',
+    'red_dark': '#cc2f5a',
+    'text_primary': '#e4e6eb',
+    'text_secondary': '#8b949e',
+    'text_muted': '#6b7280',
+    'border': '#30363d',
+    'border_light': '#3d4450',
+    'sidebar_bg': '#0d1b2a',
+    'sidebar_active': '#1b2838',
+    'sidebar_hover': '#162032',
+}
+
+
+class SidebarButton(QPushButton):
+    """Custom sidebar navigation button with icon and text"""
+    
+    def __init__(self, text, icon_char="", parent=None):
+        super().__init__(parent)
+        self.setText(f"  {icon_char}  {text}")
+        self.setCheckable(True)
+        self.setFixedHeight(48)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("")  # Will be styled by parent
+
+
+class StageHeader(QFrame):
+    """Reusable stage header with title and description"""
+    
+    def __init__(self, title, description="", parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 16)
+        
+        title_label = QLabel(title)
+        title_label.setStyleSheet(f"""
+            font-size: 20px; font-weight: bold;
+            color: {COLORS['text_primary']}; padding: 0;
+        """)
+        layout.addWidget(title_label)
+        
+        if description:
+            desc_label = QLabel(description)
+            desc_label.setStyleSheet(f"""
+                font-size: 12px; color: {COLORS['text_secondary']};
+                padding: 4px 0 0 0;
+            """)
+            desc_label.setWordWrap(True)
+            layout.addWidget(desc_label)
+
+
+class CardWidget(QFrame):
+    """A styled card container for grouping related settings"""
+    
+    def __init__(self, title="", parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(20, 16, 20, 16)
+        self._layout.setSpacing(12)
+        
+        if title:
+            title_label = QLabel(title)
+            title_label.setStyleSheet(f"""
+                font-size: 14px; font-weight: bold;
+                color: {COLORS['accent']}; padding: 0 0 4px 0;
+            """)
+            self._layout.addWidget(title_label)
+    
+    def addWidget(self, widget):
+        self._layout.addWidget(widget)
+    
+    def addLayout(self, layout):
+        self._layout.addLayout(layout)
+    
+    def addSpacing(self, size):
+        self._layout.addSpacing(size)
+
 
 class MainWindow(QMainWindow):
-    """Main application window for 360toolkit"""
+    """Main application window - Full Screen UI/UX"""
     
     def __init__(self):
         super().__init__()
@@ -42,230 +142,1255 @@ class MainWindow(QMainWindow):
         self.config_manager = get_config_manager()
         self.orchestrator = BatchOrchestrator()
         self.pipeline_config = {}
+        self._is_paused = False
+        self._auto_advance_enabled = False
         
         self.init_ui()
         self.create_menu_bar()
-        self.apply_dark_theme()
+        self.apply_theme()
         
-        # Trigger initial visibility of SDK controls
+        # Trigger initial visibility  
         self.on_extraction_method_changed(0)
+        
+        # Show maximized by default
+        self.showMaximized()
     
     def init_ui(self):
-        """Initialize the user interface - HYBRID APPROACH with responsive design"""
-        
+        """Initialize full-screen UI with sidebar + stacked content"""
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
+        self.setMinimumSize(1200, 800)
         
-        # Detect screen size and set appropriate defaults
-        screen = self.screen()
-        screen_geometry = screen.geometry()
-        screen_width = screen_geometry.width()
-        screen_height = screen_geometry.height()
+        central = QWidget()
+        self.setCentralWidget(central)
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
         
-        logger.info(f"Screen detected: {screen_width}×{screen_height}")
+        # Main body: Sidebar + Content + Log
+        body = QSplitter(Qt.Orientation.Horizontal)
+        body.setHandleWidth(1)
         
-        # Responsive sizing based on screen resolution
-        if screen_width >= 3840:  # 4K or higher
-            self.setMinimumSize(1600, 1000)
-            self.resize(2400, 1400)
-            self.base_font_size = 12
-        elif screen_width >= 2560:  # 2K
-            self.setMinimumSize(1400, 900)
-            self.resize(2000, 1200)
-            self.base_font_size = 11
-        elif screen_width >= 1920:  # Full HD
-            self.setMinimumSize(1200, 800)
-            self.resize(1600, 1000)
-            self.base_font_size = 10
-        else:  # HD or lower
-            self.setMinimumSize(1024, 768)
-            self.resize(1280, 900)
-            self.base_font_size = 9
+        # LEFT: Sidebar navigation
+        self.sidebar = self._create_sidebar()
+        body.addWidget(self.sidebar)
         
-        logger.info(f"Window size: {self.width()}×{self.height()}, Font size: {self.base_font_size}pt")
+        # CENTER+RIGHT: Content area with bottom log
+        content_and_log = QSplitter(Qt.Orientation.Vertical)
+        content_and_log.setHandleWidth(2)
         
-        # Central widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # Top part: header bar + stacked content
+        content_wrapper = QWidget()
+        content_layout = QVBoxLayout(content_wrapper)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
         
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(12, 12, 12, 12)
-        main_layout.setSpacing(10)
+        # Pipeline control bar (always visible)
+        self.control_bar = self._create_control_bar()
+        content_layout.addWidget(self.control_bar)
         
-        # TOP SECTION: Input/Output + Pipeline Overview (fixed at top)
-        top_section = self.create_top_section()
-        main_layout.addWidget(top_section, stretch=0)  # Don't stretch - fixed size
+        # Stacked pages
+        self.page_stack = QStackedWidget()
+        self.page_stack.addWidget(self._create_overview_page())       # 0
+        self.page_stack.addWidget(self._create_stage1_page())         # 1
+        self.page_stack.addWidget(self._create_stage2_persp_page())   # 2
+        self.page_stack.addWidget(self._create_stage2_cube_page())    # 3
+        self.page_stack.addWidget(self._create_stage3_page())         # 4
+        self.page_stack.addWidget(self._create_stage4_page())         # 5
+        self.page_stack.addWidget(self._create_stage5_page())         # 6
+        content_layout.addWidget(self.page_stack, stretch=1)
         
-        # MIDDLE + BOTTOM: Use QSplitter for resizable tabs/log sections
-        splitter = self.create_splitter_section()
-        main_layout.addWidget(splitter, stretch=1)  # Allow this to expand
+        content_and_log.addWidget(content_wrapper)
         
-        # Status bar
-        self.statusBar().showMessage("Ready to start")
+        # Bottom: Log panel  
+        log_panel = self._create_log_panel()
+        content_and_log.addWidget(log_panel)
+        content_and_log.setStretchFactor(0, 4)
+        content_and_log.setStretchFactor(1, 1)
+        
+        body.addWidget(content_and_log)
+        body.setStretchFactor(0, 0)  # Sidebar fixed
+        body.setStretchFactor(1, 1)  # Content expands
+        
+        # Set sidebar to fixed width
+        body.setSizes([220, 1000])
+        
+        root_layout.addWidget(body)
     
+    # ========================================================================
+    # SIDEBAR
+    # ========================================================================
+    def _create_sidebar(self) -> QWidget:
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(220)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # App branding
+        brand = QLabel(f"  360toolkit")
+        brand.setFixedHeight(56)
+        brand.setStyleSheet(f"""
+            font-size: 16px; font-weight: bold;
+            color: {COLORS['accent']}; padding-left: 16px;
+            background: {COLORS['sidebar_bg']};
+            border-bottom: 1px solid {COLORS['border']};
+        """)
+        layout.addWidget(brand)
+        
+        version_label = QLabel(f"  v{APP_VERSION}")
+        version_label.setFixedHeight(24)
+        version_label.setStyleSheet(f"""
+            font-size: 10px; color: {COLORS['text_muted']};
+            padding-left: 16px; background: {COLORS['sidebar_bg']};
+        """)
+        layout.addWidget(version_label)
+        
+        layout.addSpacing(12)
+        
+        # Navigation buttons
+        self.nav_buttons = []
+        nav_items = [
+            ("Overview",           "\u2302"),   # ⌂
+            ("Stage 1: Extract",   "1"),
+            ("Stage 2: Perspective","2"),
+            ("Stage 2: Cubemap",   "2"),
+            ("Stage 3: Masking",   "3"),
+            ("Stage 4: Alignment", "4"),
+            ("Stage 5: Training",  "5"),
+        ]
+        
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        
+        for i, (text, icon) in enumerate(nav_items):
+            btn = SidebarButton(text, icon)
+            self.nav_group.addButton(btn, i)
+            layout.addWidget(btn)
+            self.nav_buttons.append(btn)
+        
+        self.nav_buttons[0].setChecked(True)
+        self.nav_group.idClicked.connect(self._on_nav_clicked)
+        
+        layout.addStretch()
+        
+        # Bottom: GPU status indicator
+        self.gpu_status_label = QLabel("  GPU: Detecting...")
+        self.gpu_status_label.setFixedHeight(32)
+        self.gpu_status_label.setStyleSheet(f"""
+            font-size: 10px; color: {COLORS['text_muted']};
+            padding-left: 12px; background: {COLORS['sidebar_bg']};
+            border-top: 1px solid {COLORS['border']};
+        """)
+        layout.addWidget(self.gpu_status_label)
+        QTimer.singleShot(500, self._detect_gpu)
+        
+        return sidebar
+    
+    def _on_nav_clicked(self, idx):
+        self.page_stack.setCurrentIndex(idx)
+    
+    def _detect_gpu(self):
+        """Detect GPU and update status.
+        
+        This is the first place torch gets imported in the frozen app.
+        The runtime hook only sets DLL paths and env vars - torch import
+        is deferred here to avoid C-extension double-initialization errors.
+        """
+        import logging
+        import sys as _sys
+        gpu_logger = logging.getLogger(__name__)
+        try:
+            import torch
+            
+            gpu_logger.info(f"[GPU Detect] PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}")
+            if torch.cuda.is_available():
+                # Configure PyTorch performance (normally done in runtime hook)
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                torch.backends.cudnn.benchmark = True
+                
+                name = torch.cuda.get_device_name(0)
+                gpu_logger.info(f"[GPU Detect] GPU: {name}")
+                # Try tensor test for real compatibility
+                try:
+                    t = torch.zeros(1, device='cuda') + 1
+                    del t
+                    gpu_logger.info(f"[GPU Detect] CUDA kernel test PASSED - full GPU acceleration enabled")
+                    self.gpu_status_label.setText(f"  GPU: {name}")
+                    self.gpu_status_label.setStyleSheet(f"""
+                        font-size: 10px; color: {COLORS['green']};
+                        padding-left: 12px; background: {COLORS['sidebar_bg']};
+                        border-top: 1px solid {COLORS['border']};
+                    """)
+                except Exception as e:
+                    gpu_logger.warning(f"[GPU Detect] CUDA kernel test FAILED: {e}")
+                    self.gpu_status_label.setText(f"  GPU: {name} (CPU mode)")
+                    self.gpu_status_label.setStyleSheet(f"""
+                        font-size: 10px; color: {COLORS['yellow']};
+                        padding-left: 12px; background: {COLORS['sidebar_bg']};
+                        border-top: 1px solid {COLORS['border']};
+                    """)
+            else:
+                gpu_logger.info("[GPU Detect] CUDA not available - CPU only mode")
+                self.gpu_status_label.setText("  GPU: CPU only")
+        except Exception as e:
+            import traceback
+            gpu_logger.warning(f"[GPU Detect] PyTorch not available: {e}")
+            gpu_logger.warning(f"[GPU Detect] Full traceback:\n{traceback.format_exc()}")
+            self.gpu_status_label.setText("  GPU: PyTorch N/A")
+    
+    # ========================================================================
+    # CONTROL BAR (Pipeline actions + progress)
+    # ========================================================================
+    def _create_control_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("controlBar")
+        bar.setFixedHeight(72)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(12)
+        
+        # I/O compact
+        layout.addWidget(QLabel("Input:"))
+        self.input_file_edit = QLineEdit()
+        self.input_file_edit.setPlaceholderText("Select .INSV / .mp4 / equirect images folder...")
+        self.input_file_edit.setMinimumWidth(200)
+        layout.addWidget(self.input_file_edit, stretch=1)
+        
+        input_btn = QPushButton("Browse")
+        input_btn.setFixedWidth(72)
+        input_btn.clicked.connect(self.browse_input_file)
+        layout.addWidget(input_btn)
+        
+        # Separator
+        sep1 = QFrame()
+        sep1.setFixedWidth(1)
+        sep1.setStyleSheet(f"background: {COLORS['border']};")
+        layout.addWidget(sep1)
+        
+        layout.addWidget(QLabel("Output:"))
+        self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setPlaceholderText("Output directory...")
+        self.output_dir_edit.setMinimumWidth(200)
+        layout.addWidget(self.output_dir_edit, stretch=1)
+        
+        output_btn = QPushButton("Browse")
+        output_btn.setFixedWidth(72)
+        output_btn.clicked.connect(self.browse_output_dir)
+        layout.addWidget(output_btn)
+        
+        # Separator
+        sep2 = QFrame()
+        sep2.setFixedWidth(1)
+        sep2.setStyleSheet(f"background: {COLORS['border']};")
+        layout.addWidget(sep2)
+        
+        # Action buttons
+        self.start_button = QPushButton("  Start Pipeline")
+        self.start_button.setObjectName("startButton")
+        self.start_button.setFixedSize(160, 42)
+        self.start_button.clicked.connect(self.start_pipeline)
+        layout.addWidget(self.start_button)
+        
+        self.pause_button = QPushButton("  Pause")
+        self.pause_button.setObjectName("pauseButton")
+        self.pause_button.setFixedSize(90, 42)
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.toggle_pause)
+        layout.addWidget(self.pause_button)
+        
+        self.stop_button = QPushButton("  Stop")
+        self.stop_button.setObjectName("stopButton")
+        self.stop_button.setFixedSize(90, 42)
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self.stop_pipeline)
+        layout.addWidget(self.stop_button)
+        
+        # Progress
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(22)
+        self.progress_bar.setMinimumWidth(180)
+        layout.addWidget(self.progress_bar)
+        
+        self.status_label = QLabel("Ready")
+        self.status_label.setFixedWidth(120)
+        self.status_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
+        layout.addWidget(self.status_label)
+        
+        return bar
+    
+    # ========================================================================
+    # PAGE 0: OVERVIEW (Pipeline dashboard)
+    # ========================================================================
+    def _create_overview_page(self) -> QScrollArea:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(16)
+        
+        layout.addWidget(StageHeader(
+            "Pipeline Overview",
+            "Configure which stages to run and launch individual stages or the full pipeline."
+        ))
+        
+        # Stage toggles in a grid
+        grid = QGridLayout()
+        grid.setSpacing(16)
+        
+        # Stage 1
+        card1 = CardWidget("Stage 1: Frame Extraction")
+        self.stage1_enable = QCheckBox("Enable extraction from .INSV/.mp4")
+        self.stage1_enable.setChecked(True)
+        card1.addWidget(self.stage1_enable)
+        self.run_stage1_btn = QPushButton("Run Stage 1")
+        self.run_stage1_btn.setFixedHeight(36)
+        self.run_stage1_btn.clicked.connect(self.run_stage_1_only)
+        card1.addWidget(self.run_stage1_btn)
+        grid.addWidget(card1, 0, 0)
+        
+        # Stage 2
+        card2 = CardWidget("Stage 2: Split Views")
+        stage2_header = QHBoxLayout()
+        self.stage2_enable = QCheckBox("Enable perspective/cubemap splitting")
+        self.stage2_enable.setChecked(True)
+        stage2_header.addWidget(self.stage2_enable)
+        self.stage2_method_combo = QComboBox()
+        self.stage2_method_combo.addItem("Perspective (E2P)", "perspective")
+        self.stage2_method_combo.addItem("Cubemap (E2C)", "cubemap")
+        self.stage2_method_combo.setFixedWidth(180)
+        self.stage2_method_combo.currentIndexChanged.connect(self.on_stage2_method_changed)
+        stage2_header.addWidget(self.stage2_method_combo)
+        card2.addLayout(stage2_header)
+        self.skip_transform_check = QCheckBox("Skip Transform (Direct Mask)")
+        self.skip_transform_check.setToolTip("Skip splitting, mask equirect images directly")
+        self.skip_transform_check.toggled.connect(self.on_skip_transform_toggled)
+        card2.addWidget(self.skip_transform_check)
+        self.run_stage2_btn = QPushButton("Run Stage 2")
+        self.run_stage2_btn.setFixedHeight(36)
+        self.run_stage2_btn.clicked.connect(self.run_stage_2_only)
+        card2.addWidget(self.run_stage2_btn)
+        grid.addWidget(card2, 0, 1)
+        
+        # Stage 3
+        card3 = CardWidget("Stage 3: AI Masking")
+        self.stage3_enable = QCheckBox("Enable AI person/object masking")
+        self.stage3_enable.setChecked(True)
+        card3.addWidget(self.stage3_enable)
+        self.run_stage3_btn = QPushButton("Run Stage 3")
+        self.run_stage3_btn.setFixedHeight(36)
+        self.run_stage3_btn.clicked.connect(self.run_stage_3_only)
+        card3.addWidget(self.run_stage3_btn)
+        grid.addWidget(card3, 1, 0)
+        
+        # Stage 4
+        card4 = CardWidget("Stage 4: Alignment (SfM)")
+        self.stage4_enable = QCheckBox("Enable COLMAP reconstruction")
+        self.stage4_enable.setChecked(True)
+        card4.addWidget(self.stage4_enable)
+        self.run_stage4_btn = QPushButton("Run Stage 4")
+        self.run_stage4_btn.setFixedHeight(36)
+        self.run_stage4_btn.clicked.connect(self.run_stage_4_only)
+        card4.addWidget(self.run_stage4_btn)
+        grid.addWidget(card4, 1, 1)
+        
+        # Stage 5
+        card5 = CardWidget("Stage 5: Training")
+        self.stage5_enable = QCheckBox("Enable Gaussian Splatting training")
+        self.stage5_enable.setChecked(False)
+        card5.addWidget(self.stage5_enable)
+        self.run_stage5_btn = QPushButton("Run Stage 5")
+        self.run_stage5_btn.setFixedHeight(36)
+        self.run_stage5_btn.clicked.connect(self.run_stage_5_only)
+        card5.addWidget(self.run_stage5_btn)
+        grid.addWidget(card5, 0, 2)
+        
+        layout.addLayout(grid)
+        layout.addStretch()
+        
+        return self._scroll_wrap(page)
+    
+    # ========================================================================
+    # PAGE 1: STAGE 1 - EXTRACTION
+    # ========================================================================
+    def _create_stage1_page(self) -> QScrollArea:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(16)
+        
+        layout.addWidget(StageHeader(
+            "Stage 1: Frame Extraction",
+            "Extract equirectangular frames from Insta360 .INSV or .mp4 video files."
+        ))
+        
+        # File Analysis card
+        card_analysis = CardWidget("File Analysis")
+        analyze_row = QHBoxLayout()
+        analyze_btn = QPushButton("Analyze Input File")
+        analyze_btn.setFixedWidth(180)
+        analyze_btn.clicked.connect(self.analyze_video_file)
+        analyze_row.addWidget(analyze_btn)
+        analyze_row.addStretch()
+        card_analysis.addLayout(analyze_row)
+        
+        self.file_metadata_label = QLabel("No file analyzed yet. Click 'Analyze Input File' to see metadata.")
+        self.file_metadata_label.setWordWrap(True)
+        self.file_metadata_label.setStyleSheet(f"""
+            padding: 12px; background: {COLORS['bg_input']};
+            border-radius: 6px; color: {COLORS['text_secondary']};
+        """)
+        card_analysis.addWidget(self.file_metadata_label)
+        layout.addWidget(card_analysis)
+        
+        # Time Range card
+        card_time = CardWidget("Time Range")
+        self.full_video_check = QCheckBox("Extract full video")
+        self.full_video_check.setChecked(True)
+        self.full_video_check.toggled.connect(self.toggle_time_range)
+        card_time.addWidget(self.full_video_check)
+        
+        time_row = QHBoxLayout()
+        time_row.addWidget(QLabel("Start (s):"))
+        self.start_time_spin = QDoubleSpinBox()
+        self.start_time_spin.setRange(0, 999999)
+        self.start_time_spin.setValue(0)
+        self.start_time_spin.setEnabled(False)
+        self.start_time_spin.setFixedWidth(100)
+        time_row.addWidget(self.start_time_spin)
+        time_row.addSpacing(16)
+        time_row.addWidget(QLabel("End (s):"))
+        self.end_time_spin = QDoubleSpinBox()
+        self.end_time_spin.setRange(0, 999999)
+        self.end_time_spin.setValue(0)
+        self.end_time_spin.setEnabled(False)
+        self.end_time_spin.setFixedWidth(100)
+        time_row.addWidget(self.end_time_spin)
+        time_row.addStretch()
+        card_time.addLayout(time_row)
+        layout.addWidget(card_time)
+        
+        # Extraction Settings card
+        card_extract = CardWidget("Extraction Settings")
+        
+        # FPS
+        fps_row = QHBoxLayout()
+        fps_row.addWidget(QLabel("Frame Rate (FPS):"))
+        self.fps_spin = QDoubleSpinBox()
+        self.fps_spin.setRange(0.1, 30.0)
+        self.fps_spin.setValue(DEFAULT_FPS)
+        self.fps_spin.setSingleStep(0.1)
+        self.fps_spin.setFixedWidth(100)
+        fps_row.addWidget(self.fps_spin)
+        fps_row.addStretch()
+        card_extract.addLayout(fps_row)
+        
+        # Method
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Extraction Method:"))
+        self.extraction_method_combo = QComboBox()
+        for key, value in EXTRACTION_METHODS.items():
+            self.extraction_method_combo.addItem(value, key)
+        self.extraction_method_combo.setMinimumWidth(300)
+        self.extraction_method_combo.currentIndexChanged.connect(self.on_extraction_method_changed)
+        method_row.addWidget(self.extraction_method_combo)
+        method_row.addStretch()
+        card_extract.addLayout(method_row)
+        
+        # SDK Quality (hidden by default)
+        self.sdk_quality_widget = QWidget()
+        sdk_q_layout = QHBoxLayout(self.sdk_quality_widget)
+        sdk_q_layout.setContentsMargins(0, 0, 0, 0)
+        sdk_q_layout.addWidget(QLabel("SDK Quality:"))
+        self.sdk_quality_combo = QComboBox()
+        from src.config.defaults import SDK_QUALITY_OPTIONS
+        for key, label in SDK_QUALITY_OPTIONS.items():
+            self.sdk_quality_combo.addItem(label, key)
+        default_qi = self.sdk_quality_combo.findData(DEFAULT_SDK_QUALITY)
+        if default_qi >= 0:
+            self.sdk_quality_combo.setCurrentIndex(default_qi)
+        self.sdk_quality_combo.setMinimumWidth(300)
+        sdk_q_layout.addWidget(self.sdk_quality_combo)
+        sdk_q_layout.addStretch()
+        self.sdk_quality_widget.setVisible(False)
+        card_extract.addWidget(self.sdk_quality_widget)
+        
+        # SDK Resolution (hidden by default)
+        self.sdk_res_widget = QWidget()
+        sdk_r_layout = QHBoxLayout(self.sdk_res_widget)
+        sdk_r_layout.setContentsMargins(0, 0, 0, 0)
+        sdk_r_layout.addWidget(QLabel("SDK Resolution:"))
+        self.sdk_resolution_combo = QComboBox()
+        self.sdk_resolution_combo.addItem("Original", "original")
+        self.sdk_resolution_combo.addItem("8K (7680x3840)", "8k")
+        self.sdk_resolution_combo.addItem("6K (6144x3072)", "6k")
+        self.sdk_resolution_combo.addItem("4K (3840x1920)", "4k")
+        self.sdk_resolution_combo.addItem("2K (1920x960)", "2k")
+        self.sdk_resolution_combo.setCurrentIndex(1)
+        self.sdk_resolution_combo.setMinimumWidth(200)
+        sdk_r_layout.addWidget(self.sdk_resolution_combo)
+        sdk_r_layout.addStretch()
+        self.sdk_res_widget.setVisible(False)
+        card_extract.addWidget(self.sdk_res_widget)
+        
+        # Output Format
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel("Output Format:"))
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItem("PNG (Lossless)", "png")
+        self.output_format_combo.addItem("JPEG (Compressed)", "jpeg")
+        self.output_format_combo.setFixedWidth(200)
+        fmt_row.addWidget(self.output_format_combo)
+        fmt_row.addStretch()
+        card_extract.addLayout(fmt_row)
+        
+        layout.addWidget(card_extract)
+        layout.addStretch()
+        return self._scroll_wrap(page)
+    
+    # ========================================================================
+    # PAGE 2: STAGE 2 - PERSPECTIVE
+    # ========================================================================
+    def _create_stage2_persp_page(self) -> QScrollArea:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(16)
+        
+        layout.addWidget(StageHeader(
+            "Stage 2: Perspective Transform (E2P)",
+            "Convert equirectangular panoramas to multiple perspective camera views."
+        ))
+        
+        # Output Resolution card
+        card_output = CardWidget("Output Settings")
+        res_row = QHBoxLayout()
+        res_row.addWidget(QLabel("Width:"))
+        self.stage2_width_spin = QSpinBox()
+        self.stage2_width_spin.setRange(640, 7680)
+        self.stage2_width_spin.setValue(1920)
+        self.stage2_width_spin.setSingleStep(128)
+        self.stage2_width_spin.setFixedWidth(100)
+        res_row.addWidget(self.stage2_width_spin)
+        res_row.addSpacing(16)
+        res_row.addWidget(QLabel("Height:"))
+        self.stage2_height_spin = QSpinBox()
+        self.stage2_height_spin.setRange(480, 3840)
+        self.stage2_height_spin.setValue(1920)
+        self.stage2_height_spin.setSingleStep(128)
+        self.stage2_height_spin.setFixedWidth(100)
+        res_row.addWidget(self.stage2_height_spin)
+        res_row.addSpacing(24)
+        res_row.addWidget(QLabel("Format:"))
+        self.stage2_format_combo = QComboBox()
+        self.stage2_format_combo.addItem("PNG", "png")
+        self.stage2_format_combo.addItem("JPEG", "jpeg")
+        self.stage2_format_combo.addItem("TIFF", "tiff")
+        self.stage2_format_combo.setFixedWidth(120)
+        res_row.addWidget(self.stage2_format_combo)
+        res_row.addStretch()
+        card_output.addLayout(res_row)
+        self.stage2_output_group = card_output
+        layout.addWidget(card_output)
+        
+        # Camera Groups card
+        card_cameras = CardWidget("Camera Groups (Dome Configuration)")
+        
+        info_label = QLabel(
+            "Each group creates a ring of cameras at a specific pitch angle. "
+            "Pitch 0 = horizon, -30 = looking down, +30 = looking up."
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        card_cameras.addWidget(info_label)
+        
+        # Camera groups container
+        self.camera_groups_container = QWidget()
+        self.camera_groups_container_layout = QVBoxLayout(self.camera_groups_container)
+        self.camera_groups_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.camera_groups_container_layout.setSpacing(8)
+        self.camera_group_widgets = []
+        
+        self._add_camera_group(camera_count=8, pitch=0, fov=110, name="Horizon")
+        self._add_camera_group(camera_count=8, pitch=-30, fov=110, name="Look Down")
+        self._add_camera_group(camera_count=8, pitch=30, fov=110, name="Look Up")
+        
+        card_cameras.addWidget(self.camera_groups_container)
+        
+        add_btn = QPushButton("+ Add Camera Group")
+        add_btn.setFixedWidth(180)
+        add_btn.clicked.connect(lambda: self._add_camera_group())
+        card_cameras.addWidget(add_btn)
+        
+        self.stage2_perspective_params_group = card_cameras
+        layout.addWidget(card_cameras)
+        layout.addStretch()
+        return self._scroll_wrap(page)
+    
+    # ========================================================================
+    # PAGE 3: STAGE 2 - CUBEMAP
+    # ========================================================================
+    def _create_stage2_cube_page(self) -> QScrollArea:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(16)
+        
+        layout.addWidget(StageHeader(
+            "Stage 2: Cubemap Transform (E2C)",
+            "Convert equirectangular panoramas to cubemap tiles for VR or photogrammetry."
+        ))
+        
+        # Tile Size card
+        card_tiles = CardWidget("Tile Dimensions")
+        tw_row = QHBoxLayout()
+        tw_row.addWidget(QLabel("Tile Width (px):"))
+        self.cubemap_tile_width_spin = QSpinBox()
+        self.cubemap_tile_width_spin.setRange(512, 8192)
+        self.cubemap_tile_width_spin.setValue(1920)
+        self.cubemap_tile_width_spin.setSingleStep(128)
+        self.cubemap_tile_width_spin.setFixedWidth(100)
+        tw_row.addWidget(self.cubemap_tile_width_spin)
+        tw_row.addSpacing(24)
+        tw_row.addWidget(QLabel("Tile Height (px):"))
+        self.cubemap_tile_height_spin = QSpinBox()
+        self.cubemap_tile_height_spin.setRange(512, 8192)
+        self.cubemap_tile_height_spin.setValue(1920)
+        self.cubemap_tile_height_spin.setSingleStep(128)
+        self.cubemap_tile_height_spin.setFixedWidth(100)
+        tw_row.addWidget(self.cubemap_tile_height_spin)
+        tw_row.addStretch()
+        card_tiles.addLayout(tw_row)
+        
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel("Format:"))
+        self.cubemap_format_combo = QComboBox()
+        self.cubemap_format_combo.addItem("PNG", "png")
+        self.cubemap_format_combo.addItem("JPEG", "jpeg")
+        self.cubemap_format_combo.addItem("TIFF", "tiff")
+        self.cubemap_format_combo.setFixedWidth(120)
+        fmt_row.addWidget(self.cubemap_format_combo)
+        fmt_row.addStretch()
+        card_tiles.addLayout(fmt_row)
+        layout.addWidget(card_tiles)
+        
+        # Cubemap type card
+        card_type = CardWidget("Cubemap Type")
+        
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("Type:"))
+        self.cubemap_type_combo = QComboBox()
+        self.cubemap_type_combo.addItem("6-Tile Standard (90 FOV, Separate Files)", "6-face")
+        self.cubemap_type_combo.addItem("8-Tile Grid (Photogrammetry)", "8-tile")
+        self.cubemap_type_combo.setCurrentIndex(1)
+        self.cubemap_type_combo.setMinimumWidth(360)
+        self.cubemap_type_combo.currentIndexChanged.connect(self.on_cubemap_type_changed)
+        type_row.addWidget(self.cubemap_type_combo)
+        type_row.addStretch()
+        card_type.addLayout(type_row)
+        
+        # 8-tile info
+        self.tile_8_controls_widget = QWidget()
+        t8_layout = QVBoxLayout(self.tile_8_controls_widget)
+        t8_layout.setContentsMargins(0, 8, 0, 0)
+        t8_info = QLabel(
+            "8-Tile: Each tile covers 90 horizontally in a 4x2 grid. "
+            "Overlap is controlled by setting tile width wider than input_width/4."
+        )
+        t8_info.setWordWrap(True)
+        t8_info.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        t8_layout.addWidget(t8_info)
+        self.tile_8_controls_widget.setVisible(True)
+        card_type.addWidget(self.tile_8_controls_widget)
+        
+        layout.addWidget(card_type)
+        layout.addStretch()
+        return self._scroll_wrap(page)
+    
+    # ========================================================================
+    # PAGE 4: STAGE 3 - MASKING
+    # ========================================================================
+    def _create_stage3_page(self) -> QScrollArea:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(16)
+        
+        layout.addWidget(StageHeader(
+            "Stage 3: AI Masking",
+            "Detect and mask persons, objects, and animals using YOLO + SAM for photogrammetry."
+        ))
+        
+        # Masking Target card
+        card_target = CardWidget("Masking Target")
+        
+        target_info = QLabel("Choose where to apply masks based on your workflow:")
+        target_info.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
+        card_target.addWidget(target_info)
+        
+        self.mask_split_radio = QRadioButton("Apply to Split Views (RealityScan Workflow)")
+        self.mask_split_radio.setChecked(True)
+        self.mask_split_radio.setToolTip("Stage 1 -> Stage 2 (split) -> Stage 3 (mask)")
+        card_target.addWidget(self.mask_split_radio)
+        
+        self.mask_equirect_radio = QRadioButton("Apply to Equirectangular (Rig SfM Workflow)")
+        self.mask_equirect_radio.setToolTip("Stage 1 -> Stage 3 (mask equirect) -> Stage 4 (alignment)")
+        card_target.addWidget(self.mask_equirect_radio)
+        
+        tip = QLabel("Tip: Use 'Equirectangular' if enabling Stage 4 for Gaussian Splatting.")
+        tip.setStyleSheet(f"""
+            background: {COLORS['bg_light']}; padding: 8px;
+            border-radius: 4px; color: {COLORS['accent']}; font-size: 11px;
+        """)
+        tip.setWordWrap(True)
+        card_target.addWidget(tip)
+        layout.addWidget(card_target)
+        
+        # Detection categories card (2-column layout)
+        cats_layout_h = QHBoxLayout()
+        cats_layout_h.setSpacing(16)
+        
+        # Persons
+        card_persons = CardWidget("Persons")
+        self.persons_group = QGroupBox()
+        self.persons_group.setCheckable(True)
+        self.persons_group.setChecked(True)
+        self.persons_group.setFlat(True)
+        self.persons_group.setStyleSheet("QGroupBox { border: none; }")
+        pg_layout = QVBoxLayout(self.persons_group)
+        pg_layout.setContentsMargins(0, 0, 0, 0)
+        self.person_check = QCheckBox("Person (class 0)")
+        self.person_check.setChecked(True)
+        pg_layout.addWidget(self.person_check)
+        card_persons.addWidget(self.persons_group)
+        cats_layout_h.addWidget(card_persons)
+        
+        # Objects
+        card_objects = CardWidget("Personal Objects")
+        self.objects_group = QGroupBox()
+        self.objects_group.setCheckable(True)
+        self.objects_group.setChecked(True)
+        self.objects_group.setFlat(True)
+        self.objects_group.setStyleSheet("QGroupBox { border: none; }")
+        og_layout = QVBoxLayout(self.objects_group)
+        og_layout.setContentsMargins(0, 0, 0, 0)
+        self.backpack_check = QCheckBox("Backpack (24)")
+        self.backpack_check.setChecked(True)
+        og_layout.addWidget(self.backpack_check)
+        self.umbrella_check = QCheckBox("Umbrella (25)")
+        self.umbrella_check.setChecked(True)
+        og_layout.addWidget(self.umbrella_check)
+        self.handbag_check = QCheckBox("Handbag (26)")
+        self.handbag_check.setChecked(True)
+        og_layout.addWidget(self.handbag_check)
+        self.tie_check = QCheckBox("Tie (27)")
+        self.tie_check.setChecked(True)
+        og_layout.addWidget(self.tie_check)
+        self.suitcase_check = QCheckBox("Suitcase (28)")
+        self.suitcase_check.setChecked(True)
+        og_layout.addWidget(self.suitcase_check)
+        self.cell_phone_check = QCheckBox("Cell Phone (67)")
+        self.cell_phone_check.setChecked(True)
+        og_layout.addWidget(self.cell_phone_check)
+        card_objects.addWidget(self.objects_group)
+        cats_layout_h.addWidget(card_objects)
+        
+        # Animals
+        card_animals = CardWidget("Animals")
+        self.animals_group = QGroupBox()
+        self.animals_group.setCheckable(True)
+        self.animals_group.setChecked(False)
+        self.animals_group.setFlat(True)
+        self.animals_group.setStyleSheet("QGroupBox { border: none; }")
+        ag_layout = QVBoxLayout(self.animals_group)
+        ag_layout.setContentsMargins(0, 0, 0, 0)
+        self.bird_check = QCheckBox("Bird (14)")
+        self.bird_check.setChecked(True)
+        ag_layout.addWidget(self.bird_check)
+        self.cat_check = QCheckBox("Cat (15)")
+        self.cat_check.setChecked(True)
+        ag_layout.addWidget(self.cat_check)
+        self.dog_check = QCheckBox("Dog (16)")
+        self.dog_check.setChecked(True)
+        ag_layout.addWidget(self.dog_check)
+        self.horse_check = QCheckBox("Horse (17)")
+        self.horse_check.setChecked(True)
+        ag_layout.addWidget(self.horse_check)
+        other_lbl = QLabel("+ sheep, cow, elephant, bear, zebra, giraffe")
+        other_lbl.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px;")
+        ag_layout.addWidget(other_lbl)
+        card_animals.addWidget(self.animals_group)
+        cats_layout_h.addWidget(card_animals)
+        
+        layout.addLayout(cats_layout_h)
+        
+        # Model Settings card
+        card_model = CardWidget("Model Settings")
+        
+        engine_row = QHBoxLayout()
+        engine_row.addWidget(QLabel("Masking Engine:"))
+        self.masking_engine_combo = QComboBox()
+        self.masking_engine_combo.addItem("YOLO (ONNX) - Fast", "yolo_onnx")
+        self.masking_engine_combo.addItem("YOLO (PyTorch) - Full", "yolo_pytorch")
+        self.masking_engine_combo.addItem("SAM ViT-B - Best Quality", "sam_vitb")
+        self.masking_engine_combo.addItem("YOLO+SAM Hybrid - Best", "hybrid")
+        self.masking_engine_combo.setCurrentIndex(0)
+        self.masking_engine_combo.setMinimumWidth(280)
+        self.masking_engine_combo.currentIndexChanged.connect(self.on_masking_engine_changed)
+        engine_row.addWidget(self.masking_engine_combo)
+        engine_row.addStretch()
+        card_model.addLayout(engine_row)
+        
+        self.engine_description_label = QLabel("NMS-free inference | 3-4x faster | CUDA accelerated")
+        self.engine_description_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px;")
+        card_model.addWidget(self.engine_description_label)
+        
+        # Model size
+        self.model_size_container = QWidget()
+        ms_layout = QHBoxLayout(self.model_size_container)
+        ms_layout.setContentsMargins(0, 0, 0, 0)
+        ms_layout.addWidget(QLabel("Model Size:"))
+        self.model_size_combo = QComboBox()
+        self.model_size_combo.addItem("Nano (10MB) - Fastest", "nano")
+        self.model_size_combo.addItem("Small (40MB) - Balanced", "small")
+        self.model_size_combo.addItem("Medium (90MB) - Best", "medium")
+        self.model_size_combo.setCurrentIndex(2)
+        self.model_size_combo.setFixedWidth(240)
+        ms_layout.addWidget(self.model_size_combo)
+        ms_layout.addStretch()
+        card_model.addWidget(self.model_size_container)
+        
+        conf_row = QHBoxLayout()
+        conf_row.addWidget(QLabel("Confidence:"))
+        self.confidence_spin = QDoubleSpinBox()
+        self.confidence_spin.setRange(0.0, 1.0)
+        self.confidence_spin.setValue(0.6)
+        self.confidence_spin.setSingleStep(0.05)
+        self.confidence_spin.setFixedWidth(80)
+        conf_row.addWidget(self.confidence_spin)
+        conf_hint = QLabel("(0.5-0.7 recommended)")
+        conf_hint.setStyleSheet(f"color: {COLORS['text_muted']};")
+        conf_row.addWidget(conf_hint)
+        conf_row.addStretch()
+        card_model.addLayout(conf_row)
+        layout.addWidget(card_model)
+        
+        # GPU card
+        card_gpu = CardWidget("GPU Acceleration")
+        self.use_gpu_check = QCheckBox("Enable GPU Acceleration (CUDA)")
+        self.use_gpu_check.setChecked(True)
+        card_gpu.addWidget(self.use_gpu_check)
+        gpu_hint = QLabel("3-4x faster with compatible NVIDIA GPU. Auto-fallback to CPU if unavailable.")
+        gpu_hint.setStyleSheet(f"color: {COLORS['accent']}; font-size: 11px;")
+        card_gpu.addWidget(gpu_hint)
+        layout.addWidget(card_gpu)
+        
+        layout.addStretch()
+        return self._scroll_wrap(page)
+    
+    # ========================================================================
+    # PAGE 5: STAGE 4 - ALIGNMENT
+    # ========================================================================
+    def _create_stage4_page(self) -> QScrollArea:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(16)
+        
+        layout.addWidget(StageHeader(
+            "Stage 4: Alignment (SfM Reconstruction)",
+            "Reconstruct camera poses and 3D structure using COLMAP. Required for Gaussian Splatting."
+        ))
+        
+        # Reconstruction Method card
+        card_method = CardWidget("Reconstruction Method")
+        
+        self.alignment_mode_group = QButtonGroup(self)
+        
+        # Mode B
+        self.mode_rig_sfm_radio = QRadioButton("Mode B: Rig-based SfM (Recommended)")
+        self.mode_rig_sfm_radio.setChecked(True)
+        self.mode_rig_sfm_radio.setToolTip(
+            "Virtual perspectives + rig constraints (9 cameras per frame)\n"
+            "100% registration rate | Works with pycolmap"
+        )
+        self.alignment_mode_group.addButton(self.mode_rig_sfm_radio, 0)
+        card_method.addWidget(self.mode_rig_sfm_radio)
+        desc_b = QLabel("  Virtual perspectives + rig constraints (9 cameras per frame)")
+        desc_b.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; padding-left: 24px;")
+        card_method.addWidget(desc_b)
+        
+        card_method.addSpacing(4)
+        
+        # Mode A
+        self.mode_sphere_sfm_radio = QRadioButton("Mode A: SphereSfM Direct (Equirectangular Only)")
+        self.mode_sphere_sfm_radio.setToolTip("Direct spherical matching | SPHERE camera model")
+        self.alignment_mode_group.addButton(self.mode_sphere_sfm_radio, 1)
+        card_method.addWidget(self.mode_sphere_sfm_radio)
+        desc_a = QLabel("  Direct spherical matching on equirect images (no cubic conversion)")
+        desc_a.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; padding-left: 24px;")
+        card_method.addWidget(desc_a)
+        
+        card_method.addSpacing(4)
+        
+        # Mode C
+        self.mode_pose_transfer_radio = QRadioButton("Mode C: SphereSfM + Pose Transfer (9-Camera Rig)")
+        self.mode_pose_transfer_radio.setToolTip(
+            "SphereSfM alignment -> 9-camera perspective extraction -> pose transfer\n"
+            "Best quality for 3DGS training"
+        )
+        self.alignment_mode_group.addButton(self.mode_pose_transfer_radio, 2)
+        card_method.addWidget(self.mode_pose_transfer_radio)
+        desc_c = QLabel("  SphereSfM alignment -> perspective extraction -> pose transfer")
+        desc_c.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; padding-left: 24px;")
+        card_method.addWidget(desc_c)
+        
+        # SphereSfM status
+        self.spheresfm_status_label = QLabel("  Checking SphereSfM...")
+        self.spheresfm_status_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; padding-left: 24px;")
+        card_method.addWidget(self.spheresfm_status_label)
+        QTimer.singleShot(300, self._check_spheresfm_status)
+        
+        # Connect mode changes
+        self.mode_pose_transfer_radio.toggled.connect(self._on_alignment_mode_changed)
+        self.mode_sphere_sfm_radio.toggled.connect(self._on_alignment_mode_changed)
+        self.mode_rig_sfm_radio.toggled.connect(self._on_alignment_mode_changed)
+        
+        # Hidden legacy checkbox for config compat
+        self.use_rig_sfm_check = QCheckBox()
+        self.use_rig_sfm_check.setVisible(False)
+        self.use_rig_sfm_check.setChecked(True)
+        
+        layout.addWidget(card_method)
+        
+        # Pose Transfer Config (Mode C only)
+        self.pose_transfer_config_group = CardWidget("Virtual Camera Configuration (Mode C)")
+        cam_info = QLabel(
+            "9-Camera Rig: Reference cam at pitch=0, yaw=90 | "
+            "Forward ring: 5 cameras | Backward ring: 4 cameras | FOV: 90 | Baseline: 6.5cm"
+        )
+        cam_info.setWordWrap(True)
+        cam_info.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
+        self.pose_transfer_config_group.addWidget(cam_info)
+        self.pose_transfer_config_group.setVisible(False)
+        layout.addWidget(self.pose_transfer_config_group)
+        
+        # Quality card
+        card_quality = CardWidget("Reconstruction Quality")
+        q_row = QHBoxLayout()
+        q_row.addWidget(QLabel("Quality Preset:"))
+        self.colmap_quality_combo = QComboBox()
+        self.colmap_quality_combo.addItems(["Draft (Fast)", "Medium (Balanced)", "High (Best Quality)"])
+        self.colmap_quality_combo.setCurrentIndex(1)
+        self.colmap_quality_combo.setFixedWidth(240)
+        q_row.addWidget(self.colmap_quality_combo)
+        q_row.addStretch()
+        card_quality.addLayout(q_row)
+        layout.addWidget(card_quality)
+        
+        # Performance card
+        card_perf = CardWidget("Performance")
+        self.use_gpu_colmap_check = QCheckBox("Use GPU Acceleration (CUDA) for feature extraction")
+        self.use_gpu_colmap_check.setChecked(True)
+        card_perf.addWidget(self.use_gpu_colmap_check)
+        layout.addWidget(card_perf)
+        
+        # Export card
+        card_export = CardWidget("Export Options")
+        self.export_lichtfeld_check = QCheckBox("Export to LichtFeld Studio Format")
+        self.export_lichtfeld_check.setChecked(True)
+        self.export_lichtfeld_check.setToolTip("transforms.json + pointcloud.ply + images/ + masks/")
+        card_export.addWidget(self.export_lichtfeld_check)
+        
+        self.export_include_masks_check = QCheckBox("Include Masks in Export")
+        self.export_include_masks_check.setChecked(True)
+        card_export.addWidget(self.export_include_masks_check)
+        layout.addWidget(card_export)
+        
+        # Output info
+        self.output_info_label = QLabel(
+            "COLMAP output: <output_dir>/stage4_alignment/sparse/0/"
+        )
+        self.output_info_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        self.output_info_label.setWordWrap(True)
+        layout.addWidget(self.output_info_label)
+        
+        layout.addStretch()
+        return self._scroll_wrap(page)
+    
+    # ========================================================================
+    # PAGE 6: STAGE 5 - TRAINING
+    # ========================================================================
+    def _create_stage5_page(self) -> QScrollArea:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(16)
+        
+        layout.addWidget(StageHeader(
+            "Stage 5: Training",
+            "Launch Gaussian Splatting training with LichtFeld Studio using the generated COLMAP model."
+        ))
+        
+        card = CardWidget("Training Target")
+        self.train_lichtfeld_check = QCheckBox("Launch Lichtfeld Studio Training")
+        self.train_lichtfeld_check.setChecked(False)
+        card.addWidget(self.train_lichtfeld_check)
+        
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Lichtfeld Path:"))
+        self.lichtfeld_path_edit = QLineEdit()
+        self.lichtfeld_path_edit.setPlaceholderText("Auto-detect or browse...")
+        path_row.addWidget(self.lichtfeld_path_edit, stretch=1)
+        lf_browse = QPushButton("Browse...")
+        lf_browse.setFixedWidth(80)
+        lf_browse.clicked.connect(self.browse_lichtfeld_path)
+        path_row.addWidget(lf_browse)
+        card.addLayout(path_row)
+        
+        note = QLabel("Lichtfeld Studio will be launched with the generated COLMAP model for 3DGS training.")
+        note.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        note.setWordWrap(True)
+        card.addWidget(note)
+        
+        layout.addWidget(card)
+        layout.addStretch()
+        return self._scroll_wrap(page)
+    
+    # ========================================================================
+    # LOG PANEL
+    # ========================================================================
+    def _create_log_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setMinimumHeight(120)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(4)
+        
+        header = QLabel("Processing Log")
+        header.setStyleSheet(f"font-size: 11px; font-weight: bold; color: {COLORS['text_secondary']};")
+        layout.addWidget(header)
+        
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFont(QFont("Consolas", 9))
+        self.log_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self.log_text)
+        
+        return panel
+    
+    # ========================================================================
+    # HELPERS
+    # ========================================================================
+    def _scroll_wrap(self, widget: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(widget)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        return scroll
+    
+    def _add_camera_group(self, camera_count=8, pitch=0, fov=110, name=None):
+        """Add a camera group row"""
+        w = QWidget()
+        row = QHBoxLayout(w)
+        row.setContentsMargins(8, 4, 8, 4)
+        row.setSpacing(12)
+        
+        if name is None:
+            name = f"Group {len(self.camera_group_widgets) + 1}"
+        lbl = QLabel(f"{name}:")
+        lbl.setFixedWidth(90)
+        lbl.setStyleSheet("font-weight: bold;")
+        row.addWidget(lbl)
+        
+        row.addWidget(QLabel("Cameras:"))
+        cc_spin = QSpinBox()
+        cc_spin.setRange(1, 12)
+        cc_spin.setValue(camera_count)
+        cc_spin.setFixedWidth(60)
+        row.addWidget(cc_spin)
+        
+        row.addWidget(QLabel("Pitch:"))
+        p_spin = QSpinBox()
+        p_spin.setRange(-90, 90)
+        p_spin.setValue(pitch)
+        p_spin.setFixedWidth(60)
+        row.addWidget(p_spin)
+        
+        row.addWidget(QLabel("FOV:"))
+        f_spin = QSpinBox()
+        f_spin.setRange(30, 150)
+        f_spin.setValue(fov)
+        f_spin.setFixedWidth(60)
+        row.addWidget(f_spin)
+        
+        rm_btn = QPushButton("X")
+        rm_btn.setFixedSize(28, 28)
+        rm_btn.clicked.connect(lambda: self._remove_camera_group(w))
+        row.addWidget(rm_btn)
+        row.addStretch()
+        
+        data = {
+            'widget': w, 'name_label': lbl,
+            'camera_count': cc_spin, 'pitch': p_spin, 'fov': f_spin
+        }
+        self.camera_group_widgets.append(data)
+        self.camera_groups_container_layout.addWidget(w)
+    
+    def _remove_camera_group(self, widget):
+        for i, d in enumerate(self.camera_group_widgets):
+            if d['widget'] == widget:
+                self.camera_group_widgets.pop(i)
+                break
+        self.camera_groups_container_layout.removeWidget(widget)
+        widget.deleteLater()
+    
+    def _generate_camera_positions(self) -> list:
+        stage2_method = self.stage2_method_combo.currentData()
+        if stage2_method == 'perspective':
+            cameras = []
+            for gd in self.camera_group_widgets:
+                cc = gd['camera_count'].value()
+                p = gd['pitch'].value()
+                f = gd['fov'].value()
+                for i in range(cc):
+                    yaw = (360 / cc) * i
+                    cameras.append({'yaw': yaw, 'pitch': p, 'roll': 0, 'fov': f})
+            return cameras
+        elif stage2_method == 'cubemap':
+            return []
+        else:
+            return [{'yaw': (360/8)*i, 'pitch': 0, 'roll': 0, 'fov': 110} for i in range(8)]
+    
+    # ========================================================================
+    # MENU BAR
+    # ========================================================================
     def create_menu_bar(self):
-        """Create menu bar with File and Settings menus"""
         menubar = self.menuBar()
         
-        # File menu
         file_menu = menubar.addMenu("&File")
-        
         open_action = QAction("&Open File...", self)
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.browse_input_file)
         file_menu.addAction(open_action)
-        
         file_menu.addSeparator()
-        
         exit_action = QAction("E&xit", self)
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
-        # Config menu
         config_menu = menubar.addMenu("&Configuration")
-        
-        save_config_action = QAction("💾 &Save Configuration...", self)
-        save_config_action.setShortcut("Ctrl+S")
-        save_config_action.triggered.connect(self.save_configuration)
-        config_menu.addAction(save_config_action)
-        
-        load_config_action = QAction("📂 &Load Configuration...", self)
-        load_config_action.setShortcut("Ctrl+L")
-        load_config_action.triggered.connect(self.load_configuration)
-        config_menu.addAction(load_config_action)
-        
+        save_action = QAction("Save Configuration...", self)
+        save_action.setShortcut("Ctrl+S")
+        save_action.triggered.connect(self.save_configuration)
+        config_menu.addAction(save_action)
+        load_action = QAction("Load Configuration...", self)
+        load_action.setShortcut("Ctrl+L")
+        load_action.triggered.connect(self.load_configuration)
+        config_menu.addAction(load_action)
         config_menu.addSeparator()
+        manage_action = QAction("Manage Configurations...", self)
+        manage_action.triggered.connect(self.manage_configurations)
+        config_menu.addAction(manage_action)
         
-        manage_config_action = QAction("🗂️ &Manage Configurations...", self)
-        manage_config_action.triggered.connect(self.manage_configurations)
-        config_menu.addAction(manage_config_action)
-        
-        # Settings menu
         settings_menu = menubar.addMenu("&Settings")
-        
-        preferences_action = QAction("&Preferences...", self)
-        preferences_action.setShortcut("Ctrl+P")
-        preferences_action.triggered.connect(self.open_settings)
-        settings_menu.addAction(preferences_action)
-        
+        pref_action = QAction("&Preferences...", self)
+        pref_action.setShortcut("Ctrl+P")
+        pref_action.triggered.connect(self.open_settings)
+        settings_menu.addAction(pref_action)
         settings_menu.addSeparator()
+        detect_action = QAction("Detect SDK/FFmpeg Paths", self)
+        detect_action.triggered.connect(self.detect_paths)
+        settings_menu.addAction(detect_action)
         
-        detect_paths_action = QAction("&Detect SDK/FFmpeg Paths", self)
-        detect_paths_action.triggered.connect(self.detect_paths)
-        settings_menu.addAction(detect_paths_action)
-        
-        # Help menu
         help_menu = menubar.addMenu("&Help")
-        
         about_action = QAction("&About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
     
+    # ========================================================================
+    # DIALOG HANDLERS
+    # ========================================================================
     def open_settings(self):
-        """Open settings dialog"""
         dialog = SettingsDialog(self)
         dialog.settings_changed.connect(self.on_settings_changed)
         dialog.exec()
     
     def detect_paths(self):
-        """Run automatic path detection"""
         sdk = self.settings.auto_detect_sdk()
         ffmpeg = self.settings.auto_detect_ffmpeg()
-        
         msg = "Path Detection Results:\n\n"
-        
         if sdk:
             self.settings.set_sdk_path(sdk, auto_detected=True)
-            msg += f"[OK] SDK Found: {sdk}\n"
+            msg += f"[OK] SDK: {sdk}\n"
         else:
             msg += "[X] SDK not found\n"
-        
         if ffmpeg:
             self.settings.set_ffmpeg_path(ffmpeg, auto_detected=True)
-            msg += f"[OK] FFmpeg Found: {ffmpeg}\n"
+            msg += f"[OK] FFmpeg: {ffmpeg}\n"
         else:
             msg += "[X] FFmpeg not found\n"
-        
         QMessageBox.information(self, "Path Detection", msg)
         self.on_settings_changed()
     
     def on_settings_changed(self):
-        """Handle settings changes - update UI and log"""
         sdk_path = self.settings.get_sdk_path()
         ffmpeg_path = self.settings.get_ffmpeg_path()
-        
-        status_parts = []
+        parts = []
         if sdk_path:
-            status_parts.append(f"SDK: {sdk_path.name}")
+            parts.append(f"SDK: {sdk_path.name}")
         if ffmpeg_path:
-            status_parts.append(f"FFmpeg: {ffmpeg_path.name}")
-        
-        if status_parts:
-            self.statusBar().showMessage(" | ".join(status_parts))
-        else:
-            self.statusBar().showMessage("[!] SDK/FFmpeg not configured - check Settings")
-        
-        logger.info(f"Settings updated - SDK: {sdk_path}, FFmpeg: {ffmpeg_path}")
+            parts.append(f"FFmpeg: {ffmpeg_path.name}")
+        self.statusBar().showMessage(" | ".join(parts) if parts else "SDK/FFmpeg not configured")
     
     def show_about(self):
-        """Show about dialog"""
-        about_text = f"""{APP_NAME} v{APP_VERSION}
-
-Unified photogrammetry preprocessing pipeline.
-Extract -> Split -> Mask in one streamlined workflow.
-
-Copyright (c) 2026
-License: MIT"""
-        QMessageBox.about(self, f"About {APP_NAME}", about_text)
+        QMessageBox.about(self, f"About {APP_NAME}",
+            f"{APP_NAME} v{APP_VERSION}\n\n"
+            "Unified photogrammetry preprocessing pipeline.\n"
+            "Extract -> Split -> Mask -> Align -> Train\n\n"
+            "Copyright 2026 | MIT License"
+        )
     
     def save_configuration(self):
-        """Save current pipeline configuration"""
         config = self.get_current_config()
-        
         dialog = SaveConfigDialog(config, self)
         dialog.exec()
     
     def load_configuration(self):
-        """Load a saved configuration"""
         dialog = ConfigManagementDialog(self)
         dialog.config_loaded.connect(self.apply_loaded_config)
         dialog.exec()
     
     def manage_configurations(self):
-        """Open configuration management dialog"""
         dialog = ConfigManagementDialog(self)
         dialog.config_loaded.connect(self.apply_loaded_config)
         dialog.exec()
     
+    # ========================================================================
+    # CONFIG GET/SET
+    # ========================================================================
     def get_current_config(self) -> dict:
-        """Get current UI configuration as dictionary"""
         return {
-            # I/O
             'input_file': self.input_file_edit.text(),
             'output_dir': self.output_dir_edit.text(),
-            
-            # Stage 1
             'stage1_enabled': self.stage1_enable.isChecked(),
             'fps_interval': self.fps_spin.value(),
-            'extraction_method': list(EXTRACTION_METHODS.keys())[self.extraction_method_combo.currentIndex()],
-            'sdk_quality': self.sdk_quality_combo.currentText().split(' (')[0].lower(),
-            'output_format': 'png',
-            
-            # Stage 2
+            'extraction_method': self.extraction_method_combo.currentData(),
+            'sdk_quality': self.sdk_quality_combo.currentData(),
+            'output_format': self.output_format_combo.currentData(),
             'stage2_enabled': self.stage2_enable.isChecked(),
             'transform_type': self.stage2_method_combo.currentData(),
-            'split_count': self.split_count_spin.value(),
-            'h_fov': self.fov_spin.value(),  # FIXED: h_fov_spin -> fov_spin
-            'output_width': self.stage2_width_spin.value(),  # FIXED: output_width_spin -> stage2_width_spin
-            'output_height': self.stage2_height_spin.value(),  # FIXED: output_height_spin -> stage2_height_spin
-            'cubemap_face_size': getattr(self, 'cubemap_face_spin', None).value() if hasattr(self, 'cubemap_face_spin') else 1920,
-            'cubemap_overlap': getattr(self, 'cubemap_overlap_spin', None).value() if hasattr(self, 'cubemap_overlap_spin') else 10,
-            'cubemap_fov': getattr(self, 'cubemap_fov_spin', None).value() if hasattr(self, 'cubemap_fov_spin') else 110,
+            'output_width': self.stage2_width_spin.value(),
+            'output_height': self.stage2_height_spin.value(),
+            'cubemap_tile_width': self.cubemap_tile_width_spin.value(),
+            'cubemap_tile_height': self.cubemap_tile_height_spin.value(),
+            'cubemap_fov': 90,
             'skip_transform': self.skip_transform_check.isChecked(),
-            
-            # Stage 3
             'stage3_enabled': self.stage3_enable.isChecked(),
-            'model_size': list(YOLOV8_MODELS.keys())[self.model_size_combo.currentIndex()],
+            'model_size': self.model_size_combo.currentData(),
             'confidence_threshold': self.confidence_spin.value(),
             'use_gpu': self.use_gpu_check.isChecked(),
             'masking_categories': {
@@ -273,29 +1398,34 @@ License: MIT"""
                 'personal_objects': self.objects_group.isChecked(),
                 'animals': self.animals_group.isChecked()
             },
-            
-            # Stage 4
-            'stage4_enabled': getattr(self, 'stage4_enable', QCheckBox()).isChecked(),
-            'alignment_tool': 'glomap',
-            'use_gpu_colmap': True,
-            
-            # Stage 5
-            'stage5_enabled': getattr(self, 'stage5_enable', QCheckBox()).isChecked(),
-            'export_lithcfeld': True,
-            'export_realityscan': True,
-            'export_colmap': False,
+            'mask_target': 'equirect' if self.mask_equirect_radio.isChecked() else 'split',
+            'stage4_enabled': self.stage4_enable.isChecked(),
+            'use_rig_sfm': self.use_rig_sfm_check.isChecked(),
+            'alignment_mode': self._get_alignment_mode(),
+            'use_gpu_colmap': self.use_gpu_colmap_check.isChecked(),
+            'colmap_quality': self.colmap_quality_combo.currentIndex(),
+            'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
+            'export_include_masks': self.export_include_masks_check.isChecked(),
+            'stage5_enabled': self.stage5_enable.isChecked(),
+            'train_lighting': self.train_lichtfeld_check.isChecked(),
+            'lichtfeld_path': self.lichtfeld_path_edit.text(),
         }
     
+    def _get_alignment_mode(self) -> str:
+        if self.mode_rig_sfm_radio.isChecked():
+            return 'rig_sfm'
+        elif self.mode_sphere_sfm_radio.isChecked():
+            return 'sphere_sfm'
+        elif self.mode_pose_transfer_radio.isChecked():
+            return 'pose_transfer'
+        return 'rig_sfm'
+    
     def apply_loaded_config(self, config: dict):
-        """Apply a loaded configuration to the UI"""
         try:
-            # I/O
             if 'input_file' in config:
                 self.input_file_edit.setText(config['input_file'])
             if 'output_dir' in config:
                 self.output_dir_edit.setText(config['output_dir'])
-            
-            # Stage 1
             if 'stage1_enabled' in config:
                 self.stage1_enable.setChecked(config['stage1_enabled'])
             if 'fps_interval' in config:
@@ -304,22 +1434,14 @@ License: MIT"""
                 methods = list(EXTRACTION_METHODS.keys())
                 if config['extraction_method'] in methods:
                     self.extraction_method_combo.setCurrentIndex(methods.index(config['extraction_method']))
-            
-            # Stage 2
             if 'stage2_enabled' in config:
                 self.stage2_enable.setChecked(config['stage2_enabled'])
-            if 'split_count' in config:
-                self.split_count_spin.setValue(config['split_count'])
-            if 'h_fov' in config:
-                self.fov_spin.setValue(config['h_fov'])  # FIXED: h_fov_spin -> fov_spin
             if 'output_width' in config:
-                self.stage2_width_spin.setValue(config['output_width'])  # FIXED: output_width_spin -> stage2_width_spin
+                self.stage2_width_spin.setValue(config['output_width'])
             if 'output_height' in config:
-                self.stage2_height_spin.setValue(config['output_height'])  # FIXED: output_height_spin -> stage2_height_spin
+                self.stage2_height_spin.setValue(config['output_height'])
             if 'skip_transform' in config:
                 self.skip_transform_check.setChecked(config['skip_transform'])
-            
-            # Stage 3
             if 'stage3_enabled' in config:
                 self.stage3_enable.setChecked(config['stage3_enabled'])
             if 'model_size' in config:
@@ -335,839 +1457,151 @@ License: MIT"""
                 self.persons_group.setChecked(cats.get('persons', True))
                 self.objects_group.setChecked(cats.get('personal_objects', True))
                 self.animals_group.setChecked(cats.get('animals', True))
+            if 'mask_target' in config:
+                if config['mask_target'] == 'equirect':
+                    self.mask_equirect_radio.setChecked(True)
+                else:
+                    self.mask_split_radio.setChecked(True)
+            if 'stage4_enabled' in config:
+                self.stage4_enable.setChecked(config['stage4_enabled'])
+            if 'alignment_mode' in config:
+                m = config['alignment_mode']
+                if m == 'sphere_sfm':
+                    self.mode_sphere_sfm_radio.setChecked(True)
+                elif m == 'pose_transfer':
+                    self.mode_pose_transfer_radio.setChecked(True)
+                else:
+                    self.mode_rig_sfm_radio.setChecked(True)
+            if 'use_gpu_colmap' in config:
+                self.use_gpu_colmap_check.setChecked(config['use_gpu_colmap'])
+            if 'colmap_quality' in config:
+                self.colmap_quality_combo.setCurrentIndex(config['colmap_quality'])
+            if 'export_lichtfeld' in config:
+                self.export_lichtfeld_check.setChecked(config['export_lichtfeld'])
+            if 'export_include_masks' in config:
+                self.export_include_masks_check.setChecked(config['export_include_masks'])
+            if 'stage5_enabled' in config:
+                self.stage5_enable.setChecked(config['stage5_enabled'])
+            if 'train_lighting' in config:
+                self.train_lichtfeld_check.setChecked(config['train_lighting'])
+            if 'lichtfeld_path' in config:
+                self.lichtfeld_path_edit.setText(config['lichtfeld_path'])
             
-            logger.info("Configuration applied successfully")
-            QMessageBox.information(
-                self,
-                "Configuration Loaded",
-                "Configuration has been applied to all settings."
-            )
-            
+            QMessageBox.information(self, "Config Loaded", "Configuration applied successfully.")
         except Exception as e:
-            logger.error(f"Failed to apply configuration: {e}")
-            QMessageBox.critical(
-                self,
-                "Load Failed",
-                f"Failed to apply configuration: {str(e)}"
-            )
+            logger.error(f"Failed to apply config: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to apply config: {e}")
     
-    def create_splitter_section(self) -> QSplitter:
-        """Create splitter with tabs (top) and log panel (bottom) - resizable"""
-        
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        
-        # MIDDLE SECTION: Configuration Tabs (expandable)
-        self.tab_widget = QTabWidget()
-        
-        # Wrap each tab in a scroll area for responsiveness
-        stage1_scroll = self._wrap_in_scroll_area(self.create_stage1_config_tab())
-        stage2_persp_scroll = self._wrap_in_scroll_area(self.create_stage2_perspective_tab())
-        stage2_cube_scroll = self._wrap_in_scroll_area(self.create_stage2_cubemap_tab())
-        stage3_scroll = self._wrap_in_scroll_area(self.create_stage3_config_tab())
-        
-        self.tab_widget.addTab(stage1_scroll, "Stage 1: Extraction Settings")
-        self.tab_widget.addTab(stage2_persp_scroll, "Stage 2: Perspective (E2P)")
-        self.tab_widget.addTab(stage2_cube_scroll, "Stage 2: Cubemap (E2C)")
-        self.tab_widget.addTab(stage3_scroll, "Stage 3: Masking Settings")
-        
-        # BOTTOM SECTION: Log Panel (collapsible)
-        log_panel = self.create_log_panel()
-        
-        splitter.addWidget(self.tab_widget)
-        splitter.addWidget(log_panel)
-        
-        # Set initial sizes: 60% for tabs, 40% for log
-        splitter.setStretchFactor(0, 3)  # Tabs get more space
-        splitter.setStretchFactor(1, 2)  # Log gets less but still visible
-        
-        return splitter
+    # ========================================================================
+    # EVENT HANDLERS
+    # ========================================================================
+    def on_extraction_method_changed(self, index: int):
+        method = self.extraction_method_combo.currentData()
+        is_sdk = method in ['sdk', 'sdk_stitching']
+        self.sdk_quality_widget.setVisible(is_sdk)
+        self.sdk_res_widget.setVisible(is_sdk)
     
-    def _wrap_in_scroll_area(self, widget: QWidget) -> QScrollArea:
-        """Wrap a widget in a scroll area for responsive design"""
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(widget)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        return scroll
+    def on_skip_transform_toggled(self, checked: bool):
+        if hasattr(self, 'stage2_output_group'):
+            self.stage2_output_group.setEnabled(not checked)
+        if hasattr(self, 'stage2_perspective_params_group'):
+            self.stage2_perspective_params_group.setEnabled(not checked)
+        if hasattr(self, 'run_stage2_btn'):
+            self.run_stage2_btn.setEnabled(not checked)
+        self.log_message("[SKIP] Direct Mask Mode" if checked else "[INFO] Stage 2 transform enabled")
     
-    def create_top_section(self) -> QWidget:
-        """Create top section: Input/Output + Pipeline Overview + Action Buttons"""
-        
-        section = QWidget()
-        section.setObjectName("topSection")
-        
-        layout = QVBoxLayout(section)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
-        
-        # === INPUT/OUTPUT CONFIGURATION ===
-        io_group = QGroupBox("Input / Output Configuration")
-        io_layout = QVBoxLayout()
-        
-        # Input file
-        input_layout = QHBoxLayout()
-        input_label = QLabel("Input File:")
-        input_label.setMinimumWidth(100)
-        input_layout.addWidget(input_label)
-        self.input_file_edit = QLineEdit()
-        self.input_file_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        input_layout.addWidget(self.input_file_edit, stretch=1)
-        input_browse_btn = QPushButton("Browse...")
-        input_browse_btn.setMinimumWidth(80)
-        input_browse_btn.clicked.connect(self.browse_input_file)
-        input_layout.addWidget(input_browse_btn, stretch=0)
-        io_layout.addLayout(input_layout)
-        
-        # Output directory
-        output_layout = QHBoxLayout()
-        output_label = QLabel("Output Directory:")
-        output_label.setMinimumWidth(100)
-        output_layout.addWidget(output_label)
-        self.output_dir_edit = QLineEdit()
-        self.output_dir_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        output_layout.addWidget(self.output_dir_edit, stretch=1)
-        output_browse_btn = QPushButton("Browse...")
-        output_browse_btn.setMinimumWidth(80)
-        output_browse_btn.clicked.connect(self.browse_output_dir)
-        output_layout.addWidget(output_browse_btn, stretch=0)
-        io_layout.addLayout(output_layout)
-        
-        io_group.setLayout(io_layout)
-        layout.addWidget(io_group)
-        
-        # === PIPELINE OVERVIEW ===
-        pipeline_group = QGroupBox("Pipeline Stages")
-        pipeline_layout = QHBoxLayout()
-        
-        # Stage 1
-        stage1_layout = QVBoxLayout()
-        self.stage1_enable = QCheckBox("Stage 1: Extract Frames")
-        self.stage1_enable.setChecked(True)
-        stage1_layout.addWidget(self.stage1_enable)
-        self.run_stage1_btn = QPushButton("▶ Run Stage 1")
-        self.run_stage1_btn.setMinimumHeight(32)
-        self.run_stage1_btn.clicked.connect(self.run_stage_1_only)
-        stage1_layout.addWidget(self.run_stage1_btn)
-        pipeline_layout.addLayout(stage1_layout, stretch=1)
-        
-        pipeline_layout.addWidget(self._create_separator())
-        
-        # Stage 2
-        stage2_layout = QVBoxLayout()
-        stage2_header = QHBoxLayout()
-        self.stage2_enable = QCheckBox("Stage 2: Split Views")
-        self.stage2_enable.setChecked(True)
-        stage2_header.addWidget(self.stage2_enable)
-        self.stage2_method_combo = QComboBox()
-        self.stage2_method_combo.addItem("Perspective (E2P)", "perspective")
-        self.stage2_method_combo.addItem("Cubemap (E2C)", "cubemap")
-        self.stage2_method_combo.setMinimumWidth(150)
-        self.stage2_method_combo.currentIndexChanged.connect(self.on_stage2_method_changed)
-        stage2_header.addWidget(self.stage2_method_combo)
-        stage2_layout.addLayout(stage2_header)
-        
-        # Skip Transform checkbox (Direct Masking Mode)
-        self.skip_transform_check = QCheckBox("⏩ Skip Transform (Direct Mask)")
-        self.skip_transform_check.setChecked(False)
-        self.skip_transform_check.setToolTip(
-            "Skip perspective splitting and mask equirectangular/fisheye images directly.\n"
-            "Faster workflow for 360° VR or native photogrammetry."
-        )
-        self.skip_transform_check.setStyleSheet("color: #4a9eff; font-weight: bold;")
-        self.skip_transform_check.toggled.connect(self.on_skip_transform_toggled)
-        stage2_layout.addWidget(self.skip_transform_check)
-        
-        self.run_stage2_btn = QPushButton("▶ Run Stage 2")
-        self.run_stage2_btn.setMinimumHeight(32)
-        self.run_stage2_btn.clicked.connect(self.run_stage_2_only)
-        stage2_layout.addWidget(self.run_stage2_btn)
-        pipeline_layout.addLayout(stage2_layout, stretch=1)
-        
-        pipeline_layout.addWidget(self._create_separator())
-        
-        # Stage 3
-        stage3_layout = QVBoxLayout()
-        self.stage3_enable = QCheckBox("Stage 3: Generate Masks")
-        self.stage3_enable.setChecked(True)
-        stage3_layout.addWidget(self.stage3_enable)
-        self.run_stage3_btn = QPushButton("▶ Run Stage 3")
-        self.run_stage3_btn.setMinimumHeight(32)
-        self.run_stage3_btn.clicked.connect(self.run_stage_3_only)
-        stage3_layout.addWidget(self.run_stage3_btn)
-        pipeline_layout.addLayout(stage3_layout, stretch=1)
-        
-        pipeline_group.setLayout(pipeline_layout)
-        layout.addWidget(pipeline_group)
-        
-        # === ACTION BUTTONS + PROGRESS ===
-        action_layout = QHBoxLayout()
-        
-        # Start button - green with play icon
-        self.start_button = QPushButton("▶ Start Pipeline")
-        self.start_button.setMinimumSize(150, 45)
-        self.start_button.setMaximumSize(200, 55)
-        self.start_button.setObjectName("startButton")
-        self.start_button.clicked.connect(self.start_pipeline)
-        action_layout.addWidget(self.start_button, stretch=0)
-        
-        # Pause button - yellow/orange with pause icon
-        self.pause_button = QPushButton("⏸ Pause")
-        self.pause_button.setMinimumSize(100, 45)
-        self.pause_button.setMaximumSize(140, 55)
-        self.pause_button.setObjectName("pauseButton")
-        self.pause_button.setEnabled(False)
-        self.pause_button.clicked.connect(self.toggle_pause)
-        action_layout.addWidget(self.pause_button, stretch=0)
-        
-        # Stop button - red with stop icon
-        self.stop_button = QPushButton("⏹ Stop")
-        self.stop_button.setMinimumSize(100, 45)
-        self.stop_button.setMaximumSize(140, 55)
-        self.stop_button.setObjectName("stopButton")
-        self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self.stop_pipeline)
-        action_layout.addWidget(self.stop_button, stretch=0)
-        
-        action_layout.addSpacing(20)
-        
-        # Progress bar (expands to fill space)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setMinimumHeight(30)
-        self.progress_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        action_layout.addWidget(self.progress_bar, stretch=1)
-        
-        action_layout.addSpacing(10)
-        
-        self.status_label = QLabel("Ready to start")
-        self.status_label.setMinimumWidth(100)
-        action_layout.addWidget(self.status_label)
-        
-        layout.addLayout(action_layout)
-        
-        return section
+    def on_stage2_method_changed(self, index: int):
+        method = self.stage2_method_combo.currentData()
+        if method == 'perspective':
+            self.page_stack.setCurrentIndex(2)
+            self.nav_buttons[2].setChecked(True)
+        elif method == 'cubemap':
+            self.page_stack.setCurrentIndex(3)
+            self.nav_buttons[3].setChecked(True)
     
-    def _create_separator(self) -> QWidget:
-        """Create vertical separator line"""
-        sep = QWidget()
-        sep.setFixedWidth(2)
-        sep.setStyleSheet("background-color: #555;")
-        return sep
+    def on_cubemap_type_changed(self, index: int):
+        t = self.cubemap_type_combo.currentData()
+        self.tile_8_controls_widget.setVisible(t == '8-tile')
     
-    def create_stage1_config_tab(self) -> QWidget:
-        """Create Stage 1 configuration tab (Extraction Settings)"""
-        
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(16, 16, 16, 16)
-        
-        # File Analysis
-        analysis_group = QGroupBox("File Analysis")
-        analysis_layout = QVBoxLayout()
-        
-        analyze_layout = QHBoxLayout()
-        analyze_btn = QPushButton("Analyze Input File")
-        analyze_btn.clicked.connect(self.analyze_video_file)
-        analyze_layout.addWidget(analyze_btn)
-        analyze_layout.addStretch()
-        analysis_layout.addLayout(analyze_layout)
-        
-        # File metadata display
-        self.file_metadata_label = QLabel("No file analyzed")
-        self.file_metadata_label.setWordWrap(True)
-        self.file_metadata_label.setStyleSheet("padding: 8px; background: #3c3c3c; border-radius: 4px;")
-        analysis_layout.addWidget(self.file_metadata_label)
-        
-        analysis_group.setLayout(analysis_layout)
-        layout.addWidget(analysis_group)
-        
-        # Time Range Selection
-        time_group = QGroupBox("Time Range")
-        time_layout = QVBoxLayout()
-        
-        self.full_video_check = QCheckBox("Extract full video")
-        self.full_video_check.setChecked(True)
-        self.full_video_check.toggled.connect(self.toggle_time_range)
-        time_layout.addWidget(self.full_video_check)
-        
-        time_controls = QHBoxLayout()
-        time_controls.addWidget(QLabel("Start Time (s):"))
-        self.start_time_spin = QDoubleSpinBox()
-        self.start_time_spin.setRange(0, 999999)
-        self.start_time_spin.setValue(0)
-        self.start_time_spin.setEnabled(False)
-        time_controls.addWidget(self.start_time_spin)
-        
-        time_controls.addWidget(QLabel("End Time (s):"))
-        self.end_time_spin = QDoubleSpinBox()
-        self.end_time_spin.setRange(0, 999999)
-        self.end_time_spin.setValue(0)
-        self.end_time_spin.setEnabled(False)
-        time_controls.addWidget(self.end_time_spin)
-        time_controls.addStretch()
-        time_layout.addLayout(time_controls)
-        
-        time_group.setLayout(time_layout)
-        layout.addWidget(time_group)
-        
-        # Extraction settings
-        extract_group = QGroupBox("Extraction Settings")
-        extract_layout = QVBoxLayout()
-        
-        # FPS
-        fps_layout = QHBoxLayout()
-        fps_layout.addWidget(QLabel("Frame Rate (FPS):"))
-        self.fps_spin = QDoubleSpinBox()
-        self.fps_spin.setRange(0.1, 30.0)
-        self.fps_spin.setValue(DEFAULT_FPS)
-        self.fps_spin.setSingleStep(0.1)
-        fps_layout.addWidget(self.fps_spin)
-        fps_layout.addStretch()
-        extract_layout.addLayout(fps_layout)
-        
-        # Method
-        method_layout = QHBoxLayout()
-        method_layout.addWidget(QLabel("Extraction Method:"))
-        self.extraction_method_combo = QComboBox()
-        for key, value in EXTRACTION_METHODS.items():
-            self.extraction_method_combo.addItem(value, key)
-        self.extraction_method_combo.currentIndexChanged.connect(self.on_extraction_method_changed)
-        method_layout.addWidget(self.extraction_method_combo)
-        method_layout.addStretch()
-        extract_layout.addLayout(method_layout)
-        
-        # SDK Quality (visible when SDK selected)
-        self.sdk_quality_widget = QWidget()
-        sdk_quality_layout = QHBoxLayout(self.sdk_quality_widget)
-        sdk_quality_layout.setContentsMargins(0, 0, 0, 0)
-        self.sdk_quality_label = QLabel("SDK Quality:")
-        sdk_quality_layout.addWidget(self.sdk_quality_label)
-        self.sdk_quality_combo = QComboBox()
-        # Use SDK_QUALITY_OPTIONS from config (now includes method names)
-        from src.config.defaults import SDK_QUALITY_OPTIONS
-        for key, label in SDK_QUALITY_OPTIONS.items():
-            self.sdk_quality_combo.addItem(label, key)
-        default_quality_index = self.sdk_quality_combo.findData(DEFAULT_SDK_QUALITY)
-        if default_quality_index >= 0:
-            self.sdk_quality_combo.setCurrentIndex(default_quality_index)
-        sdk_quality_layout.addWidget(self.sdk_quality_combo)
-        sdk_quality_layout.addStretch()
-        extract_layout.addWidget(self.sdk_quality_widget)
-        self.sdk_quality_widget.setVisible(False)  # Hidden by default
-        
-        # SDK Resolution
-        self.sdk_res_widget = QWidget()
-        sdk_res_layout = QHBoxLayout(self.sdk_res_widget)
-        sdk_res_layout.setContentsMargins(0, 0, 0, 0)
-        self.sdk_res_label = QLabel("SDK Resolution:")
-        sdk_res_layout.addWidget(self.sdk_res_label)
-        self.sdk_resolution_combo = QComboBox()
-        self.sdk_resolution_combo.addItem("Original", "original")
-        self.sdk_resolution_combo.addItem("8K (7680×3840)", "8k")
-        self.sdk_resolution_combo.addItem("6K (6144×3072)", "6k")
-        self.sdk_resolution_combo.addItem("4K (3840×1920)", "4k")
-        self.sdk_resolution_combo.addItem("2K (1920×960)", "2k")
-        sdk_res_layout.addWidget(self.sdk_resolution_combo)
-        sdk_res_layout.addStretch()
-        extract_layout.addWidget(self.sdk_res_widget)
-        self.sdk_res_widget.setVisible(False)  # Hidden by default
-        
-        # Output Format
-        format_layout = QHBoxLayout()
-        format_layout.addWidget(QLabel("Output Format:"))
-        self.output_format_combo = QComboBox()
-        self.output_format_combo.addItem("PNG (Lossless)", "png")
-        self.output_format_combo.addItem("JPEG (Compressed)", "jpeg")
-        format_layout.addWidget(self.output_format_combo)
-        format_layout.addStretch()
-        extract_layout.addLayout(format_layout)
-        
-        extract_group.setLayout(extract_layout)
-        layout.addWidget(extract_group)
-        
-        layout.addStretch()
-        
-        return tab
+    def on_masking_engine_changed(self, index: int):
+        engine = self.masking_engine_combo.currentData()
+        if engine == "sam_vitb":
+            self.model_size_container.setVisible(False)
+            self.engine_description_label.setText("Superior segmentation quality | Best edge precision")
+            self.confidence_spin.setEnabled(False)
+        elif engine == "hybrid":
+            self.model_size_container.setVisible(False)
+            self.engine_description_label.setText("YOLO detection + SAM segmentation | Pixel-perfect edges")
+            self.confidence_spin.setEnabled(True)
+        else:
+            self.model_size_container.setVisible(True)
+            self.confidence_spin.setEnabled(True)
+            if engine == "yolo_onnx":
+                self.engine_description_label.setText("NMS-free inference | 3-4x faster | CUDA accelerated")
+            else:
+                self.engine_description_label.setText("Full-featured YOLO | PyTorch backend")
     
-    def create_stage2_perspective_tab(self) -> QWidget:
-        """Create Stage 2 Perspective (E2P) configuration tab"""
-        
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(16, 16, 16, 16)
-        
-        # Camera configuration
-        camera_group = QGroupBox("Camera Configuration")
-        camera_layout = QVBoxLayout()
-        
-        # Split count
-        split_layout = QHBoxLayout()
-        split_layout.addWidget(QLabel("Camera Count:"))
-        self.split_count_spin = QSpinBox()
-        self.split_count_spin.setRange(1, 12)
-        self.split_count_spin.setValue(DEFAULT_SPLIT_COUNT)
-        self.split_count_spin.valueChanged.connect(self.on_split_count_changed)
-        split_layout.addWidget(self.split_count_spin)
-        split_layout.addStretch()
-        camera_layout.addLayout(split_layout)
-        
-        # FOV
-        fov_layout = QHBoxLayout()
-        fov_layout.addWidget(QLabel("Horizontal FOV (°):"))
-        self.fov_spin = QSpinBox()
-        self.fov_spin.setRange(30, 150)
-        self.fov_spin.setValue(DEFAULT_H_FOV)
-        fov_layout.addWidget(self.fov_spin)
-        fov_layout.addStretch()
-        camera_layout.addLayout(fov_layout)
-        
-        camera_group.setLayout(camera_layout)
-        self.stage2_camera_group = camera_group  # Store reference for enabling/disabling
-        layout.addWidget(camera_group)
-        
-        # Output Settings for Stage 2
-        output_group = QGroupBox("Output Settings")
-        output_layout = QVBoxLayout()
-        
-        # Resolution
-        res_layout = QHBoxLayout()
-        res_layout.addWidget(QLabel("Output Resolution:"))
-        res_layout.addWidget(QLabel("Width:"))
-        self.stage2_width_spin = QSpinBox()
-        self.stage2_width_spin.setRange(640, 7680)
-        self.stage2_width_spin.setValue(1920)  # CHANGED: Default 1920 for square images
-        self.stage2_width_spin.setSingleStep(128)
-        res_layout.addWidget(self.stage2_width_spin)
-        res_layout.addWidget(QLabel("Height:"))
-        self.stage2_height_spin = QSpinBox()
-        self.stage2_height_spin.setRange(480, 3840)
-        self.stage2_height_spin.setValue(1920)  # CHANGED: Default 1920 for square images
-        self.stage2_height_spin.setSingleStep(128)
-        res_layout.addWidget(self.stage2_height_spin)
-        res_layout.addStretch()
-        output_layout.addLayout(res_layout)
-        
-        # Format
-        format2_layout = QHBoxLayout()
-        format2_layout.addWidget(QLabel("Image Format:"))
-        self.stage2_format_combo = QComboBox()
-        self.stage2_format_combo.addItem("PNG (Lossless)", "png")
-        self.stage2_format_combo.addItem("JPEG (Compressed)", "jpeg")
-        self.stage2_format_combo.addItem("TIFF (High Quality)", "tiff")
-        format2_layout.addWidget(self.stage2_format_combo)
-        format2_layout.addStretch()
-        output_layout.addLayout(format2_layout)
-        
-        output_group.setLayout(output_layout)
-        self.stage2_output_group = output_group  # Store reference
-        layout.addWidget(output_group)
-        
-        # Perspective-specific parameters
-        perspective_params_group = QGroupBox("Perspective Parameters (E2P)")
-        perspective_params_layout = QVBoxLayout()
-        
-        # Pitch offset
-        pitch_layout = QHBoxLayout()
-        pitch_layout.addWidget(QLabel("Pitch Offset (°):"))
-        self.pitch_offset_spin = QSpinBox()
-        self.pitch_offset_spin.setRange(-90, 90)
-        self.pitch_offset_spin.setValue(0)
-        pitch_layout.addWidget(self.pitch_offset_spin)
-        pitch_layout.addStretch()
-        perspective_params_layout.addLayout(pitch_layout)
-        
-        # Roll offset
-        roll_layout = QHBoxLayout()
-        roll_layout.addWidget(QLabel("Roll Offset (°):"))
-        self.roll_offset_spin = QSpinBox()
-        self.roll_offset_spin.setRange(-180, 180)
-        self.roll_offset_spin.setValue(0)
-        roll_layout.addWidget(self.roll_offset_spin)
-        roll_layout.addStretch()
-        perspective_params_layout.addLayout(roll_layout)
-        
-        perspective_params_group.setLayout(perspective_params_layout)
-        self.stage2_perspective_params_group = perspective_params_group  # Store reference
-        layout.addWidget(perspective_params_group)
-        
-        layout.addStretch()
-        return tab
+    def _on_alignment_mode_changed(self, checked: bool = True):
+        is_c = self.mode_pose_transfer_radio.isChecked()
+        self.pose_transfer_config_group.setVisible(is_c)
+        if self.mode_rig_sfm_radio.isChecked():
+            info = "Mode B: 9 virtual perspectives + COLMAP rig constraints"
+        elif self.mode_sphere_sfm_radio.isChecked():
+            info = "Mode A: Direct spherical matching on equirectangular images"
+        else:
+            info = "Mode C: SphereSfM alignment -> perspective extraction -> pose transfer"
+        self.output_info_label.setText(f"COLMAP output: <output_dir>/stage4_alignment/sparse/0/\n{info}")
     
-    def create_stage2_cubemap_tab(self) -> QWidget:
-        """Create Stage 2 Cubemap (E2C) configuration tab
-        
-        SPECIFICATIONS:
-        - 6-tile: Only "Separate Files" output (no layouts needed)
-        - 8-tile: FOV OR overlap percentage (user chooses which to control)
-        - Resolution: Input field with auto-calculated default (input_height / 2)
-        """
-        
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(16, 16, 16, 16)
-        
-        # Output Settings
-        output_group = QGroupBox("Output Settings")
-        output_layout = QVBoxLayout()
-        
-        # Face/Tile Size (editable field with auto-calculated default)
-        res_layout = QHBoxLayout()
-        res_layout.addWidget(QLabel("Face/Tile Size (px):"))
-        self.cubemap_face_size_spin = QSpinBox()
-        self.cubemap_face_size_spin.setRange(512, 8192)
-        self.cubemap_face_size_spin.setValue(1920)  # Default, will be auto-calculated on file load
-        self.cubemap_face_size_spin.setSingleStep(128)
-        self.cubemap_face_size_spin.setToolTip("Default: input_height / 2. Each tile is square.")
-        res_layout.addWidget(self.cubemap_face_size_spin)
-        res_info = QLabel("(Auto-calculated from input, editable)")
-        res_info.setStyleSheet("color: gray; font-size: 10px;")
-        res_layout.addWidget(res_info)
-        res_layout.addStretch()
-        output_layout.addLayout(res_layout)
-        
-        # Format
-        format2_layout = QHBoxLayout()
-        format2_layout.addWidget(QLabel("Image Format:"))
-        self.cubemap_format_combo = QComboBox()
-        self.cubemap_format_combo.addItem("PNG (Lossless)", "png")
-        self.cubemap_format_combo.addItem("JPEG (Compressed)", "jpeg")
-        self.cubemap_format_combo.addItem("TIFF (High Quality)", "tiff")
-        format2_layout.addWidget(self.cubemap_format_combo)
-        format2_layout.addStretch()
-        output_layout.addLayout(format2_layout)
-        
-        output_group.setLayout(output_layout)
-        layout.addWidget(output_group)
-        
-        # Cubemap-specific parameters
-        cubemap_params_group = QGroupBox("Cubemap Parameters (E2C)")
-        cubemap_params_layout = QVBoxLayout()
-        
-        # Info label
-        info_label = QLabel(
-            "<b>Cubemap Types:</b><br>"
-            "• <b>6-Tile Standard</b>: Cubemap for VR/rendering - 90° FOV fixed, separate files only<br>"
-            "• <b>8-Tile Grid</b>: For photogrammetry - 4×2 grid with adjustable FOV or overlap"
-        )
-        info_label.setWordWrap(True)
-        cubemap_params_layout.addWidget(info_label)
-        
-        # Cubemap type
-        cubemap_type_layout = QHBoxLayout()
-        cubemap_type_layout.addWidget(QLabel("Cubemap Type:"))
-        self.cubemap_type_combo = QComboBox()
-        self.cubemap_type_combo.addItem("6-Tile Standard Cubemap (90° FOV, Separate Files)", "6-face")
-        self.cubemap_type_combo.addItem("8-Tile Grid (Photogrammetry/Gaussian Splatting)", "8-tile")
-        self.cubemap_type_combo.setCurrentIndex(1)  # CHANGED: Default to 8-tile
-        self.cubemap_type_combo.currentIndexChanged.connect(self.on_cubemap_type_changed)
-        cubemap_type_layout.addWidget(self.cubemap_type_combo)
-        cubemap_type_layout.addStretch()
-        cubemap_params_layout.addLayout(cubemap_type_layout)
-        
-        # 8-Tile Grid Controls (only for 8-tile mode)
-        self.tile_8_controls_widget = QWidget()
-        tile_8_layout = QVBoxLayout(self.tile_8_controls_widget)
-        tile_8_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Option to use FOV or Overlap
-        control_mode_layout = QHBoxLayout()
-        control_mode_layout.addWidget(QLabel("Control Method:"))
-        self.tile_control_mode_combo = QComboBox()
-        self.tile_control_mode_combo.addItem("Set FOV (Auto-calculate overlap)", "fov")
-        self.tile_control_mode_combo.addItem("Set Overlap % (Auto-calculate FOV)", "overlap")
-        self.tile_control_mode_combo.currentIndexChanged.connect(self.on_tile_control_mode_changed)
-        control_mode_layout.addWidget(self.tile_control_mode_combo)
-        control_mode_layout.addStretch()
-        tile_8_layout.addLayout(control_mode_layout)
-        
-        # FOV control (when control_mode = 'fov')
-        self.fov_control_widget = QWidget()
-        fov_control_layout = QHBoxLayout(self.fov_control_widget)
-        fov_control_layout.setContentsMargins(0, 0, 0, 0)
-        fov_control_layout.addWidget(QLabel("Horizontal FOV (°):"))
-        self.cubemap_fov_spin = QSpinBox()
-        self.cubemap_fov_spin.setRange(45, 150)
-        self.cubemap_fov_spin.setValue(110)  # CHANGED: Default 110° FOV
-        self.cubemap_fov_spin.valueChanged.connect(self.on_fov_changed)
-        fov_control_layout.addWidget(self.cubemap_fov_spin)
-        self.fov_overlap_label = QLabel("→ Overlap: ~55%")  # Will update dynamically
-        self.fov_overlap_label.setStyleSheet("color: gray;")
-        fov_control_layout.addWidget(self.fov_overlap_label)
-        fov_control_layout.addStretch()
-        tile_8_layout.addWidget(self.fov_control_widget)
-        
-        # Overlap control (when control_mode = 'overlap')
-        self.overlap_control_widget = QWidget()
-        overlap_control_layout = QHBoxLayout(self.overlap_control_widget)
-        overlap_control_layout.setContentsMargins(0, 0, 0, 0)
-        overlap_control_layout.addWidget(QLabel("Overlap (%):"))
-        self.overlap_spin = QSpinBox()
-        self.overlap_spin.setRange(0, 75)
-        self.overlap_spin.setValue(25)
-        self.overlap_spin.valueChanged.connect(self.on_overlap_changed)
-        overlap_control_layout.addWidget(self.overlap_spin)
-        self.overlap_fov_label = QLabel("→ FOV: ~67°")
-        self.overlap_fov_label.setStyleSheet("color: gray;")
-        overlap_control_layout.addWidget(self.overlap_fov_label)
-        overlap_control_layout.addStretch()
-        tile_8_layout.addWidget(self.overlap_control_widget)
-        
-        # Initially show FOV control, hide overlap control
-        self.overlap_control_widget.setVisible(False)
-        
-        cubemap_params_layout.addWidget(self.tile_8_controls_widget)
-        
-        # CHANGED: Show 8-tile controls by default (8-tile is now default)
-        self.tile_8_controls_widget.setVisible(True)
-        
-        cubemap_params_group.setLayout(cubemap_params_layout)
-        layout.addWidget(cubemap_params_group)
-        
-        layout.addStretch()
-        return tab
+    def toggle_time_range(self, checked: bool):
+        self.start_time_spin.setEnabled(not checked)
+        self.end_time_spin.setEnabled(not checked)
     
-    def create_stage3_config_tab(self) -> QWidget:
-        """Create Stage 3 configuration tab (Masking Settings with YOLO26)"""
-        
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        
-        # === YOLO26 HEADER ===
-        header_widget = QWidget()
-        header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(0, 0, 0, 8)
-        
-        yolo_label = QLabel("🚀 YOLO26 AI Masking")
-        yolo_label.setStyleSheet("""
-            font-size: 16px;
-            font-weight: bold;
-            color: #4a9eff;
-        """)
-        header_layout.addWidget(yolo_label)
-        
-        yolo_info = QLabel("(NMS-Free • 3-4x Faster • GPU Accelerated)")
-        yolo_info.setStyleSheet("color: #888; font-size: 11px;")
-        header_layout.addWidget(yolo_info)
-        header_layout.addStretch()
-        layout.addWidget(header_widget)
-        
-        # Enable masking
-        self.enable_masking_check = QCheckBox("Enable AI Masking")
-        self.enable_masking_check.setChecked(True)
-        self.enable_masking_check.setStyleSheet("font-weight: bold;")
-        layout.addWidget(self.enable_masking_check)
-        
-        # === PERSONS CATEGORY ===
-        persons_group = QGroupBox("👤 Persons")
-        persons_group.setCheckable(True)
-        persons_group.setChecked(True)
-        persons_layout = QVBoxLayout()
-        persons_layout.setSpacing(4)
-        
-        self.person_check = QCheckBox("Person (class 0)")
-        self.person_check.setChecked(True)
-        persons_layout.addWidget(self.person_check)
-        
-        persons_group.setLayout(persons_layout)
-        layout.addWidget(persons_group)
-        self.persons_group = persons_group  # Store reference
-        
-        # === PERSONAL OBJECTS CATEGORY ===
-        objects_group = QGroupBox("🎒 Personal Objects")
-        objects_group.setCheckable(True)
-        objects_group.setChecked(True)
-        objects_layout = QVBoxLayout()
-        objects_layout.setSpacing(4)
-        
-        # Individual object checkboxes (COCO classes)
-        self.backpack_check = QCheckBox("Backpack (class 24)")
-        self.backpack_check.setChecked(True)
-        objects_layout.addWidget(self.backpack_check)
-        
-        self.umbrella_check = QCheckBox("Umbrella (class 25)")
-        self.umbrella_check.setChecked(True)
-        objects_layout.addWidget(self.umbrella_check)
-        
-        self.handbag_check = QCheckBox("Handbag (class 26)")
-        self.handbag_check.setChecked(True)
-        objects_layout.addWidget(self.handbag_check)
-        
-        self.tie_check = QCheckBox("Tie (class 27)")
-        self.tie_check.setChecked(True)
-        objects_layout.addWidget(self.tie_check)
-        
-        self.suitcase_check = QCheckBox("Suitcase (class 28)")
-        self.suitcase_check.setChecked(True)
-        objects_layout.addWidget(self.suitcase_check)
-        
-        self.cell_phone_check = QCheckBox("Cell Phone (class 67)")
-        self.cell_phone_check.setChecked(True)
-        objects_layout.addWidget(self.cell_phone_check)
-        
-        objects_group.setLayout(objects_layout)
-        layout.addWidget(objects_group)
-        self.objects_group = objects_group  # Store reference
-        
-        # === ANIMALS CATEGORY ===
-        animals_group = QGroupBox("🐕 Animals")
-        animals_group.setCheckable(True)
-        animals_group.setChecked(False)  # Disabled by default
-        animals_layout = QVBoxLayout()
-        animals_layout.setSpacing(4)
-        
-        self.bird_check = QCheckBox("Bird (class 14)")
-        self.bird_check.setChecked(True)
-        animals_layout.addWidget(self.bird_check)
-        
-        self.cat_check = QCheckBox("Cat (class 15)")
-        self.cat_check.setChecked(True)
-        animals_layout.addWidget(self.cat_check)
-        
-        self.dog_check = QCheckBox("Dog (class 16)")
-        self.dog_check.setChecked(True)
-        animals_layout.addWidget(self.dog_check)
-        
-        self.horse_check = QCheckBox("Horse (class 17)")
-        self.horse_check.setChecked(True)
-        animals_layout.addWidget(self.horse_check)
-        
-        # Other animals in one row
-        other_animals_label = QLabel("Other: sheep, cow, elephant, bear, zebra, giraffe")
-        other_animals_label.setStyleSheet("color: #888; font-size: 10px; margin-left: 20px;")
-        animals_layout.addWidget(other_animals_label)
-        
-        animals_group.setLayout(animals_layout)
-        layout.addWidget(animals_group)
-        self.animals_group = animals_group  # Store reference
-        
-        # === MODEL SETTINGS ===
-        model_group = QGroupBox("⚙️ Model Settings")
-        model_layout = QVBoxLayout()
-        model_layout.setSpacing(8)
-        
-        # Masking engine selection
-        engine_layout = QHBoxLayout()
-        engine_label = QLabel("Masking Engine:")
-        engine_label.setMinimumWidth(120)
-        engine_layout.addWidget(engine_label)
-        self.masking_engine_combo = QComboBox()
-        self.masking_engine_combo.addItem("🚀 YOLO (ONNX) - Fast & Lightweight", "yolo_onnx")
-        self.masking_engine_combo.addItem("🔥 YOLO (PyTorch) - Full Featured", "yolo_pytorch")
-        self.masking_engine_combo.addItem("✨ SAM ViT-B - Best Quality", "sam_vitb")
-        self.masking_engine_combo.addItem("⭐ YOLO+SAM Hybrid - Best Results", "hybrid")
-        self.masking_engine_combo.setCurrentIndex(0)  # Default to ONNX
-        self.masking_engine_combo.setMinimumWidth(300)
-        self.masking_engine_combo.currentIndexChanged.connect(self.on_masking_engine_changed)
-        engine_layout.addWidget(self.masking_engine_combo)
-        engine_layout.addStretch()
-        model_layout.addLayout(engine_layout)
-        
-        # Engine description
-        self.engine_description_label = QLabel("NMS-free inference • 3-4x faster • CUDA accelerated")
-        self.engine_description_label.setStyleSheet("color: #888; font-size: 10px; margin-left: 125px; margin-bottom: 8px;")
-        model_layout.addWidget(self.engine_description_label)
-        
-        # Model size (for YOLO only)
-        self.model_size_container = QWidget()
-        size_layout = QHBoxLayout(self.model_size_container)
-        size_layout.setContentsMargins(0, 0, 0, 0)
-        size_label = QLabel("Model Size:")
-        size_label.setMinimumWidth(120)
-        size_layout.addWidget(size_label)
-        self.model_size_combo = QComboBox()
-        # YOLO26 models
-        self.model_size_combo.addItem("Nano (10MB, ~0.2s) - Fastest", "nano")
-        self.model_size_combo.addItem("Small (40MB, ~0.4s) - Balanced", "small")
-        self.model_size_combo.addItem("Medium (90MB, ~0.7s) - Best Quality", "medium")
-        self.model_size_combo.setCurrentIndex(2)  # Default to 'medium'
-        self.model_size_combo.setMinimumWidth(250)
-        size_layout.addWidget(self.model_size_combo)
-        size_layout.addStretch()
-        model_layout.addWidget(self.model_size_container)
-        
-        # Confidence
-        conf_layout = QHBoxLayout()
-        conf_label = QLabel("Confidence:")
-        conf_label.setMinimumWidth(120)
-        conf_layout.addWidget(conf_label)
-        self.confidence_spin = QDoubleSpinBox()
-        self.confidence_spin.setRange(0.0, 1.0)
-        self.confidence_spin.setValue(0.6)
-        self.confidence_spin.setSingleStep(0.05)
-        self.confidence_spin.setMinimumWidth(80)
-        conf_layout.addWidget(self.confidence_spin)
-        
-        conf_info = QLabel("(0.5-0.7 recommended)")
-        conf_info.setStyleSheet("color: #888;")
-        conf_layout.addWidget(conf_info)
-        conf_layout.addStretch()
-        model_layout.addLayout(conf_layout)
-        
-        model_group.setLayout(model_layout)
-        layout.addWidget(model_group)
-        
-        # === GPU ACCELERATION ===
-        gpu_group = QGroupBox("🚀 GPU Acceleration")
-        gpu_layout = QVBoxLayout()
-        
-        self.use_gpu_check = QCheckBox("Enable GPU Acceleration (CUDA)")
-        self.use_gpu_check.setChecked(True)
-        self.use_gpu_check.setToolTip("Use GPU for faster masking (requires CUDA)")
-        gpu_layout.addWidget(self.use_gpu_check)
-        
-        gpu_info = QLabel("⚡ 3-4x faster with GPU enabled")
-        gpu_info.setStyleSheet("color: #4a9eff; font-size: 10px; margin-left: 20px;")
-        gpu_layout.addWidget(gpu_info)
-        
-        gpu_group.setLayout(gpu_layout)
-        layout.addWidget(gpu_group)
-        
-        layout.addStretch()
-        
-        return tab
+    def _check_spheresfm_status(self):
+        try:
+            from src.premium.sphere_sfm_integration import verify_spheresfm_installation
+            status = verify_spheresfm_installation()
+            if status['installed']:
+                self.spheresfm_status_label.setText(f"  SphereSfM available ({status.get('version', 'Unknown')})")
+                self.spheresfm_status_label.setStyleSheet(f"color: {COLORS['green']}; font-size: 10px; padding-left: 24px;")
+                self.mode_sphere_sfm_radio.setEnabled(True)
+            else:
+                self.spheresfm_status_label.setText(f"  SphereSfM not available: {status.get('error', 'Unknown')}")
+                self.spheresfm_status_label.setStyleSheet(f"color: {COLORS['red']}; font-size: 10px; padding-left: 24px;")
+                self.mode_sphere_sfm_radio.setEnabled(False)
+                self.mode_rig_sfm_radio.setChecked(True)
+        except Exception as e:
+            self.spheresfm_status_label.setText(f"  SphereSfM error: {e}")
+            self.spheresfm_status_label.setStyleSheet(f"color: {COLORS['red']}; font-size: 10px; padding-left: 24px;")
+            self.mode_sphere_sfm_radio.setEnabled(False)
+            self.mode_rig_sfm_radio.setChecked(True)
     
-    def create_log_panel(self) -> QWidget:
-        """Create responsive log output panel (no fixed height)"""
-        
-        panel = QWidget()
-        # Remove fixed height - let splitter control size
-        panel.setMinimumHeight(120)  # Minimum readable height
-        
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
-        
-        layout.addWidget(QLabel("Processing Log:"))
-        
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setFont(QFont("Consolas", 9))
-        # Make log expand to fill available space
-        self.log_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout.addWidget(self.log_text)
-        
-        return panel
-    
+    # ========================================================================
+    # FILE BROWSING
+    # ========================================================================
     def browse_input_file(self):
-        """Browse for input video file"""
         filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Input Video",
-            "",
+            self, "Select Input Video", "",
             "Video Files (*.insv *.mp4 *.mov);;All Files (*.*)"
         )
         if filename:
             self.input_file_edit.setText(filename)
-            # Auto-analyze the file
             self.analyze_video_file()
     
+    def browse_output_dir(self):
+        dirname = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        if dirname:
+            self.output_dir_edit.setText(dirname)
+    
+    def browse_lichtfeld_path(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Lichtfeld Studio", "C:\\Program Files",
+            "Executables (*.exe);;All (*.*)"
+        )
+        if path:
+            self.lichtfeld_path_edit.setText(path)
+    
     def analyze_video_file(self):
-        """Analyze video file and display metadata"""
         from src.extraction import FrameExtractor
-        
         input_file = self.input_file_edit.text()
         if not input_file or not Path(input_file).exists():
             return
@@ -1176,338 +1610,60 @@ License: MIT"""
         info = extractor.get_video_info(input_file)
         
         if info.get('success'):
-            # Display metadata
-            metadata_text = f"""<b>File Type:</b> {info.get('file_type_desc', 'Unknown')}<br>
-<b>Duration:</b> {info.get('duration_formatted', 'N/A')} ({info.get('duration_seconds', 0)} seconds)<br>
-<b>Resolution:</b> {info.get('resolution', 'N/A')}<br>
-<b>FPS:</b> {info.get('fps', 0):.2f}<br>
-<b>Frame Count:</b> {info.get('frame_count', 0):,}<br>
-<b>Camera Model:</b> {info.get('camera_model', 'Unknown')}<br>
-<b>File Size:</b> {info.get('file_size_mb', 0):.2f} MB"""
-            
-            self.file_metadata_label.setText(metadata_text)
-            
-            # Update end time spin with video duration
+            self.file_metadata_label.setText(
+                f"<b>Type:</b> {info.get('file_type_desc', 'Unknown')} | "
+                f"<b>Duration:</b> {info.get('duration_formatted', 'N/A')} | "
+                f"<b>Resolution:</b> {info.get('resolution', 'N/A')} | "
+                f"<b>FPS:</b> {info.get('fps', 0):.2f} | "
+                f"<b>Frames:</b> {info.get('frame_count', 0):,} | "
+                f"<b>Camera:</b> {info.get('camera_model', 'Unknown')} | "
+                f"<b>Size:</b> {info.get('file_size_mb', 0):.1f} MB"
+            )
+            self.file_metadata_label.setStyleSheet(f"""
+                padding: 12px; background: {COLORS['bg_light']};
+                border-radius: 6px; color: {COLORS['text_primary']};
+            """)
             duration = info.get('duration', 0)
             self.end_time_spin.setMaximum(duration)
             self.end_time_spin.setValue(duration)
             
-            # Auto-calculate cubemap face size (input_height / 2)
-            height = info.get('height', 0)
-            if height > 0:
-                auto_face_size = height // 2
-                # Round to nearest 128
-                auto_face_size = ((auto_face_size + 64) // 128) * 128
-                self.cubemap_face_size_spin.setValue(auto_face_size)
-                self.log_message(f"Analyzed: {Path(input_file).name} | Auto-set face size: {auto_face_size}px (height/2)")
-            else:
-                self.log_message(f"Analyzed: {Path(input_file).name}")
+            w = info.get('width', 0)
+            h = info.get('height', 0)
+            if w > 0 and h > 0:
+                tw = ((w * 3 // 4 + 64) // 128) * 128
+                th = ((h * 3 // 4 + 64) // 128) * 128
+                self.cubemap_tile_width_spin.setValue(tw)
+                self.cubemap_tile_height_spin.setValue(th)
+            self.log_message(f"Analyzed: {Path(input_file).name}")
         else:
-            self.file_metadata_label.setText(f"<b>Error:</b> {info.get('error', 'Unknown error')}")
+            self.file_metadata_label.setText(f"Error: {info.get('error', 'Unknown')}")
     
-    def toggle_time_range(self, checked: bool):
-        """Toggle time range controls"""
-        self.start_time_spin.setEnabled(not checked)
-        self.end_time_spin.setEnabled(not checked)
-    
-    def on_extraction_method_changed(self, index: int):
-        """Show/hide SDK-specific controls based on extraction method"""
-        method = self.extraction_method_combo.currentData()
-        is_sdk = method in ['sdk', 'sdk_stitching']
-        
-        # Show/hide entire widget containers (includes labels + combos)
-        self.sdk_quality_widget.setVisible(is_sdk)
-        self.sdk_res_widget.setVisible(is_sdk)
-    
-    def on_split_count_changed(self, value: int):
-        """Update compass when split count changes"""
-        # Compass functionality removed (preview disabled)
-        pass
-    
-    def on_skip_transform_toggled(self, checked: bool):
-        """Handle skip transform checkbox toggle"""
-        # Enable/disable Stage 2 transform controls in tabs
-        self.stage2_camera_group.setEnabled(not checked)
-        self.stage2_output_group.setEnabled(not checked)
-        self.stage2_perspective_params_group.setEnabled(not checked)
-        
-        # Also disable the Run Stage 2 button when skip is enabled
-        self.run_stage2_btn.setEnabled(not checked)
-        
-        if checked:
-            self.log_message("⏩ Direct Masking Mode enabled - Stage 2 will be skipped")
-        else:
-            self.log_message("ℹ️ Direct Masking Mode disabled - Stage 2 transform enabled")
-    
-    def on_stage2_method_changed(self, index: int):
-        """Handle Stage 2 method selection change"""
-        method = self.stage2_method_combo.currentData()
-        
-        # Switch to appropriate tab
-        if method == 'perspective':
-            self.tab_widget.setCurrentIndex(1)  # Perspective tab
-            self.log_message("Stage 2: Perspective Transform (E2P) selected")
-        elif method == 'cubemap':
-            self.tab_widget.setCurrentIndex(2)  # Cubemap tab
-            self.log_message("Stage 2: Cubemap Transform (E2C) selected")
-    
-    def on_cubemap_type_changed(self, index: int):
-        """Handle cubemap type selection change (6-tile vs 8-tile)"""
-        cubemap_type = self.cubemap_type_combo.currentData()
-        
-        if cubemap_type == '6-face':
-            # 6-tile: Hide all controls (90° FOV fixed, separate files only)
-            self.tile_8_controls_widget.setVisible(False)
-            self.log_message("Cubemap: 6-Tile Standard (90° FOV fixed, separate files)")
-        else:  # 8-tile
-            # 8-tile: Show FOV/overlap controls
-            self.tile_8_controls_widget.setVisible(True)
-            self.log_message("Cubemap: 8-Tile Grid (photogrammetry mode)")
-    
-    def on_tile_control_mode_changed(self, index: int):
-        """Handle 8-tile control mode change (FOV vs Overlap)"""
-        mode = self.tile_control_mode_combo.currentData()
-        
-        if mode == 'fov':
-            self.fov_control_widget.setVisible(True)
-            self.overlap_control_widget.setVisible(False)
-            self.on_fov_changed()  # Update overlap calculation
-        else:  # overlap
-            self.fov_control_widget.setVisible(False)
-            self.overlap_control_widget.setVisible(True)
-            self.on_overlap_changed()  # Update FOV calculation
-    
-    def on_fov_changed(self):
-        """Calculate and display overlap when FOV changes (8-tile grid)"""
-        # 8 tiles around 360° = 45° step
-        step_size = 360.0 / 8
-        fov = self.cubemap_fov_spin.value()
-        overlap = fov - step_size
-        overlap_percent = (overlap / step_size) * 100
-        self.fov_overlap_label.setText(f"→ Overlap: ~{overlap_percent:.0f}%")
-    
-    def on_overlap_changed(self):
-        """Calculate and display FOV when overlap changes (8-tile grid)"""
-        # 8 tiles around 360° = 45° step
-        step_size = 360.0 / 8
-        overlap_percent = self.overlap_spin.value()
-        overlap_degrees = (overlap_percent / 100.0) * step_size
-        fov = step_size + overlap_degrees
-        self.overlap_fov_label.setText(f"→ FOV: ~{fov:.0f}°")
-    
-    def on_masking_engine_changed(self, index: int):
-        """Handle masking engine selection change"""
-        engine = self.masking_engine_combo.currentData()
-        
-        if engine == "sam_vitb":
-            # SAM mode: hide model size, show SAM info
-            self.model_size_container.setVisible(False)
-            self.engine_description_label.setText(
-                "Superior segmentation quality • Best edge precision • Automatic mask generation"
-            )
-            self.confidence_spin.setEnabled(False)  # SAM doesn't use confidence threshold
-        elif engine == "hybrid":
-            # Hybrid mode: hide model size, enable confidence
-            self.model_size_container.setVisible(False)
-            self.engine_description_label.setText(
-                "YOLO detection + SAM segmentation • 95-98% quality • Pixel-perfect edges"
-            )
-            self.confidence_spin.setEnabled(True)  # YOLO detection uses confidence
-        else:
-            # YOLO mode: show model size
-            self.model_size_container.setVisible(True)
-            self.confidence_spin.setEnabled(True)
-            
-            if engine == "yolo_onnx":
-                self.engine_description_label.setText(
-                    "NMS-free inference • 3-4x faster • CUDA accelerated"
-                )
-            else:  # yolo_pytorch
-                self.engine_description_label.setText(
-                    "Full-featured YOLO • PyTorch backend • Ultralytics framework"
-                )
-    
-    def browse_output_dir(self):
-        """Browse for output directory"""
-        dirname = QFileDialog.getExistingDirectory(
-            self,
-            "Select Output Directory"
-        )
-        if dirname:
-            self.output_dir_edit.setText(dirname)
-    
-    def run_stage_1_only(self):
-        """Run only Stage 1 (Extraction)"""
-        self.log_message("Running Stage 1 only: Frame Extraction")
-        
-        # Set flag to enable auto-advance after stage completes
-        self._auto_advance_enabled = True
-        
-        # Temporarily disable other stages
-        stage2_state = self.stage2_enable.isChecked()
-        stage3_state = self.stage3_enable.isChecked()
-        
-        self.stage2_enable.setChecked(False)
-        self.stage3_enable.setChecked(False)
-        
-        # Run pipeline
-        self.start_pipeline()
-        
-        # Restore states
-        self.stage2_enable.setChecked(stage2_state)
-        self.stage3_enable.setChecked(stage3_state)
-    
-    def run_stage_2_only(self):
-        """Run only Stage 2 (Split Views) - Auto-discovers input from Stage 1 output"""
-        self.log_message("Running Stage 2 only: Split Perspectives/Cubemap")
-        
-        output_dir = self.output_dir_edit.text()
-        
-        if not output_dir:
-            QMessageBox.warning(self, "Missing Output Dir", "Please configure output directory first")
-            return
-        
-        # Auto-discover Stage 1 output
-        from src.pipeline.batch_orchestrator import PipelineWorker
-        worker = PipelineWorker({})  # Dummy worker just for discovery method
-        
-        stage1_folder = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
-        
-        if not stage1_folder:
-            # Not found - ask user to select manually
-            self.log_message("[!] Stage 1 output folder not found. Selecting manually...")
-            folder = QFileDialog.getExistingDirectory(
-                self,
-                "Select Stage 1 Output Folder (equirectangular images)",
-                str(Path(output_dir))
-            )
-            if not folder:
-                self.log_message("Stage 2 cancelled - no input folder selected")
-                return
-            stage1_folder = Path(folder)
-        else:
-            self.log_message(f"[OK] Auto-discovered Stage 1 output: {stage1_folder}")
-        
-        # Verify folder has images (case-insensitive)
-        images = []
-        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
-            images.extend(stage1_folder.glob(ext))
-        if not images:
-            QMessageBox.warning(self, "No Images Found", f"No images in: {stage1_folder}")
-            return
-        
-        self.log_message(f"[OK] Found {len(images)} equirectangular images")
-        
-        # Set flag to enable auto-advance after stage completes
-        self._auto_advance_enabled = True
-        
-        # Temporarily disable other stages and set input
-        stage1_state = self.stage1_enable.isChecked()
-        stage3_state = self.stage3_enable.isChecked()
-        
-        self.stage1_enable.setChecked(False)
-        self.stage3_enable.setChecked(False)
-        
-        # Set Stage 2 input and run
-        self.pipeline_config['stage2_input_dir'] = str(stage1_folder)
-        self.start_pipeline()
-        
-        # Restore states
-        self.stage1_enable.setChecked(stage1_state)
-        self.stage3_enable.setChecked(stage3_state)
-    
-    def run_stage_3_only(self):
-        """Run only Stage 3 (Masking) - Auto-discovers input from Stage 2 output"""
-        self.log_message("Running Stage 3 only: Generate Masks")
-        
-        output_dir = self.output_dir_edit.text()
-        
-        if not output_dir:
-            QMessageBox.warning(self, "Missing Output Dir", "Please configure output directory first")
-            return
-        
-        # Auto-discover Stage 2 output
-        from src.pipeline.batch_orchestrator import PipelineWorker
-        worker = PipelineWorker({})  # Dummy worker just for discovery method
-        
-        stage2_folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
-        
-        if not stage2_folder:
-            # Not found - ask user to select manually
-            self.log_message("[!] Stage 2 output folder not found. Selecting manually...")
-            folder = QFileDialog.getExistingDirectory(
-                self,
-                "Select Stage 2 Output Folder (perspective images)",
-                str(Path(output_dir))
-            )
-            if not folder:
-                self.log_message("Stage 3 cancelled - no input folder selected")
-                return
-            stage2_folder = Path(folder)
-        else:
-            self.log_message(f"[OK] Auto-discovered Stage 2 output: {stage2_folder}")
-        
-        # Verify folder has images (case-insensitive)
-        images = []
-        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
-            images.extend(stage2_folder.glob(ext))
-        if not images:
-            QMessageBox.warning(self, "No Images Found", f"No images in: {stage2_folder}")
-            return
-        
-        self.log_message(f"[OK] Found {len(images)} perspective images")
-        
-        # Set flag to enable auto-advance (though Stage 3 is final, this keeps consistency)
-        self._auto_advance_enabled = True
-        
-        # Temporarily disable other stages and set input
-        stage1_state = self.stage1_enable.isChecked()
-        stage2_state = self.stage2_enable.isChecked()
-        
-        self.stage1_enable.setChecked(False)
-        self.stage2_enable.setChecked(False)
-        
-        # Set Stage 3 input and run
-        self.pipeline_config['stage3_input_dir'] = str(stage2_folder)
-        self.start_pipeline()
-        
-        # Restore states
-        self.stage1_enable.setChecked(stage1_state)
-        self.stage2_enable.setChecked(stage2_state)
-    
+    # ========================================================================
+    # PIPELINE EXECUTION
+    # ========================================================================
     def start_pipeline(self):
-        """Start the pipeline execution"""
-        
-        # Disable auto-advance for Full Pipeline mode (user clicked "Start Pipeline" button)
-        # Auto-advance is only enabled when running stage-only methods (run_stage_X_only)
         if not hasattr(self, '_auto_advance_enabled') or not self._auto_advance_enabled:
             self._auto_advance_enabled = False
         
-        # Validate inputs
         input_file = self.input_file_edit.text()
         output_dir = self.output_dir_edit.text()
         
         if not input_file:
-            QMessageBox.warning(self, "Input Required", "Please select an input video file.")
+            QMessageBox.warning(self, "Input Required", "Please select an input file.")
             return
-        
         if not output_dir:
             QMessageBox.warning(self, "Output Required", "Please select an output directory.")
             return
-        
         if not Path(input_file).exists():
-            QMessageBox.warning(self, "File Not Found", f"Input file does not exist:\n{input_file}")
+            QMessageBox.warning(self, "Not Found", f"Input file not found:\n{input_file}")
             return
         
-        # Get Stage 2 method
         stage2_method = self.stage2_method_combo.currentData()
         
-        # Get skip intermediate setting from settings manager
         from src.config.settings import get_settings
         settings = get_settings()
         skip_intermediate = settings.get_skip_intermediate_save()
         
-        # Build configuration
         self.pipeline_config = {
             'input_file': input_file,
             'output_dir': output_dir,
@@ -1515,9 +1671,10 @@ License: MIT"""
             'skip_transform': self.skip_transform_check.isChecked(),
             'enable_stage2': self.stage2_enable.isChecked() and not self.skip_transform_check.isChecked(),
             'enable_stage3': self.stage3_enable.isChecked(),
-            'skip_intermediate_save': skip_intermediate,  # Performance: Use temp folder for Stage 1
-            
-            # Stage 1
+            'use_rig_sfm': self.stage4_enable.isChecked() and self.use_rig_sfm_check.isChecked(),
+            'train_lighting': self.stage5_enable.isChecked() and self.train_lichtfeld_check.isChecked(),
+            'lichtfeld_path': self.lichtfeld_path_edit.text() or None,
+            'skip_intermediate_save': skip_intermediate,
             'fps': self.fps_spin.value(),
             'extraction_method': self.extraction_method_combo.currentData(),
             'start_time': 0.0 if self.full_video_check.isChecked() else self.start_time_spin.value(),
@@ -1525,94 +1682,61 @@ License: MIT"""
             'sdk_quality': self.sdk_quality_combo.currentData(),
             'sdk_resolution': self.sdk_resolution_combo.currentData(),
             'output_format': self.output_format_combo.currentData(),
-            
-            # Stage 2 - Common settings
             'transform_type': stage2_method,
-            'camera_config': {
-                'cameras': self._generate_camera_positions()
-            },
+            'camera_config': {'cameras': self._generate_camera_positions()},
         }
         
-        # Add Stage 2 method-specific parameters
+        # Stage 2 method-specific params
         if stage2_method == 'perspective':
+            camera_groups = []
+            for gd in self.camera_group_widgets:
+                camera_groups.append({
+                    'camera_count': gd['camera_count'].value(),
+                    'pitch': gd['pitch'].value(),
+                    'fov': gd['fov'].value()
+                })
             self.pipeline_config.update({
                 'output_width': self.stage2_width_spin.value(),
                 'output_height': self.stage2_height_spin.value(),
                 'stage2_format': self.stage2_format_combo.currentData(),
-                'perspective_params': {
-                    'pitch_offset': self.pitch_offset_spin.value(),
-                    'roll_offset': self.roll_offset_spin.value()
-                }
+                'perspective_params': {'camera_groups': camera_groups}
             })
         elif stage2_method == 'cubemap':
-            # Get face/tile size from spinner
-            face_size = self.cubemap_face_size_spin.value()
-            cubemap_type = self.cubemap_type_combo.currentData()
-            
-            # For 8-tile, get FOV and overlap based on control mode
-            if cubemap_type == '8-tile':
-                control_mode = self.tile_control_mode_combo.currentData()
-                if control_mode == 'fov':
-                    fov = self.cubemap_fov_spin.value()
-                    step_size = 360.0 / 8
-                    overlap_percent = ((fov - step_size) / step_size) * 100
-                else:  # overlap
-                    overlap_percent = self.overlap_spin.value()
-                    step_size = 360.0 / 8
-                    fov = step_size + ((overlap_percent / 100.0) * step_size)
-            else:
-                # 6-tile: Fixed 90° FOV, no overlap
-                fov = 90
-                overlap_percent = 0
-            
+            tw = self.cubemap_tile_width_spin.value()
+            th = self.cubemap_tile_height_spin.value()
+            ct = self.cubemap_type_combo.currentData()
             self.pipeline_config.update({
-                'output_width': face_size,
-                'output_height': face_size,
+                'output_width': tw,
+                'output_height': th,
                 'stage2_format': self.cubemap_format_combo.currentData(),
                 'cubemap_params': {
-                    'cubemap_type': cubemap_type,  # '6-face' or '8-tile'
-                    'face_size': face_size,
-                    'overlap_percent': overlap_percent,
-                    'fov': fov,
-                    'layout': 'separate'  # Always separate files for both modes
+                    'cubemap_type': ct, 'tile_width': tw, 'tile_height': th,
+                    'fov': 90, 'layout': 'separate'
                 }
             })
         
-        # Stage 3 (if enabled)
+        # Stage 3 masking classes
         if self.stage3_enable.isChecked():
-            # Build list of enabled person classes
-            person_classes = []
-            if self.persons_group.isChecked() and self.person_check.isChecked():
-                person_classes.append(0)  # person
+            person_classes = [0] if self.persons_group.isChecked() and self.person_check.isChecked() else []
             
-            # Build list of enabled personal object classes
             object_classes = []
             if self.objects_group.isChecked():
-                if self.backpack_check.isChecked():
-                    object_classes.append(24)
-                if self.umbrella_check.isChecked():
-                    object_classes.append(25)
-                if self.handbag_check.isChecked():
-                    object_classes.append(26)
-                if self.tie_check.isChecked():
-                    object_classes.append(27)
-                if self.suitcase_check.isChecked():
-                    object_classes.append(28)
-                if self.cell_phone_check.isChecked():
-                    object_classes.append(67)
+                for chk, cls_id in [
+                    (self.backpack_check, 24), (self.umbrella_check, 25),
+                    (self.handbag_check, 26), (self.tie_check, 27),
+                    (self.suitcase_check, 28), (self.cell_phone_check, 67)
+                ]:
+                    if chk.isChecked():
+                        object_classes.append(cls_id)
             
-            # Build list of enabled animal classes
             animal_classes = []
             if self.animals_group.isChecked():
-                if self.bird_check.isChecked():
-                    animal_classes.append(14)
-                if self.cat_check.isChecked():
-                    animal_classes.append(15)
-                if self.dog_check.isChecked():
-                    animal_classes.append(16)
-                if self.horse_check.isChecked():
-                    animal_classes.append(17)
-                # Add remaining animals (sheep through giraffe)
+                for chk, cls_id in [
+                    (self.bird_check, 14), (self.cat_check, 15),
+                    (self.dog_check, 16), (self.horse_check, 17)
+                ]:
+                    if chk.isChecked():
+                        animal_classes.append(cls_id)
                 animal_classes.extend([18, 19, 20, 21, 22, 23])
             
             self.pipeline_config.update({
@@ -1625,7 +1749,6 @@ License: MIT"""
                     'personal_objects': len(object_classes) > 0,
                     'animals': len(animal_classes) > 0
                 },
-                # Pass specific class IDs for fine-grained control
                 'masking_classes': {
                     'persons': person_classes,
                     'personal_objects': object_classes,
@@ -1633,18 +1756,26 @@ License: MIT"""
                 }
             })
         
-        # Disable start button
+        # Stage 4 config
+        if self.stage4_enable.isChecked():
+            self.pipeline_config.update({
+                'alignment_mode': self._get_alignment_mode(),
+                'use_gpu_colmap': self.use_gpu_colmap_check.isChecked(),
+                'colmap_quality': self.colmap_quality_combo.currentIndex(),
+                'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
+                'export_include_masks': self.export_include_masks_check.isChecked(),
+            })
+        
+        # UI state
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.pause_button.setEnabled(True)
         self._is_paused = False
-        self.pause_button.setText("⏸ Pause")
+        self.pause_button.setText("  Pause")
         
-        # Clear log
         self.log_text.clear()
         self.log_message("Starting pipeline...")
         
-        # Start pipeline
         self.orchestrator.run_pipeline(
             config=self.pipeline_config,
             progress_callback=self.on_progress,
@@ -1654,7 +1785,6 @@ License: MIT"""
         )
     
     def stop_pipeline(self):
-        """Stop the pipeline execution"""
         self.orchestrator.cancel()
         self.log_message("Pipeline stopped by user")
         self.start_button.setEnabled(True)
@@ -1662,296 +1792,460 @@ License: MIT"""
         self.pause_button.setEnabled(False)
     
     def toggle_pause(self):
-        """Toggle pause/resume pipeline"""
-        if hasattr(self, '_is_paused') and self._is_paused:
-            # Resume
+        if self._is_paused:
             self.orchestrator.resume()
-            self.pause_button.setText("⏸ Pause")
+            self.pause_button.setText("  Pause")
             self.log_message("Pipeline resumed")
             self._is_paused = False
         else:
-            # Pause
             self.orchestrator.pause()
-            self.pause_button.setText("▶ Resume")
+            self.pause_button.setText("  Resume")
             self.log_message("Pipeline paused")
             self._is_paused = True
     
-    def on_progress(self, current: int, total: int, message: str):
-        """Handle progress updates"""
-        if total > 0:
-            progress = int((current / total) * 100)
-            self.progress_bar.setValue(progress)
+    # ========================================================================
+    # STAGE-ONLY RUNNERS
+    # ========================================================================
+    def run_stage_1_only(self):
+        self.log_message("Running Stage 1 only")
+        self._auto_advance_enabled = True
+        s2, s3 = self.stage2_enable.isChecked(), self.stage3_enable.isChecked()
+        self.stage2_enable.setChecked(False)
+        self.stage3_enable.setChecked(False)
+        self.start_pipeline()
+        self.stage2_enable.setChecked(s2)
+        self.stage3_enable.setChecked(s3)
+    
+    def run_stage_2_only(self):
+        self.log_message("Running Stage 2 only")
+        output_dir = self.output_dir_edit.text()
+        if not output_dir:
+            QMessageBox.warning(self, "Missing", "Configure output directory first")
+            return
         
-        self.status_label.setText(message)
+        from src.pipeline.batch_orchestrator import PipelineWorker
+        worker = PipelineWorker({})
+        folder = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
+        if not folder:
+            folder_str = QFileDialog.getExistingDirectory(self, "Select Stage 1 Output", str(Path(output_dir)))
+            if not folder_str:
+                return
+            folder = Path(folder_str)
+        
+        images = []
+        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
+            images.extend(folder.glob(ext))
+        if not images:
+            QMessageBox.warning(self, "No Images", f"No images in: {folder}")
+            return
+        
+        self.log_message(f"Found {len(images)} equirectangular images")
+        self._auto_advance_enabled = True
+        s1, s3 = self.stage1_enable.isChecked(), self.stage3_enable.isChecked()
+        self.stage1_enable.setChecked(False)
+        self.stage3_enable.setChecked(False)
+        self.pipeline_config['stage2_input_dir'] = str(folder)
+        self.start_pipeline()
+        self.stage1_enable.setChecked(s1)
+        self.stage3_enable.setChecked(s3)
+    
+    def run_stage_3_only(self):
+        self.log_message("Running Stage 3 only")
+        output_dir = self.output_dir_edit.text()
+        if not output_dir:
+            QMessageBox.warning(self, "Missing", "Configure output directory first")
+            return
+        
+        from src.pipeline.batch_orchestrator import PipelineWorker
+        worker = PipelineWorker({})
+        folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
+        if not folder:
+            folder_str = QFileDialog.getExistingDirectory(self, "Select Stage 2 Output", str(Path(output_dir)))
+            if not folder_str:
+                return
+            folder = Path(folder_str)
+        
+        images = []
+        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
+            images.extend(folder.glob(ext))
+        if not images:
+            QMessageBox.warning(self, "No Images", f"No images in: {folder}")
+            return
+        
+        self.log_message(f"Found {len(images)} perspective images")
+        self._auto_advance_enabled = True
+        s1, s2 = self.stage1_enable.isChecked(), self.stage2_enable.isChecked()
+        self.stage1_enable.setChecked(False)
+        self.stage2_enable.setChecked(False)
+        self.pipeline_config['stage3_input_dir'] = str(folder)
+        self.start_pipeline()
+        self.stage1_enable.setChecked(s1)
+        self.stage2_enable.setChecked(s2)
+    
+    def run_stage_4_only(self):
+        self.log_message("Running Stage 4 only")
+        output_dir = self.output_dir_edit.text()
+        if not output_dir:
+            QMessageBox.warning(self, "Missing", "Configure output directory first")
+            return
+        
+        input_dir = Path(output_dir) / 'stage1_frames'
+        if not input_dir.exists():
+            from src.pipeline.batch_orchestrator import PipelineWorker
+            worker = PipelineWorker({})
+            input_dir = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
+        
+        if not input_dir or not input_dir.exists():
+            folder = QFileDialog.getExistingDirectory(self, "Select Equirect Frames", str(Path(output_dir)))
+            if not folder:
+                return
+            input_dir = Path(folder)
+        
+        self.log_message(f"Using input: {input_dir}")
+        self._auto_advance_enabled = True
+        orig = self.stage4_enable.isChecked()
+        self.stage4_enable.setChecked(True)
+        self.start_pipeline()
+        self.stage4_enable.setChecked(orig)
+    
+    def run_stage_5_only(self):
+        self.log_message("Running Stage 5 only")
+        output_dir = self.output_dir_edit.text()
+        if not output_dir:
+            QMessageBox.warning(self, "Missing", "Configure output directory first")
+            return
+        orig = self.stage5_enable.isChecked()
+        self.stage5_enable.setChecked(True)
+        self.start_pipeline()
+        self.stage5_enable.setChecked(orig)
+    
+    # ========================================================================
+    # CALLBACKS
+    # ========================================================================
+    def on_progress(self, current: int, total: int, message: str):
+        if total > 0:
+            self.progress_bar.setValue(int((current / total) * 100))
+        self.status_label.setText(message[:40])
         self.log_message(message)
     
     def on_stage_complete(self, stage_number: int, results: dict):
-        """Handle stage completion and auto-advance to next stage"""
         if results.get('success'):
-            self.log_message(f"✓ Stage {stage_number} complete")
-            
-            # Auto-advance ONLY if running in stage-only mode (not Full Pipeline)
-            # Full Pipeline runs all stages sequentially without needing auto-advance
-            if hasattr(self, '_auto_advance_enabled') and self._auto_advance_enabled:
-                if stage_number == 1 and self.stage2_enable.isChecked():
-                    self.log_message("→ Auto-advancing to Stage 2...")
-                    QTimer.singleShot(500, self.run_stage_2_only)
-                
-                elif stage_number == 2 and self.stage3_enable.isChecked():
-                    self.log_message("→ Auto-advancing to Stage 3...")
-                    QTimer.singleShot(500, self.run_stage_3_only)
-                
-                elif stage_number == 3:
-                    self.log_message("✓ All stages complete!")
-                    self._auto_advance_enabled = False  # Reset flag
-        
+            self.log_message(f"[OK] Stage {stage_number} complete")
+            if self._auto_advance_enabled:
+                next_map = {
+                    1: (self.stage2_enable, self.run_stage_2_only),
+                    2: (self.stage3_enable, self.run_stage_3_only),
+                    3: (self.stage4_enable, self.run_stage_4_only),
+                    4: (self.stage5_enable, self.run_stage_5_only),
+                }
+                if stage_number in next_map:
+                    check, runner = next_map[stage_number]
+                    if check.isChecked():
+                        self.log_message(f"[OK] Auto-advancing to Stage {stage_number + 1}...")
+                        QTimer.singleShot(500, runner)
+                    else:
+                        self.log_message("[OK] All requested stages complete!")
+                        self._auto_advance_enabled = False
+                else:
+                    self.log_message("[OK] All requested stages complete!")
+                    self._auto_advance_enabled = False
         else:
-            self.log_message(f"✗ Stage {stage_number} failed: {results.get('error')}")
-            self._auto_advance_enabled = False  # Reset flag on error
-            # Stop auto-advance on error
+            self.log_message(f"[FAIL] Stage {stage_number}: {results.get('error')}")
+            self._auto_advance_enabled = False
     
     def on_finished(self, results: dict):
-        """Handle pipeline completion"""
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.pause_button.setEnabled(False)
         self.progress_bar.setValue(100)
-        
         if results.get('success'):
-            self.log_message("✓ Pipeline complete!")
+            self.log_message("Pipeline complete!")
             QMessageBox.information(self, "Success", "Pipeline completed successfully!")
         else:
-            self.log_message(f"✗ Pipeline failed: {results.get('error')}")
-            QMessageBox.warning(self, "Pipeline Failed", f"Pipeline failed:\n{results.get('error')}")
+            self.log_message(f"Pipeline failed: {results.get('error')}")
+            QMessageBox.warning(self, "Failed", f"Pipeline failed:\n{results.get('error')}")
     
     def on_error(self, error_message: str):
-        """Handle pipeline errors"""
-        self.log_message(f"✗ Error: {error_message}")
+        self.log_message(f"Error: {error_message}")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.pause_button.setEnabled(False)
     
     def log_message(self, message: str):
-        """Add message to log panel"""
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.append(f"[{timestamp}] {message}")
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_text.append(f"[{ts}] {message}")
     
-    def _generate_camera_positions(self) -> list:
-        """Generate camera positions based on split count and transform type
-        
-        Returns camera positions for perspective mode.
-        For cubemap mode, this is not used (cubemaps have fixed face positions).
-        """
-        # Get Stage 2 method
-        stage2_method = self.stage2_method_combo.currentData()
-        
-        # Use appropriate widgets based on method
-        if stage2_method == 'perspective':
-            split_count = self.split_count_spin.value()
-            fov = self.fov_spin.value()
-            pitch_offset = self.pitch_offset_spin.value()
-            roll_offset = self.roll_offset_spin.value()
-        elif stage2_method == 'cubemap':
-            # For cubemaps, camera positions are generated by the E2C transform
-            # Return empty list - pipeline will handle cubemap-specific logic
-            return []
-        else:
-            # Default fallback
-            split_count = 8
-            fov = 110
-            pitch_offset = 0
-            roll_offset = 0
-        
-        cameras = []
-        for i in range(split_count):
-            yaw = (360 / split_count) * i
-            cameras.append({
-                'yaw': yaw,
-                'pitch': pitch_offset,  # Apply user-defined pitch offset
-                'roll': roll_offset,    # Apply user-defined roll offset
-                'fov': fov
-            })
-        
-        return cameras
-    
-    def apply_dark_theme(self):
-        """Apply dark theme stylesheet with improved 4K scaling"""
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #2b2b2b;
-                color: #e0e0e0;
-                font-size: 11px;
-            }
-            QWidget {
-                background-color: #2b2b2b;
-                color: #e0e0e0;
-                font-size: 11px;
-            }
-            QGroupBox {
-                border: 1px solid #555555;
-                border-radius: 6px;
-                margin-top: 12px;
-                padding: 12px;
-                padding-top: 16px;
+    # ========================================================================
+    # THEME
+    # ========================================================================
+    def apply_theme(self):
+        self.setStyleSheet(f"""
+            /* === GLOBAL === */
+            QMainWindow {{
+                background: {COLORS['bg_dark']};
+                color: {COLORS['text_primary']};
+            }}
+            QWidget {{
+                background: {COLORS['bg_dark']};
+                color: {COLORS['text_primary']};
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 12px;
+            }}
+            
+            /* === SIDEBAR === */
+            QWidget#sidebar {{
+                background: {COLORS['sidebar_bg']};
+                border-right: 1px solid {COLORS['border']};
+            }}
+            QWidget#sidebar QPushButton {{
+                background: transparent;
+                border: none;
+                border-radius: 0;
+                text-align: left;
+                padding: 12px 16px;
+                color: {COLORS['text_secondary']};
+                font-size: 12px;
+            }}
+            QWidget#sidebar QPushButton:hover {{
+                background: {COLORS['sidebar_hover']};
+                color: {COLORS['text_primary']};
+            }}
+            QWidget#sidebar QPushButton:checked {{
+                background: {COLORS['sidebar_active']};
+                color: {COLORS['accent']};
+                border-left: 3px solid {COLORS['accent']};
                 font-weight: bold;
+            }}
+            
+            /* === CONTROL BAR === */
+            QWidget#controlBar {{
+                background: {COLORS['bg_medium']};
+                border-bottom: 1px solid {COLORS['border']};
+            }}
+            
+            /* === CARDS === */
+            QFrame#card {{
+                background: {COLORS['bg_medium']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 8px;
+            }}
+            
+            /* === INPUT FIELDS === */
+            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+                background: {COLORS['bg_input']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: {COLORS['text_primary']};
                 font-size: 12px;
-            }
-            QGroupBox::title {
-                color: #e0e0e0;
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
+                min-height: 20px;
+            }}
+            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
+                border: 1px solid {COLORS['accent']};
+            }}
+            QComboBox {{
+                min-width: 120px;
+            }}
+            QComboBox::drop-down {{
+                width: 28px;
+                border: none;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {COLORS['bg_input']};
+                border: 1px solid {COLORS['border']};
+                color: {COLORS['text_primary']};
+                selection-background-color: {COLORS['accent']};
+            }}
+            
+            /* === BUTTONS === */
+            QPushButton {{
+                background: {COLORS['bg_light']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 6px;
+                padding: 8px 16px;
+                color: {COLORS['text_primary']};
                 font-size: 12px;
-            }
-            QLabel {
+            }}
+            QPushButton:hover {{
+                background: {COLORS['accent']};
+                border-color: {COLORS['accent']};
+            }}
+            QPushButton:pressed {{
+                background: {COLORS['accent_dark']};
+            }}
+            QPushButton:disabled {{
+                background: {COLORS['bg_input']};
+                color: {COLORS['text_muted']};
+            }}
+            
+            /* ACTION BUTTONS */
+            QPushButton#startButton {{
+                background: {COLORS['green']};
+                border: none;
+                font-weight: bold;
+                font-size: 13px;
+                color: #fff;
+                border-radius: 8px;
+            }}
+            QPushButton#startButton:hover {{
+                background: {COLORS['green_hover']};
+            }}
+            QPushButton#startButton:pressed {{
+                background: {COLORS['green_dark']};
+            }}
+            QPushButton#startButton:disabled {{
+                background: #3d5a4a;
+                color: #888;
+            }}
+            QPushButton#pauseButton {{
+                background: {COLORS['yellow']};
+                border: none;
+                font-weight: bold;
+                color: #1a1a2e;
+                border-radius: 8px;
+            }}
+            QPushButton#pauseButton:hover {{
+                background: {COLORS['yellow_hover']};
+            }}
+            QPushButton#stopButton {{
+                background: {COLORS['red']};
+                border: none;
+                font-weight: bold;
+                color: #fff;
+                border-radius: 8px;
+            }}
+            QPushButton#stopButton:hover {{
+                background: {COLORS['red_hover']};
+            }}
+            QPushButton#stopButton:pressed {{
+                background: {COLORS['red_dark']};
+            }}
+            
+            /* === PROGRESS BAR === */
+            QProgressBar {{
+                border: 1px solid {COLORS['border']};
+                border-radius: 6px;
+                background: {COLORS['bg_input']};
+                text-align: center;
+                color: {COLORS['text_primary']};
                 font-size: 11px;
-                padding: 2px;
-            }
-            QCheckBox {
-                font-size: 11px;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {COLORS['accent']}, stop:1 {COLORS['green']});
+                border-radius: 5px;
+            }}
+            
+            /* === CHECKBOXES & RADIOS === */
+            QCheckBox, QRadioButton {{
                 spacing: 8px;
-                padding: 4px;
-            }
-            QCheckBox::indicator {
+                padding: 4px 0;
+                font-size: 12px;
+            }}
+            QCheckBox::indicator, QRadioButton::indicator {{
                 width: 18px;
                 height: 18px;
-            }
-            QPushButton {
-                background-color: #3c3c3c;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                padding: 10px 20px;
-                color: #e0e0e0;
-                font-size: 12px;
-                min-height: 24px;
-            }
-            QPushButton:hover {
-                background-color: #4a9eff;
-            }
-            QPushButton:pressed {
-                background-color: #3a7fcf;
-            }
-            QPushButton:disabled {
-                background-color: #666666;
-                color: #a0a0a0;
-            }
-            QPushButton#startButton {
-                background-color: #28a745;
-                border: 2px solid #1e7e34;
-                font-weight: bold;
-                font-size: 14px;
-                color: white;
-                min-height: 36px;
-            }
-            QPushButton#startButton:hover {
-                background-color: #34ce57;
-                border: 2px solid #28a745;
-            }
-            QPushButton#startButton:pressed {
-                background-color: #1e7e34;
-            }
-            QPushButton#pauseButton {
-                background-color: #ffc107;
-                border: 2px solid #e0a800;
-                font-weight: bold;
-                font-size: 13px;
-                color: #212529;
-                min-height: 36px;
-            }
-            QPushButton#pauseButton:hover {
-                background-color: #ffca2c;
-                border: 2px solid #ffc107;
-            }
-            QPushButton#pauseButton:pressed {
-                background-color: #e0a800;
-            }
-            QPushButton#stopButton {
-                background-color: #dc3545;
-                border: 2px solid #bd2130;
-                font-weight: bold;
-                font-size: 13px;
-                color: white;
-                min-height: 36px;
-            }
-            QPushButton#stopButton:hover {
-                background-color: #e4606d;
-                border: 2px solid #dc3545;
-            }
-            QPushButton#stopButton:pressed {
-                background-color: #bd2130;
-            }
-            QWidget#controlPanel {
-                background-color: #3c3c3c;
-                border-bottom: 1px solid #555555;
-            }
-            QProgressBar {
-                border: 1px solid #555555;
-                border-radius: 4px;
-                background-color: #2b2b2b;
-                text-align: center;
-                color: #e0e0e0;
-                font-size: 12px;
-                min-height: 24px;
-            }
-            QProgressBar::chunk {
-                background-color: #4a9eff;
-            }
-            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-                background-color: #3c3c3c;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                padding: 6px 8px;
-                color: #e0e0e0;
-                font-size: 11px;
-                min-height: 24px;
-            }
-            QComboBox {
-                min-width: 120px;
-            }
-            QComboBox::drop-down {
-                width: 24px;
-            }
-            QSpinBox::up-button, QSpinBox::down-button,
-            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
-                width: 20px;
-            }
-            QTextEdit {
-                background-color: #1e1e1e;
-                border: 1px solid #555555;
-                color: #e0e0e0;
-                font-family: Consolas, Monaco, monospace;
-                font-size: 10px;
-            }
-            QTabWidget::pane {
-                border: 1px solid #555555;
-                background-color: #2b2b2b;
-            }
-            QTabBar::tab {
-                background-color: #3c3c3c;
-                border: 1px solid #555555;
-                padding: 10px 20px;
-                color: #e0e0e0;
-                font-size: 12px;
-                min-width: 140px;
-            }
-            QTabBar::tab:selected {
-                background-color: #4a9eff;
-                font-weight: bold;
-            }
-            QScrollArea {
-                border: none;
-            }
-            QScrollBar:vertical {
-                width: 14px;
-                background: #2b2b2b;
-            }
-            QScrollBar::handle:vertical {
-                background: #555555;
-                min-height: 30px;
+            }}
+            
+            /* === LOG === */
+            QTextEdit {{
+                background: #0a0e1a;
+                border: 1px solid {COLORS['border']};
                 border-radius: 6px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #666666;
-            }
+                color: {COLORS['text_primary']};
+                font-family: 'Cascadia Code', 'Consolas', monospace;
+                font-size: 11px;
+                padding: 8px;
+            }}
+            
+            /* === SCROLL AREA === */
+            QScrollArea {{
+                border: none;
+                background: {COLORS['bg_dark']};
+            }}
+            QScrollBar:vertical {{
+                width: 10px;
+                background: {COLORS['bg_dark']};
+            }}
+            QScrollBar::handle:vertical {{
+                background: {COLORS['border_light']};
+                border-radius: 4px;
+                min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {COLORS['text_muted']};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0;
+            }}
+            QScrollBar:horizontal {{
+                height: 10px;
+                background: {COLORS['bg_dark']};
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {COLORS['border_light']};
+                border-radius: 4px;
+                min-width: 30px;
+            }}
+            
+            /* === GROUP BOX === */
+            QGroupBox {{
+                border: none;
+                margin: 0;
+                padding: 0;
+            }}
+            QGroupBox::title {{
+                color: {COLORS['text_primary']};
+            }}
+            
+            /* === SPLITTER === */
+            QSplitter::handle {{
+                background: {COLORS['border']};
+            }}
+            
+            /* === TAB WIDGET (if used) === */
+            QTabWidget::pane {{
+                border: 1px solid {COLORS['border']};
+                background: {COLORS['bg_dark']};
+            }}
+            QTabBar::tab {{
+                background: {COLORS['bg_medium']};
+                border: 1px solid {COLORS['border']};
+                padding: 10px 20px;
+                color: {COLORS['text_secondary']};
+            }}
+            QTabBar::tab:selected {{
+                background: {COLORS['accent']};
+                color: #fff;
+                font-weight: bold;
+            }}
+            
+            /* === MENU BAR === */
+            QMenuBar {{
+                background: {COLORS['sidebar_bg']};
+                color: {COLORS['text_primary']};
+                border-bottom: 1px solid {COLORS['border']};
+                padding: 4px;
+            }}
+            QMenuBar::item:selected {{
+                background: {COLORS['accent']};
+                border-radius: 4px;
+            }}
+            QMenu {{
+                background: {COLORS['bg_medium']};
+                border: 1px solid {COLORS['border']};
+                color: {COLORS['text_primary']};
+                padding: 4px;
+            }}
+            QMenu::item:selected {{
+                background: {COLORS['accent']};
+                border-radius: 4px;
+            }}
+            
+            /* === STATUS BAR === */
+            QStatusBar {{
+                background: {COLORS['sidebar_bg']};
+                color: {COLORS['text_muted']};
+                border-top: 1px solid {COLORS['border']};
+            }}
         """)

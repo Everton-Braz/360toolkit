@@ -10,13 +10,29 @@ import numpy as np
 import cv2
 import math
 import logging
+import sys
 
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
-    torch = None
+# Lazy torch import - avoid module-level import to prevent circular import
+# issues in PyInstaller frozen apps. torch is imported on first use.
+HAS_TORCH = None  # None = not tested yet, True/False = tested
+torch = None
+
+def _get_torch():
+    """Lazy import of torch. Returns (torch_module, has_torch) tuple."""
+    global HAS_TORCH, torch
+    if HAS_TORCH is None:
+        try:
+            import torch as _torch
+            torch = _torch
+            HAS_TORCH = True
+        except Exception:
+            # Clean up any partially-initialized torch
+            for key in list(sys.modules.keys()):
+                if key == 'torch' or key.startswith('torch.'):
+                    del sys.modules[key]
+            torch = None
+            HAS_TORCH = False
+    return torch, HAS_TORCH
 
 logger = logging.getLogger(__name__)
 
@@ -31,18 +47,19 @@ class TorchE2PTransform:
     - Grid caching for repeated camera configurations
     """
     def __init__(self, device=None, use_fp16=True, enable_tf32=True):
-        if not HAS_TORCH:
+        _torch, _has = _get_torch()
+        if not _has:
             raise ImportError("PyTorch is required for TorchE2PTransform")
         
-        self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device if device else ('cuda' if _torch.cuda.is_available() else 'cpu')
         self.cache = {}
         self.use_fp16 = use_fp16 and self.device != 'cpu'
         self.enable_tf32 = enable_tf32 and self.device != 'cpu'
         
         # Enable TF32 for faster matrix operations (RTX 30/40/50 series)
         if self.enable_tf32 and self.device != 'cpu':
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+            _torch.backends.cuda.matmul.allow_tf32 = True
+            _torch.backends.cudnn.allow_tf32 = True
         
         precision_str = "FP16" if self.use_fp16 else "FP32"
         tf32_str = " + TF32" if self.enable_tf32 else ""

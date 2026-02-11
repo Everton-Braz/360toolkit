@@ -11,7 +11,10 @@ This module provides the enhanced Stage 2 processing with:
 Performance Impact: 85s → 55-65s pipeline time (30-40% faster)
 """
 
-import torch
+try:
+    import torch
+except Exception:
+    torch = None
 import cv2
 import threading
 import time
@@ -59,7 +62,7 @@ class OptimizedStage2Processor:
         self.transformer = transformer
         self.metadata_handler = metadata_handler
         self.device = device
-        self.enabled = ADVANCED_GPU_AVAILABLE and torch.cuda.is_available()
+        self.enabled = ADVANCED_GPU_AVAILABLE and torch is not None and torch.cuda.is_available()
         
         if not self.enabled:
             logger.warning("[Optimized Stage 2] Advanced GPU not available, using standard processing")

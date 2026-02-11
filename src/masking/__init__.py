@@ -24,7 +24,7 @@ _SAM_AVAILABLE = False
 try:
     import torch
     _TORCH_AVAILABLE = True
-except ImportError:
+except Exception:
     pass
 
 try:

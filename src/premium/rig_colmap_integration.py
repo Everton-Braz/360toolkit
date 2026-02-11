@@ -1,0 +1,390 @@
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Dict, Optional, Callable, List, Tuple
+import numpy as np
+import cv2
+from PIL import Image
+# pycolmap is imported lazily inside methods to avoid DLL crash at module load
+from scipy.spatial.transform import Rotation
+from tqdm import tqdm
+import json
+import shutil
+
+logger = logging.getLogger(__name__)
+
+def _import_pycolmap():
+    """Lazy import of pycolmap to avoid DLL crash at module-level."""
+    import pycolmap
+    return pycolmap
+
+class RigColmapIntegrator:
+    """
+    Implements the Rig-based SfM approach for 360 videos.
+    Projects 360 images into virtual perspective cameras configured in a rig,
+    then runs COLMAP on these perspective images.
+    """
+
+    def __init__(self, settings):
+        self.settings = settings
+
+    def create_virtual_camera(self, pano_height: int, fov_deg: float = 90) -> pycolmap.Camera:
+        """Create a virtual perspective camera."""
+        image_size = int(pano_height * fov_deg / 180)
+        focal = image_size / (2 * np.tan(np.deg2rad(fov_deg) / 2))
+        return pycolmap.Camera.create(0, "PINHOLE", focal, image_size, image_size)
+
+    def get_virtual_camera_rays(self, camera: pycolmap.Camera) -> np.ndarray:
+        size = (camera.width, camera.height)
+        y, x = np.indices(size).astype(np.float32)
+        xy = np.column_stack([x.ravel(), y.ravel()])
+        # The center of the upper left most pixel has coordinate (0.5, 0.5)
+        xy += 0.5
+        xy_norm = camera.cam_from_img(xy)
+        rays = np.concatenate([xy_norm, np.ones_like(xy_norm[:, :1])], -1)
+        rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
+        return rays
+
+    def spherical_img_from_cam(self, image_size, rays_in_cam: np.ndarray) -> np.ndarray:
+        """Project rays into a 360 panorama (spherical) image.
+        Supports both 2:1 equirectangular and 16:9 SDK-extracted formats."""
+        if rays_in_cam.ndim != 2 or rays_in_cam.shape[1] != 3:
+            raise ValueError(f"{rays_in_cam.shape=} but expected (N,3).")
+        
+        width, height = image_size
+        aspect_ratio = width / height
+        is_equirect = abs(aspect_ratio - 2.0) < 0.01
+        is_sdk_16_9 = abs(aspect_ratio - (16/9)) < 0.01
+        
+        if not (is_equirect or is_sdk_16_9):
+            raise ValueError(f"Unsupported aspect ratio {aspect_ratio:.2f}:1. Need 2:1 or 16:9.")
+        
+        r = rays_in_cam.T
+        yaw = np.arctan2(r[0], r[2])
+        pitch = -np.arctan2(r[1], np.linalg.norm(r[[0, 2]], axis=0))
+        
+        # For 16:9 SDK format, adjust the vertical FOV mapping
+        if is_sdk_16_9:
+            # 16:9 captures less vertical FOV than full 360°
+            # Map pitch range to fit the 16:9 frame
+            u = (1 + yaw / np.pi) / 2
+            v = (1 - pitch * 1.5 / np.pi) / 2  # Adjusted vertical mapping
+        else:
+            # Standard 2:1 equirectangular
+            u = (1 + yaw / np.pi) / 2
+            v = (1 - pitch * 2 / np.pi) / 2
+        
+        return np.stack([u, v], -1) * image_size
+
+    def get_virtual_rotations(self) -> List[np.ndarray]:
+        """Custom virtual camera rotations defined by exact pitch/yaw angles."""
+        pitch_yaw_pairs = [
+            (0, 90), # Reference Pose
+            (33, 0),
+            (-42, 0),
+            (0, 42),
+            (0, -27),
+            (42, 180),
+            (-33, 180),
+            (0, 207),
+            (0, 138),
+        ]
+        cams_from_pano_r = []
+        for pitch_deg, yaw_deg in pitch_yaw_pairs:
+            cam_from_pano_r = Rotation.from_euler(
+                "YX", [yaw_deg, pitch_deg], degrees=True
+            ).as_matrix()
+            cams_from_pano_r.append(cam_from_pano_r)
+        return cams_from_pano_r
+
+    def create_pano_rig_config(
+        self, cams_from_pano_rotation: List[np.ndarray], ref_idx: int = 0
+    ) -> pycolmap.RigConfig:
+        """Create a RigConfig with proper stereo-style outward Z-offsets."""
+        rig_cameras = []
+        baseline = 0.065  # 6.5cm stereo separation
+
+        for idx, cam_from_pano_rotation in enumerate(cams_from_pano_rotation):
+            if idx == ref_idx:
+                cam_from_rig = None
+            else:
+                cam_from_ref_rotation = (
+                    cam_from_pano_rotation @ cams_from_pano_rotation[ref_idx].T
+                )
+
+                # Views 1–5 = right lens, 6–10 = left lens
+                # Note: Assuming 0-4 are right, 5+ are left based on order?
+                # The original code logic was: side = 1 if idx <= 4 else -1
+                side = 1 if idx <= 4 else -1
+                local_offset = np.array([-baseline * side, 0, 0])
+                translation = cam_from_ref_rotation @ local_offset
+
+                cam_from_rig = pycolmap.Rigid3d(
+                    pycolmap.Rotation3d(cam_from_ref_rotation),
+                    translation
+                )
+
+            rig_cameras.append(
+                pycolmap.RigConfigCamera(
+                    ref_sensor=(idx == ref_idx),
+                    image_prefix=f"pano_camera{idx}/",  # Matches subfolder structure
+                    cam_from_rig=cam_from_rig,
+                )
+            )
+        return pycolmap.RigConfig(cameras=rig_cameras)
+
+    def render_perspective_images(
+        self,
+        pano_image_paths: List[Path],
+        output_image_dir: Path,
+        mask_dir: Path,
+        progress_callback: Optional[Callable] = None
+    ) -> pycolmap.RigConfig:
+        
+        cams_from_pano_rotation = self.get_virtual_rotations()
+        ref_idx = 0
+        rig_config = self.create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
+
+        # We assign each pano pixel to the virtual camera with the closest center.
+        cam_centers_in_pano = np.einsum(
+            "nij,i->nj", cams_from_pano_rotation, [0, 0, 1]
+        )
+
+        camera = None
+        pano_size = None
+        rays_in_cam = None
+        
+        total_steps = len(pano_image_paths) * len(cams_from_pano_rotation)
+        current_step = 0
+
+        for pano_path in tqdm(pano_image_paths, desc="Processing Panos"):
+            try:
+                pano_image = Image.open(pano_path)
+            except Exception as e:
+                logger.warning(f"Skipping file {pano_path}: {e}")
+                continue
+            
+            # Preserve EXIF / GPS if useful
+            pano_exif = pano_image.getexif()
+            pano_array = np.asarray(pano_image)
+            
+            # Simple GPS transfer logic if needed
+            gpsonly_exif = Image.Exif()
+            # This part depends on if PIL.ExifTags is imported and available
+            # We can skip complex EXIF logic for now or implement as needed
+            
+            pano_height, pano_width, *_ = pano_array.shape
+            
+            # Check if it's a valid format (2:1 equirectangular or 16:9 from SDK)
+            aspect_ratio = pano_width / pano_height
+            is_equirectangular = abs(aspect_ratio - 2.0) < 0.01  # 2:1 aspect
+            is_sdk_format = abs(aspect_ratio - (16/9)) < 0.01    # 16:9 aspect (3840x2160)
+            
+            if not (is_equirectangular or is_sdk_format):
+                logger.warning(f"Image {pano_path.name} has unsupported aspect ratio {aspect_ratio:.2f}:1. Skipping.")
+                continue
+
+            if camera is None:
+                camera = self.create_virtual_camera(pano_height)
+                # Assign camera to rig
+                for rig_camera in rig_config.cameras:
+                    rig_camera.camera = camera
+                
+                pano_size = (pano_width, pano_height)
+                rays_in_cam = self.get_virtual_camera_rays(camera)
+            else:
+                 if (pano_width, pano_height) != pano_size:
+                     logger.warning(f"Variable pano sizes not supported. Skipping {pano_path.name}")
+                     continue
+
+            for cam_idx, cam_from_pano_r in enumerate(cams_from_pano_rotation):
+                if progress_callback:
+                    progress_callback(f"Rendering camera {cam_idx+1}/{len(cams_from_pano_rotation)} for {pano_path.name}")
+
+                rays_in_pano = rays_in_cam @ cam_from_pano_r
+                xy_in_pano = self.spherical_img_from_cam(pano_size, rays_in_pano)
+                
+                xy_in_pano = xy_in_pano.reshape(
+                    camera.width, camera.height, 2
+                ).astype(np.float32)
+                xy_in_pano -= 0.5
+                
+                image_remapped = cv2.remap(
+                    pano_array,
+                    *np.moveaxis(xy_in_pano, -1, 0),
+                    cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_WRAP,
+                )
+                
+                # Mask generation
+                closest_camera = np.argmax(rays_in_pano @ cam_centers_in_pano.T, -1)
+                mask = (
+                    ((closest_camera == cam_idx) * 255)
+                    .astype(np.uint8)
+                    .reshape(camera.width, camera.height)
+                )
+                
+                # SUBFOLDER structure for COLMAP PER_FOLDER camera mode
+                # Naming: pano_camera{idx}/{pano}.png (matches Kevin's approach)
+                # Each subfolder gets unique camera ID matching rig camera definition
+                pano_stem = pano_path.stem  # e.g., "0" or "frame_001"
+                cam_folder = output_image_dir / f"pano_camera{cam_idx}"
+                cam_folder.mkdir(parents=True, exist_ok=True)
+                image_name = f"{pano_stem}.png"
+                
+                # Save to subfolder
+                target_path = cam_folder / image_name
+                Image.fromarray(image_remapped).save(target_path)
+                
+                # Masks - matching subfolder structure
+                mask_cam_folder = mask_dir / f"pano_camera{cam_idx}"
+                mask_cam_folder.mkdir(parents=True, exist_ok=True)
+                mask_path = mask_cam_folder / image_name
+                Image.fromarray(mask).save(mask_path)
+                
+                current_step += 1
+
+        return rig_config
+
+    def run_alignment(
+        self,
+        frames_dir: Path,
+        masks_dir: Optional[Path], # Unused for input masking in this flow, but kept for signature
+        output_dir: Path,
+        progress_callback: Optional[Callable] = None
+    ) -> Dict:
+        
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Temp/working dirs for perspectives
+        perspectives_dir = output_dir / "images"
+        perspectives_mask_dir = output_dir / "masks"
+        database_path = output_dir / "database.db"
+        sparse_path = output_dir / "sparse"
+        
+        perspectives_dir.mkdir(exist_ok=True)
+        perspectives_mask_dir.mkdir(exist_ok=True)
+        sparse_path.mkdir(exist_ok=True)
+        
+        if database_path.exists():
+            database_path.unlink()
+
+        # Gather inputs
+        pano_files = sorted(list(frames_dir.glob("*.jpg")) + list(frames_dir.glob("*.png")))
+        if not pano_files:
+            return {'success': False, 'error': 'No input images found'}
+        
+        # Quick check first file for valid format
+        try:
+            test_img = Image.open(pano_files[0])
+            test_w, test_h = test_img.size
+            test_aspect = test_w / test_h
+            if abs(test_aspect - 2.0) > 0.1 and abs(test_aspect - (16/9)) > 0.1:
+                return {
+                    'success': False, 
+                    'error': f'Invalid frame format: {test_w}x{test_h} (aspect {test_aspect:.2f}:1). '\
+                             f'Rig SfM requires 2:1 equirectangular or 16:9 panoramic frames. '\
+                             f'Please re-extract frames using SDK with equirectangular output format.'\
+                }
+        except Exception as e:
+            return {'success': False, 'error': f'Could not read test frame: {e}'}
+
+        logger.info(f"Generating perspective views for {len(pano_files)} frames...")
+        if progress_callback:
+            progress_callback("Generating virtual perspective views...")
+
+        try:
+            # 1. Render Perspectives
+            rig_config = self.render_perspective_images(
+                pano_files, 
+                perspectives_dir, 
+                perspectives_mask_dir, 
+                progress_callback
+            )
+            
+            # 2. Feature Extraction
+            if progress_callback:
+                progress_callback("Extracting features (COLMAP)...")
+            
+            pycolmap.set_random_seed(0)
+            
+            extraction_options = pycolmap.SiftExtractionOptions()
+            # Hardware acceleration - check pycolmap version for device parameter
+            if self.settings.use_gpu:
+                try:
+                    # Try new pycolmap API with Device enum
+                    device = pycolmap.Device.cuda
+                except AttributeError:
+                    # Fallback for older pycolmap versions
+                    device = None
+            else:
+                try:
+                    device = pycolmap.Device.cpu
+                except AttributeError:
+                    device = None
+            
+            # Feature extraction
+            # Use PER_FOLDER camera mode - each subfolder gets ONE shared camera ID
+            # This matches Kevin's 360-Video-To-3DGS approach
+            pycolmap.extract_features(
+                str(database_path),
+                str(perspectives_dir),
+                reader_options={"mask_path": str(perspectives_mask_dir)},
+                camera_mode=pycolmap.CameraMode.PER_FOLDER
+            )
+            
+            # 3. Apply Rig Config
+            # pycolmap.Database has no constructor args - use open() static method
+            db = pycolmap.Database.open(str(database_path))
+            pycolmap.apply_rig_config([rig_config], db)
+            db.close()
+                
+            # 4. Matching
+            if progress_callback:
+                progress_callback("Matching features...")
+            
+            pycolmap.match_sequential(
+                str(database_path),
+                pairing_options=pycolmap.SequentialPairingOptions(loop_detection=True)
+            )
+            
+            # 5. Mapping
+            if progress_callback:
+                progress_callback("Running incremental mapping...")
+                
+            opts = pycolmap.IncrementalPipelineOptions(
+                ba_refine_sensor_from_rig=False,
+                ba_refine_focal_length=False,
+                ba_refine_principal_point=False,
+                ba_refine_extra_params=False,
+            )
+            
+            recs = pycolmap.incremental_mapping(database_path, perspectives_dir, sparse_path, opts)
+            
+            if not recs:
+                 return {'success': False, 'error': 'Reconstruction failed (no models created)'}
+            
+            # We usually care about model 0 (largest)
+            best_idx = max(recs.keys(), key=lambda i: recs[i].num_points3D())
+            rec = recs[best_idx]
+            
+            out_model_dir = sparse_path / "0"
+            out_model_dir.mkdir(parents=True, exist_ok=True)
+            rec.write_text(str(out_model_dir))
+            
+            return {
+                'success': True,
+                'colmap_output': out_model_dir,
+                'frames_dir': frames_dir, # Original inputs
+                'perspectives_dir': perspectives_dir, # Generated inputs
+                'num_aligned': rec.num_images(),
+            }
+
+        except Exception as e:
+            logger.error(f"Rig SFM Error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {'success': False, 'error': str(e)}
+

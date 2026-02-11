@@ -1,0 +1,992 @@
+"""
+Pose Transfer Integration - Mode C
+SphereSfM alignment + 9-camera rig perspective extraction with pose transfer.
+
+Based on Kevin's solution from panorama_sfm.py.
+This implementation:
+1. Runs SphereSfM on equirectangular images
+2. Extracts 9 perspective crops per frame (90° FOV each)
+3. Transfers poses from spherical to perspective images
+4. Creates rig-based reconstruction compatible with 3DGS training
+"""
+
+import os
+# Fix OpenMP conflict: PyTorch (libomp.dll) + NumPy/MKL (libiomp5md.dll) crash
+os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+
+import logging
+import numpy as np
+from pathlib import Path
+from typing import Optional, Dict, Any, List, Tuple
+from dataclasses import dataclass
+import cv2
+import PIL.Image
+from scipy.spatial.transform import Rotation
+
+logger = logging.getLogger(__name__)
+
+# pycolmap is loaded lazily to avoid Windows fatal DLL crash (0xc0000138)
+# when the native module has incompatible dependencies
+HAS_PYCOLMAP = False
+_pycolmap = None
+
+def _get_pycolmap():
+    """Lazy import of pycolmap. Returns module or None."""
+    global HAS_PYCOLMAP, _pycolmap
+    if _pycolmap is not None:
+        return _pycolmap
+    try:
+        import pycolmap
+        _pycolmap = pycolmap
+        HAS_PYCOLMAP = True
+        return pycolmap
+    except (ImportError, OSError):
+        HAS_PYCOLMAP = False
+        logger.warning("pycolmap not available - Pose Transfer mode disabled")
+        return None
+
+
+@dataclass
+class VirtualCamera:
+    """Virtual camera configuration for 9-camera rig."""
+    index: int
+    pitch: float  # degrees
+    yaw: float    # degrees
+    fov: float = 90.0  # degrees
+    is_reference: bool = False
+
+
+def get_virtual_camera_rotations() -> List[Tuple[float, float]]:
+    """
+    Get 9-camera rig configuration (Kevin's solution).
+    
+    Returns:
+        List of (pitch, yaw) tuples in degrees
+    """
+    # Kevin's exact configuration from panorama_sfm.py
+    pitch_yaw_pairs = [
+        (0, 90),      # Camera 0: Reference (right side)
+        (33, 0),      # Camera 1: Forward ring
+        (-42, 0),     # Camera 2: Forward ring
+        (0, 42),      # Camera 3: Forward ring
+        (0, -27),     # Camera 4: Forward ring
+        (42, 180),    # Camera 5: Backward ring
+        (-33, 180),   # Camera 6: Backward ring
+        (0, 207),     # Camera 7: Backward ring
+        (0, 138),     # Camera 8: Backward ring
+    ]
+    return pitch_yaw_pairs
+
+
+def create_virtual_camera(pano_height: int, fov_deg: float = 90) -> 'pycolmap.Camera':
+    """Create a virtual perspective camera."""
+    pycolmap = _get_pycolmap()
+    if pycolmap is None:
+        raise ImportError("pycolmap required for pose transfer")
+    
+    image_size = int(pano_height * fov_deg / 180)
+    focal = image_size / (2 * np.tan(np.deg2rad(fov_deg) / 2))
+    return pycolmap.Camera.create(0, "PINHOLE", focal, image_size, image_size)
+
+
+def create_pano_rig_config(
+    cams_from_pano_rotation: List[np.ndarray], 
+    ref_idx: int = 0
+) -> 'pycolmap.RigConfig':
+    """
+    Create a RigConfig with proper stereo-style outward Z-offsets.
+    
+    Args:
+        cams_from_pano_rotation: List of rotation matrices
+        ref_idx: Index of reference camera (default: 0)
+    
+    Returns:
+        pycolmap.RigConfig
+    """
+    if not HAS_PYCOLMAP:
+        raise ImportError("pycolmap required for rig config")
+    
+    pycolmap = _get_pycolmap()
+    
+    pitch_yaw_pairs = get_virtual_camera_rotations()
+    rig_cameras = []
+    baseline = 0.065  # 6.5cm stereo separation
+
+    for idx, cam_from_pano_rotation in enumerate(cams_from_pano_rotation):
+        if idx == ref_idx:
+            cam_from_rig = None
+        else:
+            cam_from_ref_rotation = (
+                cam_from_pano_rotation @ cams_from_pano_rotation[ref_idx].T
+            )
+
+            # Views 1–5 = right lens, 6–10 = left lens
+            side = 1 if idx <= 4 else -1
+            local_offset = np.array([-baseline * side, 0, 0])
+            translation = cam_from_ref_rotation @ local_offset
+
+            cam_from_rig = pycolmap.Rigid3d(
+                pycolmap.Rotation3d(cam_from_ref_rotation),
+                translation
+            )
+
+        # Build descriptive filename prefix for flat folder structure
+        # Format: cam{idx}_yaw{yaw}_pitch{pitch}_
+        pitch_deg, yaw_deg = pitch_yaw_pairs[idx]
+        prefix = f"cam{idx:02d}_yaw{int(yaw_deg):+04d}_pitch{int(pitch_deg):+04d}_"
+
+        rig_cameras.append(
+            pycolmap.RigConfigCamera(
+                ref_sensor=(idx == ref_idx),
+                image_prefix=prefix,
+                cam_from_rig=cam_from_rig,
+            )
+        )
+    return pycolmap.RigConfig(cameras=rig_cameras)
+
+
+def get_virtual_camera_rays(camera: 'pycolmap.Camera') -> np.ndarray:
+    """Get camera rays for remapping."""
+    size = (camera.width, camera.height)
+    y, x = np.indices(size).astype(np.float32)
+    xy = np.column_stack([x.ravel(), y.ravel()])
+    xy += 0.5
+    xy_norm = camera.cam_from_img(xy)
+    rays = np.concatenate([xy_norm, np.ones_like(xy_norm[:, :1])], -1)
+    rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
+    return rays
+
+
+def spherical_img_from_cam(image_size: Tuple[int, int], rays_in_cam: np.ndarray) -> np.ndarray:
+    """Project rays into a 360 panorama (spherical) image."""
+    if image_size[0] != image_size[1] * 2:
+        raise ValueError("Only 360° panoramas are supported.")
+    if rays_in_cam.ndim != 2 or rays_in_cam.shape[1] != 3:
+        raise ValueError(f"{rays_in_cam.shape=} but expected (N,3).")
+    r = rays_in_cam.T
+    yaw = np.arctan2(r[0], r[2])
+    pitch = -np.arctan2(r[1], np.linalg.norm(r[[0, 2]], axis=0))
+    u = (1 + yaw / np.pi) / 2
+    v = (1 - pitch * 2 / np.pi) / 2
+    return np.stack([u, v], -1) * image_size
+
+
+class PoseTransferIntegrator:
+    """
+    Integrator for Mode C: SphereSfM + Pose Transfer.
+    
+    Workflow:
+    1. Run SphereSfM on equirectangular images
+    2. Extract 9 perspective crops per frame
+    3. Transfer poses from spherical to perspective
+    4. Run COLMAP with rig constraints
+    """
+    
+    def __init__(self, settings):
+        self.settings = settings
+        if not HAS_PYCOLMAP:
+            raise ImportError("pycolmap required for Pose Transfer mode")
+    
+    def run_alignment(
+        self,
+        frames_dir: Path,
+        masks_dir: Optional[Path],
+        output_dir: Path,
+        progress_callback=None
+    ) -> Dict[str, Any]:
+        """
+        Run SphereSfM + Pose Transfer alignment.
+        
+        Two-pass masking:
+        1. YOLO+SAM masks on equirectangular images (for SphereSfM)
+        2. YOLO+SAM masks on perspective crops (for rig reconstruction)
+        
+        Args:
+            frames_dir: Equirectangular images
+            masks_dir: Optional pre-existing masks (overrides equirect masking)
+            output_dir: Output directory
+            progress_callback: Progress updates
+        
+        Returns:
+            Result dictionary
+        """
+        try:
+            logger.info("[Mode C] Starting SphereSfM + Pose Transfer")
+            
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # ============================================================
+            # PASS 1: Generate equirectangular masks (for SphereSfM)
+            # ============================================================
+            if masks_dir is None or not Path(masks_dir).exists():
+                if progress_callback:
+                    progress_callback("Pass 1: Generating equirect masks (YOLO+SAM)...")
+                
+                equirect_masks_dir = output_dir / "equirect_masks"
+                eq_masks_count = self._generate_yolo_sam_masks(
+                    frames_dir, equirect_masks_dir, progress_callback
+                )
+                if eq_masks_count > 0:
+                    masks_dir = equirect_masks_dir
+                    logger.info(f"[Mode C] Generated {eq_masks_count} equirectangular masks")
+                else:
+                    masks_dir = None
+                    logger.info("[Mode C] No detections in equirect images, proceeding without masks")
+            
+            # ============================================================
+            # Step 1: Run SphereSfM on equirectangular images
+            # ============================================================
+            if progress_callback:
+                progress_callback("Running SphereSfM alignment...")
+            
+            sphere_output = output_dir / "spheresfm_reconstruction"
+            sphere_result = self._run_spheresfm(frames_dir, masks_dir, sphere_output, progress_callback)
+            
+            if not sphere_result['success']:
+                return sphere_result
+            
+            # ============================================================
+            # Step 2: Extract 9 perspective crops per frame (FLAT FOLDER)
+            # ============================================================
+            if progress_callback:
+                progress_callback("Extracting perspective crops...")
+            
+            perspective_dir = output_dir / "images"
+            
+            try:
+                rig_config = self._extract_perspectives(
+                    frames_dir=frames_dir,
+                    output_image_dir=perspective_dir,
+                    progress_callback=progress_callback
+                )
+                logger.info(f"[Mode C] Perspective extraction complete - rig_config created")
+            except Exception as e:
+                logger.error(f"[Mode C] Perspective extraction failed: {e}", exc_info=True)
+                return {
+                    'success': False,
+                    'error': f'Perspective extraction failed: {e}'
+                }
+            
+            # ============================================================
+            # PASS 2: Generate perspective masks (YOLO+SAM)
+            # ============================================================
+            if progress_callback:
+                progress_callback("Pass 2: Generating perspective masks (YOLO+SAM)...")
+            
+            perspective_masks_dir = output_dir / "masks"
+            persp_masks_count = self._generate_yolo_sam_masks(
+                perspective_dir, perspective_masks_dir, progress_callback
+            )
+            logger.info(f"[Mode C] Generated {persp_masks_count} perspective masks")
+            
+            # ============================================================
+            # Step 3: Check SphereSfM reconstruction
+            # ============================================================
+            if progress_callback:
+                progress_callback("Transferring poses...")
+            
+            sphere_sparse = sphere_output / "sparse" / "0"
+            if not sphere_sparse.exists():
+                return {
+                    'success': False,
+                    'error': 'SphereSfM reconstruction not found'
+                }
+            
+            # ============================================================
+            # Step 4: Transfer poses to perspective images
+            # ============================================================
+            final_sparse = output_dir / "sparse" / "0"
+            
+            try:
+                logger.info(f"[Mode C] Starting pose transfer to {final_sparse}")
+                self._transfer_poses(
+                    sphere_sparse, perspective_dir, rig_config, final_sparse,
+                    masks_dir=perspective_masks_dir if persp_masks_count > 0 else None
+                )
+                logger.info(f"[Mode C] Pose transfer completed successfully")
+            except Exception as e:
+                logger.error(f"[Mode C] Pose transfer failed: {e}", exc_info=True)
+                return {
+                    'success': False,
+                    'error': f'Pose transfer failed: {e}'
+                }
+            
+            if progress_callback:
+                progress_callback("Pose transfer complete!")
+            
+            return {
+                'success': True,
+                'colmap_output': str(final_sparse),
+                'mode': 'pose_transfer',
+                'images_dir': str(perspective_dir),
+                'masks_dir': str(perspective_masks_dir),
+                'equirect_masks_dir': str(output_dir / "equirect_masks") if (output_dir / "equirect_masks").exists() else None,
+                'registered_images': len(list(perspective_dir.glob("*.jpg"))),
+                'positions': {}
+            }
+            
+        except Exception as e:
+            logger.error(f"[Mode C] Error: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def _run_spheresfm(
+        self,
+        frames_dir: Path,
+        masks_dir: Optional[Path],
+        output_dir: Path,
+        progress_callback=None
+    ) -> Dict[str, Any]:
+        """
+        Run SphereSfM on equirectangular images (WITHOUT cubemap conversion).
+        
+        For Mode C, we only want the spherical reconstruction.
+        We'll do our own 9-camera rig perspective extraction.
+        """
+        from src.premium.sphere_sfm_integration import SphereSfMIntegrator
+        
+        integrator = SphereSfMIntegrator(self.settings)
+        
+        if not integrator.is_available():
+            return {
+                'success': False,
+                'error': f'SphereSfM binary not found at {integrator.spheresfm_path}'
+            }
+        
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Setup paths
+        database_path = output_dir / "database.db"
+        sparse_path = output_dir / "sparse"
+        sparse_path.mkdir(exist_ok=True)
+        
+        if database_path.exists():
+            database_path.unlink()
+        
+        # Count input images
+        image_files = list(frames_dir.glob("*.jpg")) + list(frames_dir.glob("*.png"))
+        if not image_files:
+            return {'success': False, 'error': 'No input images found'}
+        
+        # Detect image dimensions
+        from PIL import Image
+        test_img = Image.open(image_files[0])
+        width, height = test_img.size
+        
+        logger.info(f"[Mode C SphereSfM] {len(image_files)} images at {width}x{height}")
+        
+        try:
+            # Step 1: Create database
+            if progress_callback:
+                progress_callback("SphereSfM: Creating database...")
+            
+            result = integrator._run_command([
+                "database_creator",
+                "--database_path", str(database_path)
+            ], progress_callback)
+            
+            if result.returncode != 0:
+                return {'success': False, 'error': f'Database creation failed: {result.stderr}'}
+            
+            # Step 2: Feature extraction with SPHERE model
+            if progress_callback:
+                progress_callback("SphereSfM: Extracting features...")
+            
+            extractor_args = [
+                "feature_extractor",
+                "--database_path", str(database_path),
+                "--image_path", str(frames_dir),
+                "--ImageReader.camera_model", "SPHERE",
+                "--ImageReader.single_camera", "1",
+                "--SiftExtraction.use_gpu", "0",
+                "--SiftExtraction.max_image_size", "3200",
+                "--SiftExtraction.max_num_features", "8192",
+                "--SiftExtraction.max_num_orientations", "2",
+                "--SiftExtraction.peak_threshold", "0.00667",
+                "--SiftExtraction.edge_threshold", "10.0",
+            ]
+            
+            result = integrator._run_command(extractor_args, progress_callback)
+            if result.returncode != 0:
+                return {'success': False, 'error': f'Feature extraction failed: {result.stderr}'}
+            
+            # Step 3: Sequential matching
+            if progress_callback:
+                progress_callback("SphereSfM: Matching features...")
+            
+            matcher_args = [
+                "sequential_matcher",
+                "--database_path", str(database_path),
+                "--SequentialMatching.overlap", "10",
+                "--SequentialMatching.quadratic_overlap", "1",
+                "--SequentialMatching.loop_detection", "0",
+                "--SiftMatching.use_gpu", "0",
+                "--SiftMatching.max_ratio", "0.8",
+                "--SiftMatching.max_distance", "0.7",
+                "--SiftMatching.cross_check", "1",
+                "--SiftMatching.max_num_matches", "8192",
+                "--SiftMatching.max_error", "4.0",
+                "--SiftMatching.confidence", "0.999",
+                "--SiftMatching.max_num_trials", "10000",
+                "--SiftMatching.min_inlier_ratio", "0.25",
+                "--SiftMatching.min_num_inliers", "15",
+            ]
+            
+            result = integrator._run_command(matcher_args, progress_callback)
+            if result.returncode != 0:
+                return {'success': False, 'error': f'Feature matching failed: {result.stderr}'}
+            
+            # Step 4: Mapper (incremental SfM with spherical geometry)
+            if progress_callback:
+                progress_callback("SphereSfM: Running reconstruction...")
+            
+            mapper_args = [
+                "mapper",
+                "--database_path", str(database_path),
+                "--image_path", str(frames_dir),
+                "--output_path", str(sparse_path),
+                "--Mapper.sphere_camera", "1",
+                "--Mapper.ba_refine_focal_length", "0",
+                "--Mapper.ba_refine_principal_point", "0",
+                "--Mapper.ba_refine_extra_params", "0",
+                "--Mapper.init_min_num_inliers", "100",
+                "--Mapper.init_num_trials", "200",
+                "--Mapper.init_max_error", "4",
+                "--Mapper.init_max_forward_motion", "0.95",
+                "--Mapper.init_min_tri_angle", "16",
+                "--Mapper.abs_pose_min_num_inliers", "30",
+                "--Mapper.abs_pose_max_error", "12",
+                "--Mapper.abs_pose_min_inlier_ratio", "0.25",
+                "--Mapper.max_reg_trials", "3",
+                "--Mapper.tri_min_angle", "1.5",
+                "--Mapper.tri_max_transitivity", "1",
+                "--Mapper.tri_ignore_two_view_tracks", "1",
+                "--Mapper.filter_max_reproj_error", "4",
+                "--Mapper.filter_min_tri_angle", "1.5",
+                "--Mapper.multiple_models", "1",
+                "--Mapper.min_num_matches", "15",
+            ]
+            
+            result = integrator._run_command(mapper_args, progress_callback)
+            if result.returncode != 0:
+                return {'success': False, 'error': f'Mapper failed: {result.stderr}'}
+            
+            # CRITICAL: Check if reconstruction was actually created
+            model_path = sparse_path / "0"
+            if not model_path.exists():
+                logger.error(f"[Mode C] Mapper completed but no reconstruction found at {model_path}")
+                logger.error(f"[Mode C] Mapper stdout: {result.stdout}")
+                logger.error(f"[Mode C] Mapper stderr: {result.stderr}")
+                return {
+                    'success': False,
+                    'error': 'Mapper completed but no reconstruction model created. Check if images have enough features/matches.'
+                }
+            
+            # Count registered images
+            images_file = model_path / "images.txt"
+            if images_file.exists():
+                # Try binary format first
+                images_file = model_path / "images.bin"
+            
+            num_registered = 0
+            if (model_path / "images.txt").exists():
+                with open(model_path / "images.txt", 'r') as f:
+                    lines = [l for l in f if not l.startswith('#') and l.strip()]
+                    num_registered = len(lines) // 2  # 2 lines per image
+            elif (model_path / "images.bin").exists():
+                # Convert to text format for counting
+                try:
+                    integrator._run_command([
+                        "model_converter",
+                        "--input_path", str(model_path),
+                        "--output_path", str(model_path),
+                        "--output_type", "TXT"
+                    ], None)
+                    with open(model_path / "images.txt", 'r') as f:
+                        lines = [l for l in f if not l.startswith('#') and l.strip()]
+                        num_registered = len(lines) // 2
+                except Exception as e:
+                    logger.warning(f"Could not count registered images: {e}")
+            
+            # NOTE: NO cubemap conversion - we'll do our own 9-camera rig extraction
+            logger.info(f"[Mode C] SphereSfM reconstruction complete: {num_registered} images registered")
+            
+            return {
+                'success': True,
+                'sparse_dir': str(model_path),
+                'registered_images': num_registered
+            }
+            
+        except Exception as e:
+            logger.error(f"[Mode C SphereSfM] Error: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def _extract_perspectives(
+        self,
+        frames_dir: Path,
+        output_image_dir: Path,
+        progress_callback=None
+    ) -> 'pycolmap.RigConfig':
+        """
+        Extract 9 perspective crops per equirectangular frame.
+        
+        All images are saved in a FLAT folder with descriptive names:
+        cam00_yaw+090_pitch+000_frame0001.jpg
+        
+        The rig_config image_prefix (e.g. 'cam00_yaw+090_pitch+000_') maps each
+        filename to the correct rig camera. The 'frame_name' after stripping
+        the prefix (e.g. 'frame0001.jpg') groups cameras into rig frames.
+        """
+        output_image_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Get equirectangular images
+        pano_images = sorted(frames_dir.glob("*.jpg")) + sorted(frames_dir.glob("*.png"))
+        
+        if not pano_images:
+            raise ValueError(f"No images found in {frames_dir}")
+        
+        logger.info(f"[Mode C] Extracting perspectives from {len(pano_images)} frames")
+        
+        # Build camera rotations
+        pitch_yaw_pairs = get_virtual_camera_rotations()
+        cams_from_pano_rotation = []
+        for pitch_deg, yaw_deg in pitch_yaw_pairs:
+            R = Rotation.from_euler("YX", [yaw_deg, pitch_deg], degrees=True).as_matrix()
+            cams_from_pano_rotation.append(R)
+        
+        ref_idx = 0  # Reference camera index
+        rig_config = create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
+        
+        camera = pano_size = rays_in_cam = None
+        
+        for idx, pano_path in enumerate(pano_images):
+            if progress_callback:
+                progress_callback(f"Extracting perspectives: {idx+1}/{len(pano_images)}")
+            
+            try:
+                pano_image = PIL.Image.open(pano_path)
+            except Exception as e:
+                logger.warning(f"Cannot read {pano_path}: {e}")
+                continue
+            
+            pano_image = np.asarray(pano_image)
+            pano_height, pano_width = pano_image.shape[:2]
+            
+            if pano_width != pano_height * 2:
+                logger.warning(f"Skipping non-360° image: {pano_path}")
+                continue
+            
+            if camera is None:
+                camera = create_virtual_camera(pano_height)
+                for rig_camera in rig_config.cameras:
+                    rig_camera.camera = camera
+                pano_size = (pano_width, pano_height)
+                rays_in_cam = get_virtual_camera_rays(camera)
+            
+            # Frame identifier: use original filename stem for grouping
+            # All cameras for the same frame share this identifier
+            frame_id = pano_path.name  # e.g. "1068.jpg"
+            
+            # Extract each perspective view
+            for cam_idx, cam_from_pano_r in enumerate(cams_from_pano_rotation):
+                rays_in_pano = rays_in_cam @ cam_from_pano_r
+                xy_in_pano = spherical_img_from_cam(pano_size, rays_in_pano)
+                xy_in_pano = xy_in_pano.reshape(camera.width, camera.height, 2).astype(np.float32)
+                xy_in_pano -= 0.5
+                
+                image = cv2.remap(
+                    pano_image,
+                    *np.moveaxis(xy_in_pano, -1, 0),
+                    cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_WRAP,
+                )
+                
+                # Build flat filename: prefix + frame_id
+                # e.g. "cam00_yaw+090_pitch+000_1068.jpg"
+                image_name = rig_config.cameras[cam_idx].image_prefix + frame_id
+                image_path = output_image_dir / image_name
+                PIL.Image.fromarray(image).save(image_path)
+        
+        total_images = len(pano_images) * len(cams_from_pano_rotation)
+        logger.info(f"[Mode C] Extracted {len(pano_images)} × {len(cams_from_pano_rotation)} = {total_images} perspective images")
+        logger.info(f"[Mode C] All images in flat folder: {output_image_dir}")
+        return rig_config
+    
+    def _generate_yolo_sam_masks(
+        self,
+        images_dir: Path,
+        masks_dir: Path,
+        progress_callback=None
+    ) -> int:
+        """
+        Generate YOLO+SAM masks for images.
+        
+        Masks are saved with the naming convention:
+        - Image: cam00_yaw+090_pitch+000_1068.jpg
+        - Mask:  cam00_yaw+090_pitch+000_1068.jpg.png
+        
+        This is the COLMAP mask naming convention (image_name + .png).
+        
+        Returns:
+            Number of masks generated
+        """
+        masks_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Collect all images
+        image_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
+        if not image_files:
+            logger.warning(f"[Mode C] No images found for masking in {images_dir}")
+            return 0
+        
+        logger.info(f"[Mode C] Generating YOLO+SAM masks for {len(image_files)} images")
+        
+        try:
+            from src.masking.hybrid_yolo_sam_masker import HybridYOLOSAMMasker
+            
+            # HybridYOLOSAMMasker._select_device() tests actual CUDA kernel execution
+            # and falls back to CPU automatically if GPU architecture is incompatible
+            masker = HybridYOLOSAMMasker(
+                yolo_model='yolov8m.pt',
+                sam_checkpoint='sam_vit_b_01ec64.pth',
+                use_gpu=self.settings.use_gpu,
+                mask_dilation_pixels=15,
+                yolo_confidence=0.5
+            )
+            
+            masks_generated = 0
+            for idx, img_path in enumerate(image_files):
+                if progress_callback and idx % 10 == 0:
+                    progress_callback(f"Generating masks: {idx+1}/{len(image_files)}")
+                
+                # COLMAP mask naming: image_name.ext.png
+                mask_name = f"{img_path.name}.png"
+                mask_path = masks_dir / mask_name
+                
+                mask = masker.generate_mask(img_path, mask_path)
+                if mask is not None:
+                    masks_generated += 1
+            
+            masker.cleanup()
+            logger.info(f"[Mode C] Generated {masks_generated} YOLO+SAM masks (skipped {len(image_files) - masks_generated} without detections)")
+            return masks_generated
+            
+        except ImportError as e:
+            logger.warning(f"[Mode C] YOLO+SAM masker not available: {e}")
+            logger.warning("[Mode C] Proceeding without object masks")
+            return 0
+        except Exception as e:
+            logger.warning(f"[Mode C] Mask generation failed: {e}")
+            logger.warning("[Mode C] Proceeding without object masks")
+            return 0
+
+    def _transfer_poses(
+        self,
+        sphere_sparse_dir: Path,
+        perspective_images_dir: Path,
+        rig_config: 'pycolmap.RigConfig',
+        output_sparse_dir: Path,
+        masks_dir: Optional[Path] = None
+    ):
+        """
+        Complete pose transfer workflow with COLMAP rig pipeline.
+        Based on Kevin's panorama_sfm.py implementation.
+        
+        Images are in a flat folder with descriptive names:
+        cam00_yaw+090_pitch+000_1068.jpg
+        
+        The rig_config uses filename prefixes to group cameras.
+        CameraMode.SINGLE is used since all cameras share intrinsics.
+        """
+        
+        output_sparse_dir.mkdir(parents=True, exist_ok=True)
+        database_path = output_sparse_dir.parent / "database.db"
+        
+        # Delete existing database
+        if database_path.exists():
+            database_path.unlink()
+        
+        # Lazy import pycolmap at function call time
+        pycolmap = _get_pycolmap()
+        if pycolmap is None:
+            raise ImportError("pycolmap required for pose transfer")
+        
+        logger.info("[Mode C] Step 1: Feature extraction on perspective images")
+        logger.info(f"[Mode C] Database path: {database_path}")
+        logger.info(f"[Mode C] Perspective images: {perspective_images_dir}")
+        logger.info(f"[Mode C] Output sparse: {output_sparse_dir}")
+        
+        pycolmap.set_random_seed(0)
+        
+        # Configure hardware - CPU for stability
+        try:
+            device = pycolmap.Device.cpu
+            logger.info("[Mode C] Using CPU for feature extraction")
+        except AttributeError:
+            device = None
+        
+        # Reader options: include YOLO+SAM masks if available
+        reader_options = {}
+        if masks_dir and masks_dir.exists():
+            mask_files = list(masks_dir.glob("*.png"))
+            if mask_files:
+                reader_options["mask_path"] = str(masks_dir)
+                logger.info(f"[Mode C] Using YOLO+SAM masks from: {masks_dir} ({len(mask_files)} masks)")
+            else:
+                logger.info("[Mode C] No mask files found, proceeding without masks")
+        
+        # Feature extraction - SINGLE camera mode since all perspectives share intrinsics
+        # (flat folder, no subfolders)
+        extract_params = {
+            'database_path': str(database_path),
+            'image_path': str(perspective_images_dir),
+            'reader_options': reader_options,
+            'camera_mode': pycolmap.CameraMode.SINGLE
+        }
+        
+        if device is not None:
+            extract_params['device'] = device
+        
+        pycolmap.extract_features(**extract_params)
+        
+        logger.info("[Mode C] Step 2: Apply rig configuration to database")
+        
+        # Apply rig config to database
+        db = pycolmap.Database.open(str(database_path))
+        pycolmap.apply_rig_config([rig_config], db)
+        db.close()
+        
+        logger.info("[Mode C] Step 3: Sequential matching with loop detection")
+        
+        # Sequential matching
+        seq_opts = pycolmap.SequentialPairingOptions(
+            loop_detection=True
+        )
+        
+        match_params = {
+            'database_path': str(database_path),
+            'pairing_options': seq_opts
+        }
+        if device is not None:
+            match_params['device'] = device
+        
+        pycolmap.match_sequential(**match_params)
+        
+        logger.info("[Mode C] Step 4: Incremental mapping with rig constraints")
+        
+        # Incremental mapping with rig constraints
+        opts = pycolmap.IncrementalPipelineOptions(
+            ba_refine_sensor_from_rig=False,
+            ba_refine_focal_length=False,
+            ba_refine_principal_point=False,
+            ba_refine_extra_params=False,
+        )
+        
+        recs = pycolmap.incremental_mapping(
+            str(database_path), 
+            str(perspective_images_dir), 
+            str(output_sparse_dir.parent),
+            options=opts
+        )
+        
+        # Process reconstructions
+        for idx, rec in recs.items():
+            logger.info(f"[Mode C] Reconstruction #{idx}: {rec.summary()}")
+            
+            out_dir = output_sparse_dir.parent / str(idx)
+            out_dir.mkdir(exist_ok=True, parents=True)
+            
+            logger.info(f"[Mode C] Writing COLMAP model to {out_dir}")
+            rec.write_text(str(out_dir))
+        
+        logger.info(f"[Mode C] Pose transfer complete: {len(recs)} reconstructions")
+
+
+def export_for_lichtfeld(
+    colmap_dir: str,
+    images_dir: str,
+    masks_dir: str,
+    output_dir: str,
+    use_equirect: bool = False,
+    equirect_dir: Optional[str] = None,
+    equirect_masks_dir: Optional[str] = None,
+    fix_rotation: bool = True
+) -> bool:
+    """
+    Export Mode C results for LichtFeld Studio.
+    
+    LichtFeld supports both equirect and perspective images.
+    Masks use naming: image.jpg → image.jpg.png
+    
+    Args:
+        colmap_dir: Path to COLMAP sparse reconstruction (sparse/0)
+        images_dir: Path to perspective images (flat folder)
+        masks_dir: Path to YOLO+SAM masks
+        output_dir: Export output directory
+        use_equirect: If True, export equirect images instead of perspectives
+        equirect_dir: Path to equirect images (required if use_equirect=True)
+        equirect_masks_dir: Path to equirect masks
+        fix_rotation: Apply rotation fix for 360 images
+    
+    Returns:
+        True if successful
+    """
+    from src.pipeline.export_formats import LichtfeldExporter
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    if use_equirect and equirect_dir:
+        # Export equirectangular images with their masks
+        source_images_dir = equirect_dir
+        source_masks_dir = equirect_masks_dir
+        logger.info("[Export] LichtFeld: Exporting equirectangular images")
+    else:
+        # Export perspective images with their masks
+        source_images_dir = images_dir
+        source_masks_dir = masks_dir
+        logger.info("[Export] LichtFeld: Exporting perspective images")
+    
+    exporter = LichtfeldExporter(
+        colmap_dir=colmap_dir,
+        output_dir=output_dir
+    )
+    
+    success = exporter.export(
+        images_dir=source_images_dir,
+        fix_rotation=fix_rotation,
+        masks_dir=source_masks_dir
+    )
+    
+    if success:
+        # Copy masks with correct naming (image.jpg.png)
+        masks_source = Path(source_masks_dir) if source_masks_dir else None
+        if masks_source and masks_source.exists():
+            masks_out = output_path / "masks"
+            masks_out.mkdir(exist_ok=True)
+            
+            copied = 0
+            for mask_file in masks_source.glob("*.png"):
+                # Masks should already be named correctly (image.jpg.png)
+                dst = masks_out / mask_file.name
+                if not dst.exists():
+                    import shutil
+                    shutil.copy2(mask_file, dst)
+                    copied += 1
+            
+            logger.info(f"[Export] LichtFeld: Copied {copied} masks")
+    
+    return success
+
+
+def export_for_realityscan(
+    colmap_dir: str,
+    images_dir: str,
+    masks_dir: str,
+    output_dir: str,
+    database_path: Optional[str] = None
+) -> bool:
+    """
+    Export Mode C results for RealityScan.
+    
+    RealityScan only supports perspective images (NOT equirectangular).
+    Masks must be inside the images folder with naming: image_mask.png
+    COLMAP database is also exported.
+    
+    Output structure:
+        realityscan_export/
+        ├── images/
+        │   ├── cam00_yaw+090_pitch+000_1068.jpg
+        │   ├── cam00_yaw+090_pitch+000_1068_mask.png  ← mask alongside image
+        │   └── ...
+        ├── sparse/
+        │   ├── cameras.txt
+        │   ├── images.txt
+        │   └── points3D.txt
+        └── database.db  (optional)
+    
+    Args:
+        colmap_dir: Path to COLMAP sparse reconstruction (sparse/0)
+        images_dir: Path to perspective images (flat folder)
+        masks_dir: Path to YOLO+SAM masks
+        output_dir: Export output directory
+        database_path: Optional path to COLMAP database to include
+    
+    Returns:
+        True if successful
+    """
+    import shutil
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    images_out = output_path / "images"
+    sparse_out = output_path / "sparse"
+    images_out.mkdir(exist_ok=True)
+    sparse_out.mkdir(exist_ok=True)
+    
+    logger.info("[Export] RealityScan: Exporting perspective images + masks")
+    
+    try:
+        # 1. Copy perspective images
+        images_source = Path(images_dir)
+        images_copied = 0
+        for img_file in sorted(images_source.glob("*.jpg")):
+            dst = images_out / img_file.name
+            if not dst.exists():
+                shutil.copy2(img_file, dst)
+            images_copied += 1
+        
+        logger.info(f"[Export] RealityScan: Copied {images_copied} images")
+        
+        # 2. Copy masks INTO the images folder with RealityScan naming
+        # COLMAP mask: cam00_..._1068.jpg.png → RealityScan: cam00_..._1068_mask.png
+        masks_source = Path(masks_dir) if masks_dir else None
+        masks_copied = 0
+        if masks_source and masks_source.exists():
+            for mask_file in sorted(masks_source.glob("*.png")):
+                # Mask name: "cam00_yaw+090_pitch+000_1068.jpg.png"
+                # Target: "cam00_yaw+090_pitch+000_1068_mask.png"
+                mask_name = mask_file.name
+                if mask_name.endswith(".jpg.png"):
+                    image_stem = mask_name[:-8]  # Remove ".jpg.png"
+                    rs_mask_name = f"{image_stem}_mask.png"
+                elif mask_name.endswith(".png.png"):
+                    image_stem = mask_name[:-8]
+                    rs_mask_name = f"{image_stem}_mask.png"
+                else:
+                    rs_mask_name = mask_name
+                
+                dst = images_out / rs_mask_name
+                if not dst.exists():
+                    shutil.copy2(mask_file, dst)
+                masks_copied += 1
+            
+            logger.info(f"[Export] RealityScan: Copied {masks_copied} masks into images folder")
+        
+        # 3. Copy COLMAP sparse reconstruction
+        colmap_source = Path(colmap_dir)
+        for colmap_file in ['cameras.txt', 'images.txt', 'points3D.txt',
+                            'cameras.bin', 'images.bin', 'points3D.bin']:
+            src = colmap_source / colmap_file
+            if src.exists():
+                shutil.copy2(src, sparse_out / colmap_file)
+        
+        logger.info(f"[Export] RealityScan: Copied COLMAP sparse model")
+        
+        # 4. Copy database if provided
+        if database_path and Path(database_path).exists():
+            shutil.copy2(database_path, output_path / "database.db")
+            logger.info("[Export] RealityScan: Copied database.db")
+        
+        logger.info(f"[Export] RealityScan export complete: {images_copied} images, {masks_copied} masks")
+        return True
+        
+    except Exception as e:
+        logger.error(f"[Export] RealityScan export failed: {e}")
+        return False

@@ -12,8 +12,10 @@ piexif>=1.1.3
 # ============================================================================
 # GUI FRAMEWORK
 # ============================================================================
-PyQt6>=6.5.0
-PyQt6-Qt6>=6.5.0
+# IMPORTANT: PyQt6 6.10.x has DLL loading bugs on Windows. Pin to 6.7.x
+PyQt6==6.7.1
+PyQt6-Qt6==6.7.3
+PyQt6-sip==13.8.0
 
 # ============================================================================
 # AI MASKING - Choose ONE option:
@@ -30,20 +32,23 @@ onnxruntime>=1.20.0
 # Required for YOLOv8 masking with model auto-download
 ultralytics>=8.0.200
 
-# PyTorch with CUDA 12.x support (RTX 30/40/50 series + GTX compatibility)
-# For RTX 50-series (Blackwell sm_120), use PyTorch nightly or wait for official 2.7+
-# Install with: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-torch>=2.6.0
-torchvision>=0.20.0
-
-# IMPORTANT: If you have RTX 50-series GPU, you need PyTorch nightly build:
-# pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124
+# PyTorch with CUDA 12.8 support (RTX 30/40/50 series - ALL NATIVE)
+# RTX 50-series (Blackwell sm_120) requires cu128 or newer
+# Install with: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch>=2.10.0
+torchvision>=0.25.0
 
 # OPTION C: SAM (Segment Anything Model) - Best quality segmentation
 # Superior edge precision and quality, requires PyTorch
 # Install with: pip install segment-anything
 # Download checkpoint: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 segment-anything>=1.0
+
+# ============================================================================
+# SFM & ALIGNMENT
+# ============================================================================
+pycolmap>=3.10.0
+scipy>=1.10.0
 
 # ============================================================================
 # EXTERNAL DEPENDENCIES (Install separately)

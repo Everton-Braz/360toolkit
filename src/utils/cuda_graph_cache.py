@@ -7,7 +7,10 @@ Each graph captures entire operation sequence and replays it instantly.
 Performance Impact: ~4ms savings for 240 images (0.02ms per frame)
 """
 
-import torch
+try:
+    import torch
+except Exception:
+    torch = None
 import logging
 from collections import OrderedDict
 

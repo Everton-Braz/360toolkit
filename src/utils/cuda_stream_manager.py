@@ -9,7 +9,10 @@ Manages multiple CUDA streams to overlap:
 Performance Impact: ~456ms savings for 240 images (2ms per frame)
 """
 
-import torch
+try:
+    import torch
+except Exception:
+    torch = None
 import logging
 from collections import deque
 

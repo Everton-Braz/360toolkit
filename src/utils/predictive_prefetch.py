@@ -7,7 +7,10 @@ BEFORE GPU needs it. Eliminates wait time for sequential processing.
 Performance Impact: ~5,000ms savings for 240 images (20.8ms per frame)
 """
 
-import torch
+try:
+    import torch
+except Exception:
+    torch = None
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import logging

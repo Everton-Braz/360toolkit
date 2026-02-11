@@ -434,40 +434,61 @@ class SDKExtractor:
             # Set CWD to SDK bin directory to ensure DLLs are found
             sdk_cwd = self.demo_exe.parent if self.demo_exe else None
             
-            # Prepare environment with _internal in PATH (for msvcp140.dll etc)
+            # Prepare environment - CRITICAL: build a clean PATH for MediaSDK subprocess
+            # MediaSDK uses CUDA 10.x DLLs; PyTorch's CUDA 12.x DLLs in _internal can conflict
             env = os.environ.copy()
-            
-            # Add SDK bin directory to PATH (CRITICAL for finding DLLs in same folder)
-            if sdk_cwd:
-                env['PATH'] = str(sdk_cwd) + os.pathsep + env.get('PATH', '')
             
             if getattr(sys, 'frozen', False):
                 exe_dir = Path(sys.executable).parent
                 internal_dir = exe_dir / '_internal'
-                if internal_dir.exists():
-                    env['PATH'] = str(internal_dir) + os.pathsep + env.get('PATH', '')
-                    logger.debug(f"Added {internal_dir} to SDK environment PATH")
-                    
-                    # CRITICAL FIX: Copy missing dependencies from _internal to SDK bin
-                    # MediaSDKTest.exe might not respect PATH for some DLLs (DLL Hell)
-                    if sdk_cwd:
-                        try:
-                            import shutil
-                            # List of DLLs that often cause issues if not in the same folder
-                            # zlib.dll: often needed by opencv/libpng
-                            # libiomp5md.dll: Intel OpenMP
-                            # msvcp140.dll: VC++ runtime (sometimes version mismatch)
-                            # concrt140.dll: Concurrency runtime
-                            deps_to_copy = ['zlib.dll', 'libiomp5md.dll', 'concrt140.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll']
-                            
-                            for dep in deps_to_copy:
-                                src_dll = internal_dir / dep
-                                dst_dll = sdk_cwd / dep
-                                if src_dll.exists() and not dst_dll.exists():
-                                    logger.info(f"Copying missing dependency to SDK bin: {dep}")
-                                    shutil.copy2(src_dll, dst_dll)
-                        except Exception as e:
-                            logger.warning(f"Failed to copy dependencies: {e}")
+                
+                # Build clean PATH: SDK bin + System dirs + original PATH (excluding _internal/torch)
+                # This prevents CUDA DLL version conflicts between MediaSDK (CUDA 10.x) and PyTorch (CUDA 12.x)
+                clean_path_parts = []
+                
+                # 1. SDK bin directory FIRST (its own DLLs take priority)
+                if sdk_cwd:
+                    clean_path_parts.append(str(sdk_cwd))
+                
+                # 2. System directories (nvcuda.dll, kernel32.dll, etc.)
+                sys_root = os.environ.get('SystemRoot', 'C:\\Windows')
+                clean_path_parts.append(os.path.join(sys_root, 'System32'))
+                clean_path_parts.append(sys_root)
+                clean_path_parts.append(os.path.join(sys_root, 'System32', 'Wbem'))
+                
+                # 3. Original PATH entries, EXCLUDING _internal and torch paths
+                internal_str = str(internal_dir).lower()
+                for p in env.get('PATH', '').split(os.pathsep):
+                    p_lower = p.strip().lower()
+                    if not p_lower:
+                        continue
+                    # Skip _internal dir and torch subdirs to avoid CUDA DLL conflicts
+                    if internal_str in p_lower or 'torch\\lib' in p_lower or 'torch/lib' in p_lower:
+                        continue
+                    if p.strip() not in clean_path_parts:
+                        clean_path_parts.append(p.strip())
+                
+                env['PATH'] = os.pathsep.join(clean_path_parts)
+                logger.info(f"Built clean SDK PATH (excluded _internal to avoid CUDA conflicts)")
+                
+                # Copy essential VC++ runtime DLLs to SDK bin (these are safe to copy)
+                if sdk_cwd and internal_dir.exists():
+                    try:
+                        import shutil
+                        deps_to_copy = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll',
+                                        'concrt140.dll', 'zlib.dll', 'libiomp5md.dll']
+                        for dep in deps_to_copy:
+                            src_dll = internal_dir / dep
+                            dst_dll = sdk_cwd / dep
+                            if src_dll.exists() and not dst_dll.exists():
+                                logger.info(f"Copying missing dependency to SDK bin: {dep}")
+                                shutil.copy2(src_dll, dst_dll)
+                    except Exception as e:
+                        logger.warning(f"Failed to copy dependencies: {e}")
+            else:
+                # Not frozen: just prepend SDK bin
+                if sdk_cwd:
+                    env['PATH'] = str(sdk_cwd) + os.pathsep + env.get('PATH', '')
 
             # DIAGNOSTIC: Log PATH and CWD
             logger.info(f"SDK CWD: {sdk_cwd}")

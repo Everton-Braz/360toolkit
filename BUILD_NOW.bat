@@ -1,11 +1,13 @@
 @echo off
+setlocal enabledelayedexpansion
 REM ============================================================================
 REM 360ToolkitGS Build - Run this by double-clicking!
+REM Full GPU Build (PyTorch + CUDA 12.8)
 REM ============================================================================
 
 echo.
 echo ========================================================================
-echo 360ToolkitGS - ONNX Build (Lightweight)
+echo 360ToolkitGS - Full GPU Build
 echo ========================================================================
 echo.
 
@@ -13,15 +15,26 @@ cd /d "%~dp0"
 echo Working directory: %CD%
 echo.
 
-REM Check if ONNX models exist
-if not exist "yolov8s-seg.onnx" (
-    echo [!] ONNX models not found. Please run first:
-    echo     python export_onnx_models.py
-    echo.
+REM Activate the correct conda environment with CUDA PyTorch
+echo Activating 360pipeline environment...
+call conda activate 360pipeline
+if errorlevel 1 (
+    echo ERROR: Could not activate 360pipeline environment.
+    echo Run: conda activate 360pipeline
     pause
     exit /b 1
 )
-echo [OK] ONNX models found
+
+REM Verify PyTorch CUDA works
+echo Verifying PyTorch CUDA...
+python -c "import torch; assert torch.cuda.is_available() and 'cu' in torch.__version__, 'No CUDA'; print(f'PyTorch {torch.__version__} CUDA OK')"
+if errorlevel 1 (
+    echo ERROR: PyTorch CUDA not available in 360pipeline env!
+    echo Fix: pip install torch torchvision --force-reinstall --index-url https://download.pytorch.org/whl/cu128
+    pause
+    exit /b 1
+)
+echo [OK] PyTorch CUDA verified
 
 REM Clean previous build
 echo.
@@ -38,7 +51,7 @@ echo This may take 5-10 minutes. Please wait...
 echo ========================================================================
 echo.
 
-python -m PyInstaller 360ToolkitGS-Build.spec --noconfirm
+python -m PyInstaller 360ToolkitGS.spec --noconfirm
 
 if errorlevel 1 (
     echo.
