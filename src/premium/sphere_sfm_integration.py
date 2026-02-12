@@ -24,13 +24,89 @@ import logging
 import subprocess
 import shutil
 from pathlib import Path
-from typing import Dict, Optional, Callable, List
+from typing import Dict, Optional, Callable, List, Tuple
 import os
 
 logger = logging.getLogger(__name__)
 
 # Default SphereSfM binary location (copied to bin/SphereSfM/)
 DEFAULT_SPHERESFM_PATH = Path(__file__).parent.parent.parent / "bin" / "SphereSfM" / "colmap.exe"
+
+
+def _normalize_binary_candidate(path_value) -> Optional[Path]:
+    """Normalize binary candidate (supports direct exe/bat path or folder path)."""
+    if not path_value:
+        return None
+    p = Path(path_value)
+    if p.is_dir():
+        for filename in ("colmap.exe", "colmap.bat", "colmap.cmd"):
+            candidate = p / filename
+            if candidate.exists():
+                return candidate
+    return p
+
+
+def _compose_binary_command(binary_path: Path, args: List[str]) -> List[str]:
+    """Build subprocess command, including .bat/.cmd wrappers on Windows."""
+    suffix = binary_path.suffix.lower()
+    if suffix in {".bat", ".cmd"}:
+        return ["cmd", "/c", str(binary_path)] + args
+    return [str(binary_path)] + args
+
+
+def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] = None) -> Tuple[Path, List[str]]:
+    """
+    Resolve SphereSfM/COLMAP binary path.
+
+    Search order:
+    1) Explicit override path
+    2) settings.sphere_alignment_path (if present)
+    3) Environment variables (SPHERESFM_PATH, SPHERESFM_BIN, COLMAP_PATH)
+    4) Default bundled SphereSfM path
+    5) Common local installs
+    6) PATH lookup (colmap)
+    """
+    candidates: List[Path] = []
+
+    def add_candidate(value):
+        normalized = _normalize_binary_candidate(value)
+        if normalized is not None and normalized not in candidates:
+            candidates.append(normalized)
+
+    add_candidate(override_path)
+
+    settings_path = getattr(settings, "sphere_alignment_path", None) if settings is not None else None
+    add_candidate(settings_path)
+
+    for env_name in ("SPHERESFM_PATH", "SPHERESFM_BIN", "COLMAP_PATH"):
+        env_value = os.environ.get(env_name)
+        if env_value:
+            add_candidate(env_value)
+
+    add_candidate(DEFAULT_SPHERESFM_PATH)
+
+    home = Path.home()
+    common_paths = [
+        home / "Documents" / "APLICATIVOS" / "360ToolKit" / "bin" / "SphereSfM" / "colmap.exe",
+        home / "Documents" / "SphereSfM" / "colmap.exe",
+        home / "Documents" / "colmap-x64-windows-cuda" / "colmap.bat",
+        home / "Documents" / "colmap-x64-windows-cuda" / "colmap.exe",
+        Path("C:/colmap/colmap.exe"),
+    ]
+    for path in common_paths:
+        add_candidate(path)
+
+    for command_name in ("colmap", "colmap.exe", "colmap.bat", "colmap.cmd"):
+        which_result = shutil.which(command_name)
+        if which_result:
+            add_candidate(which_result)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate, [str(c) for c in candidates]
+
+    fallback = candidates[0] if candidates else DEFAULT_SPHERESFM_PATH
+    return fallback, [str(c) for c in candidates]
 
 
 class SphereSfMIntegrator:
@@ -42,7 +118,8 @@ class SphereSfMIntegrator:
     
     def __init__(self, settings, spheresfm_path: Optional[Path] = None):
         self.settings = settings
-        self.spheresfm_path = spheresfm_path or DEFAULT_SPHERESFM_PATH
+        self.spheresfm_path, self.searched_paths = resolve_spheresfm_binary_path(settings, spheresfm_path)
+        self.supports_sphere_camera_mapper = self._detect_mapper_sphere_support()
         
         # Validate SphereSfM binary exists
         if not self.spheresfm_path.exists():
@@ -51,6 +128,24 @@ class SphereSfMIntegrator:
     def is_available(self) -> bool:
         """Check if SphereSfM binary is available."""
         return self.spheresfm_path.exists()
+
+    def _detect_mapper_sphere_support(self) -> bool:
+        """Detect if current binary supports --Mapper.sphere_camera option."""
+        if not self.spheresfm_path.exists():
+            return False
+        try:
+            cmd = _compose_binary_command(self.spheresfm_path, ["mapper", "-h"])
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                stdin=subprocess.DEVNULL,
+            )
+            help_text = f"{proc.stdout}\n{proc.stderr}".lower()
+            return "mapper.sphere_camera" in help_text
+        except Exception:
+            return False
     
     def get_version(self) -> Optional[str]:
         """Get SphereSfM version string."""
@@ -69,7 +164,7 @@ class SphereSfMIntegrator:
     
     def _run_command(self, args: List[str], progress_callback: Optional[Callable] = None) -> subprocess.CompletedProcess:
         """Run SphereSfM command with logging."""
-        cmd = [str(self.spheresfm_path)] + args
+        cmd = _compose_binary_command(self.spheresfm_path, args)
         logger.info(f"Running: {' '.join(cmd)}")
         
         if progress_callback:
@@ -248,8 +343,6 @@ class SphereSfMIntegrator:
                 "--database_path", str(database_path),
                 "--image_path", str(frames_dir),
                 "--output_path", str(sparse_path),
-                # Sphere camera mode (critical)
-                "--Mapper.sphere_camera", "1",
                 # BA settings from GUI (refine focal for SPHERE)
                 "--Mapper.ba_refine_focal_length", "0",           # Fixed f=1 for SPHERE
                 "--Mapper.ba_refine_principal_point", "0",
@@ -276,6 +369,11 @@ class SphereSfMIntegrator:
                 "--Mapper.multiple_models", "1",
                 "--Mapper.min_num_matches", "15"
             ]
+
+            if self.supports_sphere_camera_mapper:
+                mapper_args.extend(["--Mapper.sphere_camera", "1"])
+            else:
+                logger.warning("Current COLMAP binary does not expose --Mapper.sphere_camera; continuing without it.")
             
             result = self._run_command(mapper_args, progress_callback)
             
@@ -609,55 +707,40 @@ def create_pole_mask(width: int, height: int, pole_degrees: float = 15) -> 'np.n
     return mask
 
 
-def verify_spheresfm_installation() -> Dict:
+def verify_spheresfm_installation(settings=None) -> Dict:
     """
     Verify SphereSfM installation and return status.
     
     Returns:
         Dictionary with installation status and details
     """
-    spheresfm_path = DEFAULT_SPHERESFM_PATH
+    spheresfm_path, searched_paths = resolve_spheresfm_binary_path(settings)
     
     result = {
         'installed': False,
         'path': str(spheresfm_path),
+        'searched_paths': searched_paths,
         'version': None,
-        'error': None
+        'error': None,
+        'supports_sphere_camera': False,
     }
     
     if not spheresfm_path.exists():
         result['error'] = f"SphereSfM binary not found at {spheresfm_path}"
         return result
     
-    # Check required DLLs
-    required_dlls = [
-        "ceres.dll", "glog.dll", "gflags.dll", 
-        "FreeImage.dll", "sqlite3.dll", "Qt5Core.dll"
-    ]
-    
-    spheresfm_dir = spheresfm_path.parent
-    missing_dlls = []
-    for dll in required_dlls:
-        if not (spheresfm_dir / dll).exists():
-            missing_dlls.append(dll)
-    
-    if missing_dlls:
-        result['error'] = f"Missing DLLs: {', '.join(missing_dlls)}"
-        return result
-    
-    # Try to get version
+    # Try to execute binary/help
     try:
-        env = os.environ.copy()
-        env["PATH"] = str(spheresfm_dir) + os.pathsep + env.get("PATH", "")
-        
+        cmd = _compose_binary_command(spheresfm_path, ["help"])
         proc = subprocess.run(
-            [str(spheresfm_path), "help"],
-            capture_output=True, text=True, timeout=10, env=env,
+            cmd,
+            capture_output=True, text=True, timeout=10,
             stdin=subprocess.DEVNULL
         )
-        # SphereSfM with no args shows usage, which is fine
+        help_text = f"{proc.stdout}\n{proc.stderr}".lower()
         result['installed'] = True
-        result['version'] = "SphereSfM-2024-12-14"
+        result['version'] = "SphereSfM/COLMAP-compatible"
+        result['supports_sphere_camera'] = "mapper.sphere_camera" in help_text
         
     except subprocess.TimeoutExpired:
         result['error'] = "SphereSfM command timed out"

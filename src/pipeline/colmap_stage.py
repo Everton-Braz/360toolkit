@@ -128,12 +128,22 @@ class ColmapStage:
     
     def is_available(self) -> bool:
         """Check if alignment is available for current mode."""
-        if self._mode in [ALIGNMENT_MODE_SPHERE_SFM, ALIGNMENT_MODE_POSE_TRANSFER]:
+        if self._mode == ALIGNMENT_MODE_SPHERE_SFM:
             # Both require SphereSfM binary
             try:
                 from src.premium.sphere_sfm_integration import verify_spheresfm_installation
                 status = verify_spheresfm_installation()
                 return status.get('installed', False)
+            except Exception:
+                return False
+        elif self._mode == ALIGNMENT_MODE_POSE_TRANSFER:
+            try:
+                from src.premium.sphere_sfm_integration import verify_spheresfm_installation
+                status = verify_spheresfm_installation()
+                if not status.get('installed', False):
+                    return False
+                import pycolmap
+                return pycolmap is not None
             except Exception:
                 return False
         else:
@@ -163,6 +173,13 @@ class ColmapStage:
             return {
                 'success': False,
                 'error': f'Alignment mode "{self._mode}" not available',
+                'positions': {}
+            }
+
+        if self.integrator is None:
+            return {
+                'success': False,
+                'error': f'Failed to initialize integrator for mode "{self._mode}"',
                 'positions': {}
             }
         

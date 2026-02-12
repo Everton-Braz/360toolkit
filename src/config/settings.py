@@ -115,6 +115,15 @@ class SettingsManager:
                 if self.is_sdk_valid(media_sdk):
                     logger.info(f"[OK] SDK found at {media_sdk}")
                     return media_sdk
+                nested_media_sdk = media_sdk / "MediaSDK"
+                if self.is_sdk_valid(nested_media_sdk):
+                    logger.info(f"[OK] SDK found at {nested_media_sdk}")
+                    return nested_media_sdk
+            # Fallback recursive search for nested MediaSDK folders
+            for nested in sdk_dir.rglob("MediaSDK"):
+                if self.is_sdk_valid(nested):
+                    logger.info(f"[OK] SDK found at {nested}")
+                    return nested
         
         # 2. Program Files
         program_files = [
@@ -156,7 +165,8 @@ class SettingsManager:
             sdk_path / "CameraSDK.dll",
             sdk_path / "MediaSDK.dll",
             sdk_path / "bin" / "CameraSDK.dll",
-            sdk_path / "bin" / "MediaSDK.dll"
+            sdk_path / "bin" / "MediaSDK.dll",
+            sdk_path / "MediaSDK" / "bin" / "MediaSDK.dll"
         ]
         
         return any(dll.exists() for dll in dll_files)

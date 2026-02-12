@@ -1621,6 +1621,7 @@ class PipelineWorker(QThread):
              # Settings
              settings = ColmapSettings(
                  alignment_mode=alignment_mode,
+                 sphere_alignment_path=Path(self.config['sphere_alignment_path']) if self.config.get('sphere_alignment_path') else None,
                  use_rig_sfm=(alignment_mode == ALIGNMENT_MODE_RIG_SFM),
                  use_gpu=self.config.get('use_gpu', True)
              )

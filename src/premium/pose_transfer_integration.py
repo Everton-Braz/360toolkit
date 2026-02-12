@@ -46,6 +46,26 @@ def _get_pycolmap():
         return None
 
 
+def _open_database_compat(pycolmap_module, database_path: Path):
+    """Open pycolmap database across API variants."""
+    db_path = str(database_path)
+
+    # Variant A: static/class open(path) returning Database
+    try:
+        db_obj = pycolmap_module.Database.open(db_path)
+        if db_obj is not None:
+            return db_obj
+    except TypeError:
+        pass
+    except Exception:
+        pass
+
+    # Variant B: instance open(path)
+    db_obj = pycolmap_module.Database()
+    db_obj.open(db_path)
+    return db_obj
+
+
 @dataclass
 class VirtualCamera:
     """Virtual camera configuration for 9-camera rig."""
@@ -184,7 +204,7 @@ class PoseTransferIntegrator:
     
     def __init__(self, settings):
         self.settings = settings
-        if not HAS_PYCOLMAP:
+        if _get_pycolmap() is None:
             raise ImportError("pycolmap required for Pose Transfer mode")
     
     def run_alignment(
@@ -448,7 +468,6 @@ class PoseTransferIntegrator:
                 "--database_path", str(database_path),
                 "--image_path", str(frames_dir),
                 "--output_path", str(sparse_path),
-                "--Mapper.sphere_camera", "1",
                 "--Mapper.ba_refine_focal_length", "0",
                 "--Mapper.ba_refine_principal_point", "0",
                 "--Mapper.ba_refine_extra_params", "0",
@@ -469,6 +488,11 @@ class PoseTransferIntegrator:
                 "--Mapper.multiple_models", "1",
                 "--Mapper.min_num_matches", "15",
             ]
+
+            if getattr(integrator, "supports_sphere_camera_mapper", False):
+                mapper_args.extend(["--Mapper.sphere_camera", "1"])
+            else:
+                logger.warning("[Mode C] Using COLMAP fallback without --Mapper.sphere_camera")
             
             result = integrator._run_command(mapper_args, progress_callback)
             if result.returncode != 0:
@@ -757,21 +781,25 @@ class PoseTransferIntegrator:
         logger.info("[Mode C] Step 2: Apply rig configuration to database")
         
         # Apply rig config to database
-        db = pycolmap.Database.open(str(database_path))
+        db = _open_database_compat(pycolmap, database_path)
         pycolmap.apply_rig_config([rig_config], db)
         db.close()
         
         logger.info("[Mode C] Step 3: Sequential matching with loop detection")
         
-        # Sequential matching
-        seq_opts = pycolmap.SequentialPairingOptions(
-            loop_detection=True
-        )
-        
-        match_params = {
-            'database_path': str(database_path),
-            'pairing_options': seq_opts
-        }
+        # Sequential matching (pycolmap API variants)
+        if hasattr(pycolmap, "SequentialPairingOptions"):
+            seq_opts = pycolmap.SequentialPairingOptions(loop_detection=True)
+            match_params = {
+                'database_path': str(database_path),
+                'pairing_options': seq_opts
+            }
+        else:
+            seq_opts = pycolmap.SequentialMatchingOptions(loop_detection=True)
+            match_params = {
+                'database_path': str(database_path),
+                'matching_options': seq_opts
+            }
         if device is not None:
             match_params['device'] = device
         
