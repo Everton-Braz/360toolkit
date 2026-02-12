@@ -1,0 +1,132 @@
+/* === BUTTONS === */
+QPushButton {
+    background: {{color.bg_surface}};
+    border: 1px solid {{color.border}};
+    border-radius: {{radius.sm}}px;
+    padding: {{spacing.sm}}px {{spacing.lg}}px;
+    color: {{color.text_primary}};
+}
+
+QPushButton:hover {
+    background: {{color.bg_card_hover}};
+    border-color: {{color.border_soft}};
+}
+
+QPushButton:pressed {
+    background: {{color.bg_card}};
+}
+
+QPushButton:disabled {
+    background: {{color.bg_input}};
+    color: {{color.text_muted}};
+}
+
+QPushButton#startButton {
+    background: {{color.accent}};
+    border: 1px solid {{color.accent}};
+    font-weight: {{font.weight_bold}};
+    color: #ffffff;
+    border-radius: {{radius.sm}}px;
+}
+
+QPushButton#startButton:hover {
+    background: {{color.accent_hover}};
+    border-color: {{color.accent_hover}};
+}
+
+QPushButton#startButton:pressed {
+    background: {{color.accent_pressed}};
+    border-color: {{color.accent_pressed}};
+}
+
+QPushButton#pauseButton {
+    background: {{color.bg_surface}};
+    border: 1px solid {{color.warning}};
+    font-weight: {{font.weight_bold}};
+    color: {{color.warning}};
+    border-radius: {{radius.sm}}px;
+}
+
+QPushButton#pauseButton:hover {
+    background: {{color.bg_card_hover}};
+}
+
+QPushButton#stopButton {
+    background: {{color.bg_surface}};
+    border: 1px solid {{color.danger}};
+    font-weight: {{font.weight_bold}};
+    color: {{color.danger}};
+    border-radius: {{radius.sm}}px;
+}
+
+QPushButton#stopButton:hover {
+    background: {{color.bg_card_hover}};
+}
+
+QPushButton#stopButton:pressed {
+    background: {{color.danger_pressed}};
+}
+
+QPushButton#stagePrimaryButton {
+    background: {{color.accent}};
+    border: none;
+    font-weight: {{font.weight_semibold}};
+    color: #ffffff;
+    border-radius: {{radius.sm}}px;
+    min-width: 140px;
+}
+
+QPushButton#stagePrimaryButton:hover {
+    background: {{color.accent_hover}};
+}
+
+QPushButton#stagePrimaryButton:pressed {
+    background: {{color.accent_pressed}};
+}
+
+QPushButton#stageSecondaryButton {
+    background: {{color.bg_surface}};
+    border: 1px solid {{color.border_soft}};
+    color: {{color.text_secondary}};
+    border-radius: {{radius.sm}}px;
+    min-width: 130px;
+}
+
+QPushButton#stageSecondaryButton:hover {
+    background: {{color.bg_card_hover}};
+    color: {{color.text_primary}};
+}
+
+QPushButton#dangerMiniButton {
+    background: {{color.bg_surface}};
+    border: 1px solid {{color.border_soft}};
+    color: {{color.danger}};
+    border-radius: {{radius.sm}}px;
+    font-weight: {{font.weight_bold}};
+    padding: 0;
+}
+
+QPushButton#dangerMiniButton:hover {
+    background: {{color.danger}};
+    border-color: {{color.danger}};
+    color: #ffffff;
+}
+
+QPushButton#iconButton {
+    background: {{color.bg_surface}};
+    border: 1px solid {{color.border}};
+    color: {{color.text_secondary}};
+    font-weight: {{font.weight_semibold}};
+    padding: 0;
+}
+
+QPushButton#iconButton:hover {
+    background: {{color.bg_card_hover}};
+    border-color: {{color.border_soft}};
+    color: {{color.text_primary}};
+}
+
+QPushButton#iconButton:checked {
+    color: {{color.accent}};
+    border-color: {{color.accent}};
+}

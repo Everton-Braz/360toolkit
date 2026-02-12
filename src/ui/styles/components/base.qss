@@ -1,0 +1,238 @@
+/* === GLOBAL === */
+QMainWindow {
+    background: {{color.bg_app}};
+    color: {{color.text_primary}};
+}
+
+QWidget {
+    background: {{color.bg_app}};
+    color: {{color.text_primary}};
+    font-family: "{{font.family}}", sans-serif;
+    font-size: {{font.size_md}}pt;
+}
+
+QLabel {
+    background: transparent;
+}
+
+QWidget#contentWrapper {
+    background: {{color.bg_app}};
+}
+
+QWidget#rightLogPanel {
+    background: {{color.bg_surface}};
+    border-left: 1px solid {{color.border}};
+}
+
+QScrollArea {
+    border: none;
+    background: {{color.bg_app}};
+}
+
+QScrollBar:vertical {
+    width: 10px;
+    background: {{color.bg_app}};
+}
+
+QScrollBar::handle:vertical {
+    background: {{color.border_soft}};
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: {{color.text_muted}};
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QScrollBar:horizontal {
+    height: 10px;
+    background: {{color.bg_app}};
+}
+
+QScrollBar::handle:horizontal {
+    background: {{color.border_soft}};
+    border-radius: 4px;
+    min-width: 30px;
+}
+
+QSplitter::handle {
+    background: {{color.border}};
+}
+
+QMenuBar {
+    background: {{color.sidebar_bg}};
+    color: {{color.text_primary}};
+    border-bottom: 1px solid {{color.border}};
+    padding: 4px;
+}
+
+QMenuBar::item:selected {
+    background: {{color.accent}};
+    border-radius: {{radius.sm}}px;
+}
+
+QMenu {
+    background: {{color.bg_surface}};
+    border: 1px solid {{color.border}};
+    color: {{color.text_primary}};
+    padding: 4px;
+}
+
+QMenu::item:selected {
+    background: {{color.accent}};
+    border-radius: {{radius.sm}}px;
+}
+
+QStatusBar {
+    background: {{color.sidebar_bg}};
+    color: {{color.text_muted}};
+    border-top: 1px solid {{color.border}};
+}
+
+QFrame#controlSeparator {
+    background: {{color.border}};
+}
+
+QLabel#controlStatus {
+    color: {{color.text_secondary}};
+    font-size: {{font.size_sm}}pt;
+}
+
+QLabel#controlStatus[level="info"] {
+    color: {{color.text_secondary}};
+}
+
+QLabel#controlStatus[level="running"] {
+    color: {{color.accent}};
+}
+
+QLabel#controlStatus[level="ok"] {
+    color: {{color.success}};
+}
+
+QLabel#controlStatus[level="warn"] {
+    color: {{color.warning}};
+}
+
+QLabel#controlStatus[level="error"] {
+    color: {{color.danger}};
+}
+
+QLabel#sidebarBrand {
+    font-size: {{font.size_xl}}pt;
+    font-weight: {{font.weight_bold}};
+    color: {{color.accent}};
+    padding-left: 16px;
+    background: {{color.sidebar_bg}};
+    border-bottom: 1px solid {{color.border}};
+}
+
+QLabel#sidebarVersion {
+    font-size: {{font.size_xs}}pt;
+    color: {{color.text_muted}};
+    padding-left: 16px;
+    background: {{color.sidebar_bg}};
+}
+
+QLabel#sidebarGpuStatus {
+    font-size: {{font.size_xs}}pt;
+    color: {{color.text_muted}};
+    padding-left: 12px;
+    background: {{color.sidebar_bg}};
+    border-top: 1px solid {{color.border}};
+}
+
+QLabel#sidebarGpuStatus[status="ok"] {
+    color: {{color.success}};
+}
+
+QLabel#sidebarGpuStatus[status="warn"] {
+    color: {{color.warning}};
+}
+
+QLabel#sidebarGpuStatus[status="error"] {
+    color: {{color.danger}};
+}
+
+QLabel#sphereStatus {
+    color: {{color.text_muted}};
+    font-size: {{font.size_xs}}pt;
+    padding-left: 24px;
+}
+
+QLabel#sphereStatus[status="ok"] {
+    color: {{color.success}};
+}
+
+QLabel#sphereStatus[status="error"] {
+    color: {{color.danger}};
+}
+
+QLabel[role="secondary"] {
+    color: {{color.text_secondary}};
+    font-size: {{font.size_sm}}pt;
+}
+
+QLabel[role="muted"] {
+    color: {{color.text_muted}};
+    font-size: {{font.size_sm}}pt;
+}
+
+QLabel[role="mutedSmall"] {
+    color: {{color.text_muted}};
+    font-size: {{font.size_xs}}pt;
+}
+
+QLabel[role="accent"] {
+    color: {{color.accent}};
+    font-size: {{font.size_sm}}pt;
+}
+
+QLabel[role="indentedMuted"] {
+    color: {{color.text_muted}};
+    font-size: {{font.size_xs}}pt;
+    padding-left: 24px;
+}
+
+QLabel[role="logHeader"] {
+    color: {{color.text_secondary}};
+    font-size: {{font.size_sm}}pt;
+    font-weight: {{font.weight_bold}};
+}
+
+QLabel#logPanelTitle {
+    color: {{color.text_secondary}};
+    font-size: {{font.size_sm}}pt;
+    font-weight: {{font.weight_semibold}};
+    padding: 2px 0;
+}
+
+QLabel#stageTip {
+    background: {{color.bg_card}};
+    padding: 8px;
+    border-radius: {{radius.sm}}px;
+    color: {{color.accent}};
+    font-size: {{font.size_sm}}pt;
+}
+
+QLabel#metadataLabel {
+    padding: 12px;
+    background: {{color.bg_input}};
+    border-radius: {{radius.sm}}px;
+    color: {{color.text_secondary}};
+}
+
+QLabel#metadataLabel[state="ok"] {
+    background: {{color.bg_card}};
+    color: {{color.text_primary}};
+}
+
+QLabel#metadataLabel[state="error"] {
+    background: {{color.bg_input}};
+    color: {{color.danger}};
+}

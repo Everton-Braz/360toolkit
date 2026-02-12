@@ -9,7 +9,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QPushButton, QLineEdit, QFileDialog, QCheckBox,
-    QMessageBox, QTextEdit, QTabWidget, QWidget, QFormLayout
+    QMessageBox, QTextEdit, QTabWidget, QWidget, QFormLayout, QComboBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -202,6 +202,16 @@ class SettingsDialog(QDialog):
         
         perf_group.setLayout(perf_layout)
         layout.addWidget(perf_group)
+
+        appearance_group = QGroupBox("Appearance")
+        appearance_layout = QFormLayout()
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("Dark", "dark")
+        self.theme_combo.addItem("Light", "light")
+        self.theme_combo.addItem("System", "system")
+        appearance_layout.addRow("Theme:", self.theme_combo)
+        appearance_group.setLayout(appearance_layout)
+        layout.addWidget(appearance_group)
         
         # Recent directories
         dirs_group = QGroupBox("Recent Directories")
@@ -286,6 +296,11 @@ class SettingsDialog(QDialog):
         
         # Performance options
         self.skip_intermediate_checkbox.setChecked(self.settings.get_skip_intermediate_save())
+
+        theme = self.settings.get_theme()
+        theme_index = self.theme_combo.findData(theme)
+        if theme_index >= 0:
+            self.theme_combo.setCurrentIndex(theme_index)
         
         # Directories
         last_input = self.settings.get_last_input_directory()
@@ -543,6 +558,7 @@ class SettingsDialog(QDialog):
         
         # Save performance options
         self.settings.set_skip_intermediate_save(self.skip_intermediate_checkbox.isChecked())
+        self.settings.set_theme(self.theme_combo.currentData())
         
         # Save SDK path
         sdk_path_str = self.sdk_path_edit.text().strip()

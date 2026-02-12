@@ -74,6 +74,7 @@ class SettingsManager:
             'ffmpeg_path': None,
             'yolo_model_path': None,
             'auto_detect_on_startup': True,
+            'theme': 'dark',
             'output_format': 'PNG',
             'default_fps': 1.0,
             'default_h_fov': 110,
@@ -530,6 +531,19 @@ class SettingsManager:
     def get_skip_intermediate_save(self) -> bool:
         """Get skip intermediate save setting (Stage 1 frames saved to temp folder)"""
         return self.settings.get('skip_intermediate_save', False)
+
+    def get_theme(self) -> str:
+        """Get UI theme: dark, light, or system."""
+        return self.settings.get('theme', 'dark')
+
+    def set_theme(self, theme: str):
+        """Set UI theme if valid and save."""
+        valid = {'dark', 'light', 'system'}
+        value = (theme or 'dark').lower()
+        if value not in valid:
+            value = 'dark'
+        self.settings['theme'] = value
+        self.save_settings()
     
     def set_skip_intermediate_save(self, enabled: bool):
         """Set skip intermediate save setting"""
@@ -647,6 +661,7 @@ class SettingsManager:
             'yolo_model_path': None,
             'glomap_path': None,
             'auto_detect_on_startup': True,
+            'theme': 'dark',
             'output_format': 'PNG',
             'default_fps': 1.0,
             'default_h_fov': 110,

@@ -1,0 +1,10 @@
+/* === LOG PANEL === */
+QTextEdit {
+    background: {{color.bg_log}};
+    border: 1px solid {{color.border}};
+    border-radius: {{radius.sm}}px;
+    color: {{color.text_primary}};
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: {{font.size_sm}}pt;
+    padding: {{spacing.sm}}px;
+}

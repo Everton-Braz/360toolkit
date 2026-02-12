@@ -1,0 +1,32 @@
+/* === SIDEBAR === */
+QWidget#sidebar {
+    background: {{color.sidebar_bg}};
+    border-right: 1px solid {{color.border}};
+}
+
+QWidget#sidebar QPushButton {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    text-align: left;
+    padding: {{spacing.sm}}px {{spacing.lg}}px;
+    color: {{color.text_secondary}};
+    font-size: {{font.size_sm}}pt;
+}
+
+QWidget#sidebar QPushButton:hover {
+    background: {{color.sidebar_hover}};
+    color: {{color.text_primary}};
+}
+
+QWidget#sidebar QPushButton:checked {
+    background: {{color.sidebar_active}};
+    color: {{color.accent}};
+    border-left: 3px solid {{color.accent}};
+    font-weight: {{font.weight_bold}};
+}
+
+QWidget#controlBar {
+    background: {{color.bg_surface}};
+    border-bottom: 1px solid {{color.border}};
+}

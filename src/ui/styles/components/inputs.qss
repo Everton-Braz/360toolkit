@@ -1,0 +1,77 @@
+/* === INPUT FIELDS === */
+QLineEdit,
+QSpinBox,
+QDoubleSpinBox,
+QComboBox {
+    background: {{color.bg_input}};
+    border: 1px solid {{color.border}};
+    border-radius: {{radius.sm}}px;
+    padding: {{spacing.sm}}px {{spacing.md}}px;
+    color: {{color.text_primary}};
+    min-height: 18px;
+}
+
+QLineEdit:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus,
+QComboBox:focus {
+    border: 1px solid {{color.focus}};
+}
+
+QComboBox {
+    min-width: 120px;
+}
+
+QComboBox::drop-down {
+    width: 28px;
+    border: none;
+}
+
+QComboBox QAbstractItemView {
+    background: {{color.bg_input}};
+    border: 1px solid {{color.border}};
+    color: {{color.text_primary}};
+    selection-background-color: {{color.accent}};
+}
+
+QCheckBox,
+QRadioButton {
+    spacing: {{spacing.sm}}px;
+    padding: 4px 0;
+}
+
+QCheckBox::indicator,
+QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+}
+
+QFrame#formRow {
+    background: transparent;
+}
+
+QLabel#formRowLabel {
+    color: {{color.text_secondary}};
+    font-size: {{font.size_sm}}pt;
+    min-width: 96px;
+}
+
+QLabel#formRowHint {
+    color: {{color.text_muted}};
+    font-size: {{font.size_xs}}pt;
+}
+
+QProgressBar {
+    border: 1px solid {{color.border}};
+    border-radius: {{radius.sm}}px;
+    background: {{color.bg_input}};
+    text-align: center;
+    color: {{color.text_primary}};
+    font-size: {{font.size_sm}}pt;
+}
+
+QProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {{color.accent}}, stop:1 {{color.success}});
+    border-radius: {{radius.sm}}px;
+}

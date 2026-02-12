@@ -1,0 +1,8 @@
+{
+  "masking_engine": "pytorch",
+  "use_gpu": true,
+  "torch_device": "cuda",
+  "onnx_enabled": true,
+  "batch_size": 8,
+  "yolo_model_size": "small"
+}

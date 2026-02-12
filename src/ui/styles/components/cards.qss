@@ -1,0 +1,93 @@
+/* === CARDS & GROUPS === */
+QFrame#card {
+    background: {{color.bg_surface}};
+    border: none;
+    border-radius: {{radius.md}}px;
+}
+
+QFrame#card QWidget,
+QFrame#stageSummaryStrip QWidget {
+    background: transparent;
+}
+
+QLabel#cardTitle {
+    color: {{color.accent}};
+    font-size: {{font.size_lg}}pt;
+    font-weight: {{font.weight_bold}};
+    padding: 0 0 4px 0;
+}
+
+QLabel#stageTitle {
+    font-size: {{font.size_xl}}pt;
+    font-weight: {{font.weight_bold}};
+    color: {{color.text_primary}};
+}
+
+QLabel#stageDescription {
+    font-size: {{font.size_sm}}pt;
+    color: {{color.text_secondary}};
+    padding: 4px 0 0 0;
+}
+
+QFrame#stageSummaryStrip {
+    background: {{color.bg_surface}};
+    border: none;
+    border-radius: {{radius.sm}}px;
+}
+
+QLabel#stageSummaryBadge {
+    background: {{color.bg_card}};
+    color: {{color.accent}};
+    border: none;
+    border-radius: {{radius.sm}}px;
+    padding: 4px 8px;
+    font-size: {{font.size_sm}}pt;
+    font-weight: {{font.weight_semibold}};
+}
+
+QLabel#stageSummaryText {
+    color: {{color.text_secondary}};
+    font-size: {{font.size_sm}}pt;
+}
+
+QFrame#stageActionFooter {
+    background: transparent;
+}
+
+QWidget#cameraGroupRow {
+    background: {{color.bg_card}};
+    border: none;
+    border-radius: {{radius.sm}}px;
+}
+
+QGroupBox {
+    border: none;
+    margin: 0;
+    padding: 0;
+}
+
+QGroupBox::title {
+    color: {{color.text_primary}};
+}
+
+QGroupBox#flatGroup {
+    border: none;
+}
+
+QTabWidget::pane {
+    border: 1px solid {{color.border}};
+    background: {{color.bg_app}};
+}
+
+QTabBar::tab {
+    background: {{color.bg_surface}};
+    border: 1px solid {{color.border}};
+    padding: {{spacing.sm}}px {{spacing.lg}}px;
+    color: {{color.text_secondary}};
+}
+
+QTabBar::tab:selected {
+    background: {{color.accent}};
+    color: #ffffff;
+    font-weight: {{font.weight_bold}};
+}

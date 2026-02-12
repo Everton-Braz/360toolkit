@@ -1,7 +1,7 @@
 # 360FrameTools - UI Specification
 
 ## Design Philosophy
-**Minimalist, professional, spec-driven interface** for a three-stage photogrammetry preprocessing pipeline.
+**Minimalist, professional, spec-driven interface** for a multi-stage photogrammetry pipeline (Extract → Transform → Mask → Align → Train).
 
 **Core principles**:
 - Clean, uncluttered layout with clear visual hierarchy
@@ -841,6 +841,260 @@ src/ui/
 
 ---
 
+## UI Refactor Blueprint (v1.1 - PyQt6 Widgets)
+
+### Decision
+- **Keep PyQt6 Widgets** (no framework migration required).
+- Refactor should focus on **design tokens, component consistency, and layout hierarchy**.
+- QML migration is optional future work, not required for a modern/professional result.
+
+### Refactor Goals
+- Reduce visual noise and improve readability on all stages.
+- Make one clear primary action per context.
+- Standardize spacing, typography, and component states.
+- Remove duplicated controls and inconsistent interaction patterns.
+- Preserve existing pipeline logic while modernizing presentation.
+
+### Non-Goals (for v1.1)
+- No rewrite of extraction/transforms/masking business logic.
+- No major navigation paradigm switch during first pass.
+- No new premium feature scope creep.
+
+### Information Architecture (Target)
+```
+MainWindow
+├── AppHeader (fixed)
+│   ├── Input selector
+│   ├── Output selector
+│   ├── Primary action: Start Pipeline
+│   ├── Secondary actions: Pause, Stop
+│   └── Global progress + short status
+├── NavigationRail (left)
+│   ├── Overview
+│   ├── Stage 1: Extract
+│   ├── Stage 2: Perspective
+│   ├── Stage 2: Cubemap
+│   ├── Stage 3: Masking
+│   ├── Stage 4: Alignment
+│   └── Stage 5: Training
+├── ContentArea (stacked pages)
+│   └── Stage page with form + preview + contextual actions
+├── LogPanel (bottom, collapsible)
+└── StatusBar (device, warnings, counts)
+```
+
+### Exact Component Map
+
+#### Shared Components (must be reused across all stages)
+- `AppHeaderBar`
+  - Inputs: `input_path`, `output_path`, `pipeline_state`, `overall_progress`
+  - Actions: `browse_input`, `browse_output`, `start`, `pause`, `stop`
+- `StagePageScaffold`
+  - Regions: `summary_strip`, `settings_column`, `preview_column`, `actions_footer`
+- `CardSection`
+  - Title + optional subtitle + content layout
+- `FormRow`
+  - Label, control, hint, validation message
+- `PrimaryButton`, `SecondaryButton`, `DangerButton`
+- `InlineStatusBadge` (Ready / Running / Paused / Error / Complete)
+- `CollapsibleLogPanel`
+
+#### Stage-Specific Components
+- Stage 1:
+  - `FileMetadataCard`
+  - `TimeRangeCard`
+  - `ExtractionMethodCard`
+  - `Stage1PreviewCard`
+- Stage 2 Perspective:
+  - `OutputConfigCard`
+  - `CameraGroupsCard`
+  - `PerspectivePreviewCard`
+  - `CompassLegendBar`
+- Stage 2 Cubemap:
+  - `CubemapConfigCard`
+  - `CubemapGridPreviewCard`
+- Stage 3:
+  - `MaskTargetCard`
+  - `CategoryMatrixCard`
+  - `DetectionSettingsCard`
+  - `MaskPreviewCard`
+- Stage 4:
+  - `ReconstructionMethodCard`
+  - `QualityPresetCard`
+  - `PerformanceCard`
+  - `DependencyStatusCard`
+- Stage 5:
+  - `TrainingTargetCard`
+  - `LichtfeldPathCard`
+  - `TrainingLaunchCard`
+
+### Screen-by-Screen Restructuring
+
+#### Overview Page
+- Keep as orchestration dashboard only.
+- Replace multiple equal-weight stage panels with:
+  1. Pipeline summary strip (enabled stages, estimated outputs)
+  2. Stage checklist with status badges
+  3. Single primary CTA: `Start Pipeline`
+- Move per-stage `Run Stage X` buttons to each stage page footer.
+
+#### Stage 1 (Extract)
+- Two-column layout:
+  - Left: metadata, time range, extraction settings, output settings
+  - Right: preview + expected frame count + validation warnings
+- Add inline computed summary:
+  - `effective_fps`, `expected_frames`, `estimated_disk_usage`
+- Keep one stage action row at bottom: `Run Stage 1`, `Validate Settings`.
+
+#### Stage 2 Perspective
+- Top row: output config + preset selector.
+- Middle row: camera groups editor (left) + live preview/compass (right).
+- Bottom row: per-camera state summary chips (`Export`, `Preview`, `Disabled`, `Mask`).
+- Remove duplicated controls between preview and form where possible.
+
+#### Stage 2 Cubemap
+- Keep dedicated page (not mixed into Perspective panel).
+- Left: cubemap type, tile size, overlap.
+- Right: equirectangular preview with grid overlay.
+- Add compact explanatory hint block under type selector.
+
+#### Stage 3 Masking
+- Keep category matrix, but convert to grouped checklists with counters.
+- Add a compact "Masking profile summary" block:
+  - selected classes count
+  - confidence threshold
+  - device/batch mode
+- Add `Test on Sample` near preview, not mixed with global controls.
+
+#### Stage 4 Alignment
+- Keep mode selector but reduce text density:
+  - concise mode title
+  - one-line description
+  - expandable technical details
+- Show dependency diagnostics in a dedicated warning card.
+- Keep quality/performance options below method selection.
+
+#### Stage 5 Training
+- Minimal form: enable toggle, path selector, launch readiness summary.
+- If Stage 4 output missing, show actionable prerequisite card.
+- Keep this stage visually lighter than processing stages.
+
+### Interaction Rules (UX Contract)
+- Exactly one primary action button per page footer.
+- Disable impossible actions with explicit reason text.
+- Validate immediately on field blur for critical fields (paths, ranges).
+- Persist last-used settings per stage via JSON profile.
+- Progress model:
+  - global progress in header
+  - stage progress in page summary strip
+  - item-level progress in log only
+
+### Style Token File (Concrete)
+
+#### New file
+`src/ui/styles/tokens.py`
+
+#### Required structure
+```python
+TOKENS = {
+    "spacing": {
+        "xs": 4,
+        "sm": 8,
+        "md": 12,
+        "lg": 16,
+        "xl": 24,
+        "xxl": 32,
+    },
+    "radius": {
+        "sm": 4,
+        "md": 8,
+        "lg": 12,
+    },
+    "font": {
+        "family": "Segoe UI",
+        "size_xs": 9,
+        "size_sm": 10,
+        "size_md": 11,
+        "size_lg": 14,
+        "size_xl": 18,
+        "weight_regular": 400,
+        "weight_semibold": 600,
+        "weight_bold": 700,
+    },
+    "color_dark": {
+        "bg_app": "#0F172A",
+        "bg_surface": "#131C31",
+        "bg_card": "#1A2642",
+        "bg_card_hover": "#223156",
+        "border": "#2A3B63",
+        "text_primary": "#E5E7EB",
+        "text_secondary": "#9CA3AF",
+        "accent": "#22D3EE",
+        "success": "#10B981",
+        "warning": "#F59E0B",
+        "error": "#F43F5E",
+        "focus": "#38BDF8",
+    },
+    "elevation": {
+        "card_border": 1,
+    },
+    "control": {
+        "height_sm": 30,
+        "height_md": 36,
+        "height_lg": 42,
+    },
+}
+```
+
+#### Styling pipeline
+- Keep QSS as rendering layer.
+- Generate QSS from token dictionary (single source of truth).
+- Do not hardcode colors inside widget classes.
+
+### QSS Architecture (Concrete)
+```
+src/ui/styles/
+├── tokens.py
+├── dark_theme.qss
+├── light_theme.qss
+├── components/
+│   ├── buttons.qss
+│   ├── inputs.qss
+│   ├── cards.qss
+│   ├── nav.qss
+│   └── log_panel.qss
+└── build_qss.py
+```
+
+### Naming & ObjectName Rules
+- All reusable controls must declare object names:
+  - `btnPrimary`, `btnSecondary`, `btnDanger`
+  - `cardSection`, `formRow`, `statusBadge`
+  - `navItemActive`, `navItemIdle`
+- No anonymous style-critical widgets.
+
+### Usability Acceptance Criteria
+- User can configure and launch pipeline without scrolling more than one viewport per stage (except advanced sections).
+- All required fields expose validation errors inline within 300ms after user commit.
+- Contrast for primary text meets WCAG AA equivalent for desktop dark theme.
+- Keyboard-only navigation completes full pipeline setup.
+- First-time user can identify where to start within 5 seconds.
+
+### Implementation Sequence (Low Risk)
+1. Build tokens + split QSS into component files.
+2. Introduce shared scaffolding widgets (`CardSection`, `FormRow`, `StagePageScaffold`).
+3. Refactor `Overview` and `Stage 1` first (highest onboarding impact).
+4. Refactor `Stage 2` pages (Perspective and Cubemap).
+5. Refactor `Stage 3`, then `Stage 4/5`.
+6. Final pass: accessibility, keyboard flow, visual consistency.
+
+### Notes for Current App State
+- Current app already has strong functional scope; v1.1 should prioritize clarity over adding features.
+- Stage numbering should remain explicit in navigation.
+- Preserve GPU status indicator and processing log visibility.
+
+---
+
 ## Version History
 
 **Version 1.0** (Initial spec)
@@ -849,8 +1103,15 @@ src/ui/
 - Dark theme with minimalist design
 - Modular component architecture
 
+**Version 1.1** (UI Refactor Blueprint)
+- Added concrete PyQt6 refactor blueprint for current multi-stage app
+- Added exact reusable component map and page scaffolds
+- Added screen-by-screen restructuring for Overview + Stages 1-5
+- Added tokenized styling architecture and QSS composition plan
+- Added UX contract and acceptance criteria
+
 ---
 
-**Last Updated**: November 5, 2025  
+**Last Updated**: February 12, 2026  
 **Author**: 360FrameTools Development Team  
 **Status**: Active Development

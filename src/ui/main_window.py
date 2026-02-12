@@ -17,10 +17,10 @@ from PyQt6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox,
     QLineEdit, QSplitter, QScrollArea, QSizePolicy,
     QRadioButton, QButtonGroup, QFrame, QStackedWidget,
-    QApplication, QToolButton, QGridLayout, QSpacerItem
+    QApplication, QToolButton, QGridLayout, QSpacerItem, QStyle
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal
-from PyQt6.QtGui import QFont, QAction, QIcon, QPainter, QColor, QPen, QPixmap
+from PyQt6.QtGui import QFont, QAction, QIcon, QPainter, QColor, QPen, QPixmap, QShortcut, QKeySequence, QPalette
 
 from src.pipeline.batch_orchestrator import BatchOrchestrator
 from src.config.defaults import (
@@ -33,38 +33,16 @@ from src.config.settings import get_settings
 from src.config.config_manager import get_config_manager
 from src.ui.settings_dialog import SettingsDialog
 from src.ui.config_dialog import ConfigManagementDialog, SaveConfigDialog
+from src.ui.styles import build_theme_stylesheet
+from src.ui.widgets import (
+    StageHeader as SharedStageHeader,
+    CardSection as SharedCardSection,
+    StageSummaryStrip,
+    StageActionFooter,
+    FormRow,
+)
 
 logger = logging.getLogger(__name__)
-
-# ============================================================================
-# STYLE CONSTANTS
-# ============================================================================
-COLORS = {
-    'bg_dark': '#1a1a2e',
-    'bg_medium': '#16213e',
-    'bg_light': '#1e2d4a',
-    'bg_card': '#0f3460',
-    'bg_input': '#162447',
-    'accent': '#4a9eff',
-    'accent_hover': '#5cb3ff',
-    'accent_dark': '#3a7fd5',
-    'green': '#00d68f',
-    'green_hover': '#00e09a',
-    'green_dark': '#00b377',
-    'yellow': '#ffaa00',
-    'yellow_hover': '#ffbb33',
-    'red': '#ff3d71',
-    'red_hover': '#ff5a8a',
-    'red_dark': '#cc2f5a',
-    'text_primary': '#e4e6eb',
-    'text_secondary': '#8b949e',
-    'text_muted': '#6b7280',
-    'border': '#30363d',
-    'border_light': '#3d4450',
-    'sidebar_bg': '#0d1b2a',
-    'sidebar_active': '#1b2838',
-    'sidebar_hover': '#162032',
-}
 
 
 class SidebarButton(QPushButton):
@@ -76,60 +54,14 @@ class SidebarButton(QPushButton):
         self.setCheckable(True)
         self.setFixedHeight(48)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet("")  # Will be styled by parent
 
 
-class StageHeader(QFrame):
-    """Reusable stage header with title and description"""
-    
-    def __init__(self, title, description="", parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 16)
-        
-        title_label = QLabel(title)
-        title_label.setStyleSheet(f"""
-            font-size: 20px; font-weight: bold;
-            color: {COLORS['text_primary']}; padding: 0;
-        """)
-        layout.addWidget(title_label)
-        
-        if description:
-            desc_label = QLabel(description)
-            desc_label.setStyleSheet(f"""
-                font-size: 12px; color: {COLORS['text_secondary']};
-                padding: 4px 0 0 0;
-            """)
-            desc_label.setWordWrap(True)
-            layout.addWidget(desc_label)
+class StageHeader(SharedStageHeader):
+    """Backward-compatible alias to shared StageHeader scaffold."""
 
 
-class CardWidget(QFrame):
-    """A styled card container for grouping related settings"""
-    
-    def __init__(self, title="", parent=None):
-        super().__init__(parent)
-        self.setObjectName("card")
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(20, 16, 20, 16)
-        self._layout.setSpacing(12)
-        
-        if title:
-            title_label = QLabel(title)
-            title_label.setStyleSheet(f"""
-                font-size: 14px; font-weight: bold;
-                color: {COLORS['accent']}; padding: 0 0 4px 0;
-            """)
-            self._layout.addWidget(title_label)
-    
-    def addWidget(self, widget):
-        self._layout.addWidget(widget)
-    
-    def addLayout(self, layout):
-        self._layout.addLayout(layout)
-    
-    def addSpacing(self, size):
-        self._layout.addSpacing(size)
+class CardWidget(SharedCardSection):
+    """Backward-compatible alias to shared CardSection scaffold."""
 
 
 class MainWindow(QMainWindow):
@@ -144,13 +76,19 @@ class MainWindow(QMainWindow):
         self.pipeline_config = {}
         self._is_paused = False
         self._auto_advance_enabled = False
+        self._control_bar_compact = False
+        self._user_log_visible = True
+        self._effective_log_visible = True
+        self._resolved_theme = "dark"
         
         self.init_ui()
         self.create_menu_bar()
         self.apply_theme()
+        self._setup_shortcuts()
         
         # Trigger initial visibility  
         self.on_extraction_method_changed(0)
+        self._update_overview_stage_summary()
         
         # Show maximized by default
         self.showMaximized()
@@ -166,20 +104,18 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         
-        # Main body: Sidebar + Content + Log
+        # Main body: Sidebar + Content + Right Log
         body = QSplitter(Qt.Orientation.Horizontal)
         body.setHandleWidth(1)
+        self.main_splitter = body
         
         # LEFT: Sidebar navigation
         self.sidebar = self._create_sidebar()
         body.addWidget(self.sidebar)
         
-        # CENTER+RIGHT: Content area with bottom log
-        content_and_log = QSplitter(Qt.Orientation.Vertical)
-        content_and_log.setHandleWidth(2)
-        
-        # Top part: header bar + stacked content
+        # CENTER: header bar + stacked content
         content_wrapper = QWidget()
+        content_wrapper.setObjectName("contentWrapper")
         content_layout = QVBoxLayout(content_wrapper)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
@@ -198,21 +134,20 @@ class MainWindow(QMainWindow):
         self.page_stack.addWidget(self._create_stage4_page())         # 5
         self.page_stack.addWidget(self._create_stage5_page())         # 6
         content_layout.addWidget(self.page_stack, stretch=1)
-        
-        content_and_log.addWidget(content_wrapper)
-        
-        # Bottom: Log panel  
+
+        body.addWidget(content_wrapper)
+
+        # RIGHT: Log panel
         log_panel = self._create_log_panel()
-        content_and_log.addWidget(log_panel)
-        content_and_log.setStretchFactor(0, 4)
-        content_and_log.setStretchFactor(1, 1)
-        
-        body.addWidget(content_and_log)
+        body.addWidget(log_panel)
+
         body.setStretchFactor(0, 0)  # Sidebar fixed
         body.setStretchFactor(1, 1)  # Content expands
+        body.setStretchFactor(2, 0)  # Right log panel
         
-        # Set sidebar to fixed width
-        body.setSizes([220, 1000])
+        # Sidebar + content + right log panel
+        body.setSizes([196, 1080, 280])
+        QTimer.singleShot(0, self._update_responsive_layout)
         
         root_layout.addWidget(body)
     
@@ -222,28 +157,20 @@ class MainWindow(QMainWindow):
     def _create_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(220)
+        sidebar.setFixedWidth(196)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
         # App branding
         brand = QLabel(f"  360toolkit")
+        brand.setObjectName("sidebarBrand")
         brand.setFixedHeight(56)
-        brand.setStyleSheet(f"""
-            font-size: 16px; font-weight: bold;
-            color: {COLORS['accent']}; padding-left: 16px;
-            background: {COLORS['sidebar_bg']};
-            border-bottom: 1px solid {COLORS['border']};
-        """)
         layout.addWidget(brand)
         
         version_label = QLabel(f"  v{APP_VERSION}")
+        version_label.setObjectName("sidebarVersion")
         version_label.setFixedHeight(24)
-        version_label.setStyleSheet(f"""
-            font-size: 10px; color: {COLORS['text_muted']};
-            padding-left: 16px; background: {COLORS['sidebar_bg']};
-        """)
         layout.addWidget(version_label)
         
         layout.addSpacing(12)
@@ -276,12 +203,9 @@ class MainWindow(QMainWindow):
         
         # Bottom: GPU status indicator
         self.gpu_status_label = QLabel("  GPU: Detecting...")
+        self.gpu_status_label.setObjectName("sidebarGpuStatus")
+        self.gpu_status_label.setProperty("status", "idle")
         self.gpu_status_label.setFixedHeight(32)
-        self.gpu_status_label.setStyleSheet(f"""
-            font-size: 10px; color: {COLORS['text_muted']};
-            padding-left: 12px; background: {COLORS['sidebar_bg']};
-            border-top: 1px solid {COLORS['border']};
-        """)
         layout.addWidget(self.gpu_status_label)
         QTimer.singleShot(500, self._detect_gpu)
         
@@ -318,27 +242,25 @@ class MainWindow(QMainWindow):
                     del t
                     gpu_logger.info(f"[GPU Detect] CUDA kernel test PASSED - full GPU acceleration enabled")
                     self.gpu_status_label.setText(f"  GPU: {name}")
-                    self.gpu_status_label.setStyleSheet(f"""
-                        font-size: 10px; color: {COLORS['green']};
-                        padding-left: 12px; background: {COLORS['sidebar_bg']};
-                        border-top: 1px solid {COLORS['border']};
-                    """)
+                    self.gpu_status_label.setProperty("status", "ok")
+                    self._refresh_widget_style(self.gpu_status_label)
                 except Exception as e:
                     gpu_logger.warning(f"[GPU Detect] CUDA kernel test FAILED: {e}")
                     self.gpu_status_label.setText(f"  GPU: {name} (CPU mode)")
-                    self.gpu_status_label.setStyleSheet(f"""
-                        font-size: 10px; color: {COLORS['yellow']};
-                        padding-left: 12px; background: {COLORS['sidebar_bg']};
-                        border-top: 1px solid {COLORS['border']};
-                    """)
+                    self.gpu_status_label.setProperty("status", "warn")
+                    self._refresh_widget_style(self.gpu_status_label)
             else:
                 gpu_logger.info("[GPU Detect] CUDA not available - CPU only mode")
                 self.gpu_status_label.setText("  GPU: CPU only")
+                self.gpu_status_label.setProperty("status", "warn")
+                self._refresh_widget_style(self.gpu_status_label)
         except Exception as e:
             import traceback
             gpu_logger.warning(f"[GPU Detect] PyTorch not available: {e}")
             gpu_logger.warning(f"[GPU Detect] Full traceback:\n{traceback.format_exc()}")
             self.gpu_status_label.setText("  GPU: PyTorch N/A")
+            self.gpu_status_label.setProperty("status", "error")
+            self._refresh_widget_style(self.gpu_status_label)
     
     # ========================================================================
     # CONTROL BAR (Pipeline actions + progress)
@@ -346,78 +268,109 @@ class MainWindow(QMainWindow):
     def _create_control_bar(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("controlBar")
-        bar.setFixedHeight(72)
+        bar.setFixedHeight(64)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(20, 12, 20, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(8)
+        style = QApplication.style()
         
         # I/O compact
-        layout.addWidget(QLabel("Input:"))
+        self.input_label = QLabel("Input:")
+        layout.addWidget(self.input_label)
         self.input_file_edit = QLineEdit()
         self.input_file_edit.setPlaceholderText("Select .INSV / .mp4 / equirect images folder...")
-        self.input_file_edit.setMinimumWidth(200)
+        self.input_file_edit.setMinimumWidth(130)
         layout.addWidget(self.input_file_edit, stretch=1)
         
-        input_btn = QPushButton("Browse")
-        input_btn.setFixedWidth(72)
-        input_btn.clicked.connect(self.browse_input_file)
-        layout.addWidget(input_btn)
+        self.input_browse_btn = QPushButton("")
+        self.input_browse_btn.setObjectName("iconButton")
+        self.input_browse_btn.setToolTip("Browse input path")
+        self.input_browse_btn.setFixedSize(34, 30)
+        self.input_browse_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
+        self.input_browse_btn.setIconSize(QSize(16, 16))
+        self.input_browse_btn.clicked.connect(self.browse_input_file)
+        layout.addWidget(self.input_browse_btn)
         
         # Separator
-        sep1 = QFrame()
-        sep1.setFixedWidth(1)
-        sep1.setStyleSheet(f"background: {COLORS['border']};")
-        layout.addWidget(sep1)
+        self.control_sep1 = QFrame()
+        self.control_sep1.setObjectName("controlSeparator")
+        self.control_sep1.setFixedWidth(1)
+        layout.addWidget(self.control_sep1)
         
-        layout.addWidget(QLabel("Output:"))
+        self.output_label = QLabel("Output:")
+        layout.addWidget(self.output_label)
         self.output_dir_edit = QLineEdit()
         self.output_dir_edit.setPlaceholderText("Output directory...")
-        self.output_dir_edit.setMinimumWidth(200)
+        self.output_dir_edit.setMinimumWidth(120)
         layout.addWidget(self.output_dir_edit, stretch=1)
         
-        output_btn = QPushButton("Browse")
-        output_btn.setFixedWidth(72)
-        output_btn.clicked.connect(self.browse_output_dir)
-        layout.addWidget(output_btn)
+        self.output_browse_btn = QPushButton("")
+        self.output_browse_btn.setObjectName("iconButton")
+        self.output_browse_btn.setToolTip("Browse output directory")
+        self.output_browse_btn.setFixedSize(34, 30)
+        self.output_browse_btn.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
+        self.output_browse_btn.setIconSize(QSize(16, 16))
+        self.output_browse_btn.clicked.connect(self.browse_output_dir)
+        layout.addWidget(self.output_browse_btn)
         
         # Separator
-        sep2 = QFrame()
-        sep2.setFixedWidth(1)
-        sep2.setStyleSheet(f"background: {COLORS['border']};")
-        layout.addWidget(sep2)
+        self.control_sep2 = QFrame()
+        self.control_sep2.setObjectName("controlSeparator")
+        self.control_sep2.setFixedWidth(1)
+        layout.addWidget(self.control_sep2)
         
         # Action buttons
-        self.start_button = QPushButton("  Start Pipeline")
+        self.start_button = QPushButton("Start")
         self.start_button.setObjectName("startButton")
-        self.start_button.setFixedSize(160, 42)
+        self.start_button.setFixedSize(90, 30)
         self.start_button.clicked.connect(self.start_pipeline)
         layout.addWidget(self.start_button)
         
-        self.pause_button = QPushButton("  Pause")
+        self.pause_button = QPushButton("Pause")
         self.pause_button.setObjectName("pauseButton")
-        self.pause_button.setFixedSize(90, 42)
+        self.pause_button.setFixedSize(78, 30)
         self.pause_button.setEnabled(False)
         self.pause_button.clicked.connect(self.toggle_pause)
         layout.addWidget(self.pause_button)
         
-        self.stop_button = QPushButton("  Stop")
+        self.stop_button = QPushButton("Stop")
         self.stop_button.setObjectName("stopButton")
-        self.stop_button.setFixedSize(90, 42)
+        self.stop_button.setFixedSize(78, 30)
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_pipeline)
         layout.addWidget(self.stop_button)
+
+        self.log_toggle_button = QPushButton("")
+        self.log_toggle_button.setObjectName("iconButton")
+        self.log_toggle_button.setCheckable(True)
+        self.log_toggle_button.setChecked(True)
+        self.log_toggle_button.setFixedSize(34, 30)
+        self.log_toggle_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        self.log_toggle_button.setIconSize(QSize(16, 16))
+        self.log_toggle_button.setToolTip("Show or hide the right log panel")
+        self.log_toggle_button.toggled.connect(self._on_log_toggle_clicked)
+        layout.addWidget(self.log_toggle_button)
+
+        self.theme_toggle_button = QPushButton("◐")
+        self.theme_toggle_button.setObjectName("iconButton")
+        self.theme_toggle_button.setCheckable(True)
+        self.theme_toggle_button.setFixedSize(34, 30)
+        self.theme_toggle_button.setToolTip("Toggle dark/light theme")
+        self.theme_toggle_button.clicked.connect(self._toggle_theme)
+        layout.addWidget(self.theme_toggle_button)
         
         # Progress
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setValue(0)
-        self.progress_bar.setFixedHeight(22)
-        self.progress_bar.setMinimumWidth(180)
+        self.progress_bar.setFixedHeight(20)
+        self.progress_bar.setMinimumWidth(100)
+        self.progress_bar.setMaximumWidth(140)
         layout.addWidget(self.progress_bar)
         
         self.status_label = QLabel("Ready")
-        self.status_label.setFixedWidth(120)
-        self.status_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
+        self.status_label.setObjectName("controlStatus")
+        self.status_label.setFixedWidth(58)
         layout.addWidget(self.status_label)
         
         return bar
@@ -428,13 +381,24 @@ class MainWindow(QMainWindow):
     def _create_overview_page(self) -> QScrollArea:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
             "Pipeline Overview",
             "Configure which stages to run and launch individual stages or the full pipeline."
         ))
+
+        layout.addWidget(StageSummaryStrip(
+            "Overview",
+            "Enable the stages you need, configure details inside each stage page, then run the full pipeline from the header or footer."
+        ))
+
+        summary_card = CardWidget("Pipeline Readiness")
+        self.overview_stage_status_label = QLabel("Enabled stages: 0/5")
+        self.overview_stage_status_label.setObjectName("stageSummaryText")
+        summary_card.addWidget(self.overview_stage_status_label)
+        layout.addWidget(summary_card)
         
         # Stage toggles in a grid
         grid = QGridLayout()
@@ -444,10 +408,12 @@ class MainWindow(QMainWindow):
         card1 = CardWidget("Stage 1: Frame Extraction")
         self.stage1_enable = QCheckBox("Enable extraction from .INSV/.mp4")
         self.stage1_enable.setChecked(True)
+        self.stage1_enable.toggled.connect(self._update_overview_stage_summary)
         card1.addWidget(self.stage1_enable)
-        self.run_stage1_btn = QPushButton("Run Stage 1")
+        self.run_stage1_btn = QPushButton("Configure Stage 1")
         self.run_stage1_btn.setFixedHeight(36)
-        self.run_stage1_btn.clicked.connect(self.run_stage_1_only)
+        self.run_stage1_btn.clicked.connect(lambda: self._open_stage_page(1))
+        self.run_stage1_btn.setObjectName("stageSecondaryButton")
         card1.addWidget(self.run_stage1_btn)
         grid.addWidget(card1, 0, 0)
         
@@ -456,6 +422,7 @@ class MainWindow(QMainWindow):
         stage2_header = QHBoxLayout()
         self.stage2_enable = QCheckBox("Enable perspective/cubemap splitting")
         self.stage2_enable.setChecked(True)
+        self.stage2_enable.toggled.connect(self._update_overview_stage_summary)
         stage2_header.addWidget(self.stage2_enable)
         self.stage2_method_combo = QComboBox()
         self.stage2_method_combo.addItem("Perspective (E2P)", "perspective")
@@ -468,9 +435,10 @@ class MainWindow(QMainWindow):
         self.skip_transform_check.setToolTip("Skip splitting, mask equirect images directly")
         self.skip_transform_check.toggled.connect(self.on_skip_transform_toggled)
         card2.addWidget(self.skip_transform_check)
-        self.run_stage2_btn = QPushButton("Run Stage 2")
+        self.run_stage2_btn = QPushButton("Configure Stage 2")
         self.run_stage2_btn.setFixedHeight(36)
-        self.run_stage2_btn.clicked.connect(self.run_stage_2_only)
+        self.run_stage2_btn.clicked.connect(lambda: self._open_stage_page(2))
+        self.run_stage2_btn.setObjectName("stageSecondaryButton")
         card2.addWidget(self.run_stage2_btn)
         grid.addWidget(card2, 0, 1)
         
@@ -478,10 +446,12 @@ class MainWindow(QMainWindow):
         card3 = CardWidget("Stage 3: AI Masking")
         self.stage3_enable = QCheckBox("Enable AI person/object masking")
         self.stage3_enable.setChecked(True)
+        self.stage3_enable.toggled.connect(self._update_overview_stage_summary)
         card3.addWidget(self.stage3_enable)
-        self.run_stage3_btn = QPushButton("Run Stage 3")
+        self.run_stage3_btn = QPushButton("Configure Stage 3")
         self.run_stage3_btn.setFixedHeight(36)
-        self.run_stage3_btn.clicked.connect(self.run_stage_3_only)
+        self.run_stage3_btn.clicked.connect(lambda: self._open_stage_page(4))
+        self.run_stage3_btn.setObjectName("stageSecondaryButton")
         card3.addWidget(self.run_stage3_btn)
         grid.addWidget(card3, 1, 0)
         
@@ -489,10 +459,12 @@ class MainWindow(QMainWindow):
         card4 = CardWidget("Stage 4: Alignment (SfM)")
         self.stage4_enable = QCheckBox("Enable COLMAP reconstruction")
         self.stage4_enable.setChecked(True)
+        self.stage4_enable.toggled.connect(self._update_overview_stage_summary)
         card4.addWidget(self.stage4_enable)
-        self.run_stage4_btn = QPushButton("Run Stage 4")
+        self.run_stage4_btn = QPushButton("Configure Stage 4")
         self.run_stage4_btn.setFixedHeight(36)
-        self.run_stage4_btn.clicked.connect(self.run_stage_4_only)
+        self.run_stage4_btn.clicked.connect(lambda: self._open_stage_page(5))
+        self.run_stage4_btn.setObjectName("stageSecondaryButton")
         card4.addWidget(self.run_stage4_btn)
         grid.addWidget(card4, 1, 1)
         
@@ -500,14 +472,22 @@ class MainWindow(QMainWindow):
         card5 = CardWidget("Stage 5: Training")
         self.stage5_enable = QCheckBox("Enable Gaussian Splatting training")
         self.stage5_enable.setChecked(False)
+        self.stage5_enable.toggled.connect(self._update_overview_stage_summary)
         card5.addWidget(self.stage5_enable)
-        self.run_stage5_btn = QPushButton("Run Stage 5")
+        self.run_stage5_btn = QPushButton("Configure Stage 5")
         self.run_stage5_btn.setFixedHeight(36)
-        self.run_stage5_btn.clicked.connect(self.run_stage_5_only)
+        self.run_stage5_btn.clicked.connect(lambda: self._open_stage_page(6))
+        self.run_stage5_btn.setObjectName("stageSecondaryButton")
         card5.addWidget(self.run_stage5_btn)
         grid.addWidget(card5, 0, 2)
         
         layout.addLayout(grid)
+
+        overview_footer = StageActionFooter("Start Full Pipeline")
+        overview_footer.primary_button.clicked.connect(self.start_pipeline)
+        overview_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(0))
+        layout.addWidget(overview_footer)
+
         layout.addStretch()
         
         return self._scroll_wrap(page)
@@ -518,12 +498,17 @@ class MainWindow(QMainWindow):
     def _create_stage1_page(self) -> QScrollArea:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
             "Stage 1: Frame Extraction",
             "Extract equirectangular frames from Insta360 .INSV or .mp4 video files."
+        ))
+
+        layout.addWidget(StageSummaryStrip(
+            "Stage 1",
+            "Configure extraction range, method, and quality, then validate metadata before running Stage 1."
         ))
         
         # File Analysis card
@@ -537,11 +522,9 @@ class MainWindow(QMainWindow):
         card_analysis.addLayout(analyze_row)
         
         self.file_metadata_label = QLabel("No file analyzed yet. Click 'Analyze Input File' to see metadata.")
+        self.file_metadata_label.setObjectName("metadataLabel")
+        self.file_metadata_label.setProperty("state", "idle")
         self.file_metadata_label.setWordWrap(True)
-        self.file_metadata_label.setStyleSheet(f"""
-            padding: 12px; background: {COLORS['bg_input']};
-            border-radius: 6px; color: {COLORS['text_secondary']};
-        """)
         card_analysis.addWidget(self.file_metadata_label)
         layout.addWidget(card_analysis)
         
@@ -551,17 +534,19 @@ class MainWindow(QMainWindow):
         self.full_video_check.setChecked(True)
         self.full_video_check.toggled.connect(self.toggle_time_range)
         card_time.addWidget(self.full_video_check)
-        
-        time_row = QHBoxLayout()
-        time_row.addWidget(QLabel("Start (s):"))
+
+        time_range_widget = QWidget()
+        time_row = QHBoxLayout(time_range_widget)
+        time_row.setContentsMargins(0, 0, 0, 0)
+        time_row.setSpacing(12)
+        time_row.addWidget(QLabel("Start"))
         self.start_time_spin = QDoubleSpinBox()
         self.start_time_spin.setRange(0, 999999)
         self.start_time_spin.setValue(0)
         self.start_time_spin.setEnabled(False)
         self.start_time_spin.setFixedWidth(100)
         time_row.addWidget(self.start_time_spin)
-        time_row.addSpacing(16)
-        time_row.addWidget(QLabel("End (s):"))
+        time_row.addWidget(QLabel("End"))
         self.end_time_spin = QDoubleSpinBox()
         self.end_time_spin.setRange(0, 999999)
         self.end_time_spin.setValue(0)
@@ -569,35 +554,27 @@ class MainWindow(QMainWindow):
         self.end_time_spin.setFixedWidth(100)
         time_row.addWidget(self.end_time_spin)
         time_row.addStretch()
-        card_time.addLayout(time_row)
+        card_time.addWidget(FormRow("Range (s):", time_range_widget, "Start and end in seconds"))
         layout.addWidget(card_time)
         
         # Extraction Settings card
         card_extract = CardWidget("Extraction Settings")
         
         # FPS
-        fps_row = QHBoxLayout()
-        fps_row.addWidget(QLabel("Frame Rate (FPS):"))
         self.fps_spin = QDoubleSpinBox()
         self.fps_spin.setRange(0.1, 30.0)
         self.fps_spin.setValue(DEFAULT_FPS)
         self.fps_spin.setSingleStep(0.1)
         self.fps_spin.setFixedWidth(100)
-        fps_row.addWidget(self.fps_spin)
-        fps_row.addStretch()
-        card_extract.addLayout(fps_row)
+        card_extract.addWidget(FormRow("Frame Rate (FPS):", self.fps_spin, "Range: 0.1 to 30.0"))
         
         # Method
-        method_row = QHBoxLayout()
-        method_row.addWidget(QLabel("Extraction Method:"))
         self.extraction_method_combo = QComboBox()
         for key, value in EXTRACTION_METHODS.items():
             self.extraction_method_combo.addItem(value, key)
         self.extraction_method_combo.setMinimumWidth(300)
         self.extraction_method_combo.currentIndexChanged.connect(self.on_extraction_method_changed)
-        method_row.addWidget(self.extraction_method_combo)
-        method_row.addStretch()
-        card_extract.addLayout(method_row)
+        card_extract.addWidget(FormRow("Extraction Method:", self.extraction_method_combo))
         
         # SDK Quality (hidden by default)
         self.sdk_quality_widget = QWidget()
@@ -636,17 +613,19 @@ class MainWindow(QMainWindow):
         card_extract.addWidget(self.sdk_res_widget)
         
         # Output Format
-        fmt_row = QHBoxLayout()
-        fmt_row.addWidget(QLabel("Output Format:"))
         self.output_format_combo = QComboBox()
         self.output_format_combo.addItem("PNG (Lossless)", "png")
         self.output_format_combo.addItem("JPEG (Compressed)", "jpeg")
         self.output_format_combo.setFixedWidth(200)
-        fmt_row.addWidget(self.output_format_combo)
-        fmt_row.addStretch()
-        card_extract.addLayout(fmt_row)
+        card_extract.addWidget(FormRow("Output Format:", self.output_format_combo))
         
         layout.addWidget(card_extract)
+
+        stage1_footer = StageActionFooter("Run Stage 1")
+        stage1_footer.primary_button.clicked.connect(self.run_stage_1_only)
+        stage1_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(1))
+        layout.addWidget(stage1_footer)
+
         layout.addStretch()
         return self._scroll_wrap(page)
     
@@ -656,42 +635,52 @@ class MainWindow(QMainWindow):
     def _create_stage2_persp_page(self) -> QScrollArea:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
             "Stage 2: Perspective Transform (E2P)",
             "Convert equirectangular panoramas to multiple perspective camera views."
         ))
+
+        layout.addWidget(StageSummaryStrip(
+            "Stage 2A",
+            "Configure perspective output size and camera groups for split-view workflows."
+        ))
         
         # Output Resolution card
         card_output = CardWidget("Output Settings")
-        res_row = QHBoxLayout()
-        res_row.addWidget(QLabel("Width:"))
+
+        dims_widget = QWidget()
+        dims_layout = QHBoxLayout(dims_widget)
+        dims_layout.setContentsMargins(0, 0, 0, 0)
+        dims_layout.setSpacing(12)
+
+        dims_layout.addWidget(QLabel("W"))
         self.stage2_width_spin = QSpinBox()
         self.stage2_width_spin.setRange(640, 7680)
         self.stage2_width_spin.setValue(1920)
         self.stage2_width_spin.setSingleStep(128)
         self.stage2_width_spin.setFixedWidth(100)
-        res_row.addWidget(self.stage2_width_spin)
-        res_row.addSpacing(16)
-        res_row.addWidget(QLabel("Height:"))
+        dims_layout.addWidget(self.stage2_width_spin)
+
+        dims_layout.addWidget(QLabel("H"))
         self.stage2_height_spin = QSpinBox()
         self.stage2_height_spin.setRange(480, 3840)
         self.stage2_height_spin.setValue(1920)
         self.stage2_height_spin.setSingleStep(128)
         self.stage2_height_spin.setFixedWidth(100)
-        res_row.addWidget(self.stage2_height_spin)
-        res_row.addSpacing(24)
-        res_row.addWidget(QLabel("Format:"))
+        dims_layout.addWidget(self.stage2_height_spin)
+        dims_layout.addStretch()
+
         self.stage2_format_combo = QComboBox()
         self.stage2_format_combo.addItem("PNG", "png")
         self.stage2_format_combo.addItem("JPEG", "jpeg")
         self.stage2_format_combo.addItem("TIFF", "tiff")
         self.stage2_format_combo.setFixedWidth(120)
-        res_row.addWidget(self.stage2_format_combo)
-        res_row.addStretch()
-        card_output.addLayout(res_row)
+
+        card_output.addWidget(FormRow("Output Size:", dims_widget, "Width × Height in pixels"))
+        card_output.addWidget(FormRow("Format:", self.stage2_format_combo))
         self.stage2_output_group = card_output
         layout.addWidget(card_output)
         
@@ -703,7 +692,7 @@ class MainWindow(QMainWindow):
             "Pitch 0 = horizon, -30 = looking down, +30 = looking up."
         )
         info_label.setWordWrap(True)
-        info_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        info_label.setProperty("role", "muted")
         card_cameras.addWidget(info_label)
         
         # Camera groups container
@@ -726,6 +715,12 @@ class MainWindow(QMainWindow):
         
         self.stage2_perspective_params_group = card_cameras
         layout.addWidget(card_cameras)
+
+        stage2_footer = StageActionFooter("Run Stage 2 (Perspective)")
+        stage2_footer.primary_button.clicked.connect(self.run_stage_2_only)
+        stage2_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(2))
+        layout.addWidget(stage2_footer)
+
         layout.addStretch()
         return self._scroll_wrap(page)
     
@@ -735,26 +730,33 @@ class MainWindow(QMainWindow):
     def _create_stage2_cube_page(self) -> QScrollArea:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
             "Stage 2: Cubemap Transform (E2C)",
             "Convert equirectangular panoramas to cubemap tiles for VR or photogrammetry."
         ))
+
+        layout.addWidget(StageSummaryStrip(
+            "Stage 2B",
+            "Configure cubemap tiling mode and tile dimensions; use 8-tile mode for photogrammetry output layouts."
+        ))
         
         # Tile Size card
         card_tiles = CardWidget("Tile Dimensions")
-        tw_row = QHBoxLayout()
-        tw_row.addWidget(QLabel("Tile Width (px):"))
+        tile_dims_widget = QWidget()
+        tw_row = QHBoxLayout(tile_dims_widget)
+        tw_row.setContentsMargins(0, 0, 0, 0)
+        tw_row.setSpacing(12)
+        tw_row.addWidget(QLabel("W"))
         self.cubemap_tile_width_spin = QSpinBox()
         self.cubemap_tile_width_spin.setRange(512, 8192)
         self.cubemap_tile_width_spin.setValue(1920)
         self.cubemap_tile_width_spin.setSingleStep(128)
         self.cubemap_tile_width_spin.setFixedWidth(100)
         tw_row.addWidget(self.cubemap_tile_width_spin)
-        tw_row.addSpacing(24)
-        tw_row.addWidget(QLabel("Tile Height (px):"))
+        tw_row.addWidget(QLabel("H"))
         self.cubemap_tile_height_spin = QSpinBox()
         self.cubemap_tile_height_spin.setRange(512, 8192)
         self.cubemap_tile_height_spin.setValue(1920)
@@ -762,34 +764,26 @@ class MainWindow(QMainWindow):
         self.cubemap_tile_height_spin.setFixedWidth(100)
         tw_row.addWidget(self.cubemap_tile_height_spin)
         tw_row.addStretch()
-        card_tiles.addLayout(tw_row)
+        card_tiles.addWidget(FormRow("Tile Size (px):", tile_dims_widget, "Width × Height per cubemap tile"))
         
-        fmt_row = QHBoxLayout()
-        fmt_row.addWidget(QLabel("Format:"))
         self.cubemap_format_combo = QComboBox()
         self.cubemap_format_combo.addItem("PNG", "png")
         self.cubemap_format_combo.addItem("JPEG", "jpeg")
         self.cubemap_format_combo.addItem("TIFF", "tiff")
         self.cubemap_format_combo.setFixedWidth(120)
-        fmt_row.addWidget(self.cubemap_format_combo)
-        fmt_row.addStretch()
-        card_tiles.addLayout(fmt_row)
+        card_tiles.addWidget(FormRow("Tile Format:", self.cubemap_format_combo))
         layout.addWidget(card_tiles)
         
         # Cubemap type card
         card_type = CardWidget("Cubemap Type")
         
-        type_row = QHBoxLayout()
-        type_row.addWidget(QLabel("Type:"))
         self.cubemap_type_combo = QComboBox()
         self.cubemap_type_combo.addItem("6-Tile Standard (90 FOV, Separate Files)", "6-face")
         self.cubemap_type_combo.addItem("8-Tile Grid (Photogrammetry)", "8-tile")
         self.cubemap_type_combo.setCurrentIndex(1)
         self.cubemap_type_combo.setMinimumWidth(360)
         self.cubemap_type_combo.currentIndexChanged.connect(self.on_cubemap_type_changed)
-        type_row.addWidget(self.cubemap_type_combo)
-        type_row.addStretch()
-        card_type.addLayout(type_row)
+        card_type.addWidget(FormRow("Type:", self.cubemap_type_combo))
         
         # 8-tile info
         self.tile_8_controls_widget = QWidget()
@@ -800,12 +794,18 @@ class MainWindow(QMainWindow):
             "Overlap is controlled by setting tile width wider than input_width/4."
         )
         t8_info.setWordWrap(True)
-        t8_info.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        t8_info.setProperty("role", "muted")
         t8_layout.addWidget(t8_info)
         self.tile_8_controls_widget.setVisible(True)
         card_type.addWidget(self.tile_8_controls_widget)
         
         layout.addWidget(card_type)
+
+        stage2_cube_footer = StageActionFooter("Run Stage 2 (Cubemap)")
+        stage2_cube_footer.primary_button.clicked.connect(self.run_stage_2_only)
+        stage2_cube_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(3))
+        layout.addWidget(stage2_cube_footer)
+
         layout.addStretch()
         return self._scroll_wrap(page)
     
@@ -815,19 +815,24 @@ class MainWindow(QMainWindow):
     def _create_stage3_page(self) -> QScrollArea:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
             "Stage 3: AI Masking",
             "Detect and mask persons, objects, and animals using YOLO + SAM for photogrammetry."
         ))
+
+        layout.addWidget(StageSummaryStrip(
+            "Stage 3",
+            "Choose masking target, categories, engine, and confidence, then validate before running Stage 3."
+        ))
         
         # Masking Target card
         card_target = CardWidget("Masking Target")
         
         target_info = QLabel("Choose where to apply masks based on your workflow:")
-        target_info.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
+        target_info.setProperty("role", "secondary")
         card_target.addWidget(target_info)
         
         self.mask_split_radio = QRadioButton("Apply to Split Views (RealityScan Workflow)")
@@ -840,10 +845,7 @@ class MainWindow(QMainWindow):
         card_target.addWidget(self.mask_equirect_radio)
         
         tip = QLabel("Tip: Use 'Equirectangular' if enabling Stage 4 for Gaussian Splatting.")
-        tip.setStyleSheet(f"""
-            background: {COLORS['bg_light']}; padding: 8px;
-            border-radius: 4px; color: {COLORS['accent']}; font-size: 11px;
-        """)
+        tip.setObjectName("stageTip")
         tip.setWordWrap(True)
         card_target.addWidget(tip)
         layout.addWidget(card_target)
@@ -855,10 +857,10 @@ class MainWindow(QMainWindow):
         # Persons
         card_persons = CardWidget("Persons")
         self.persons_group = QGroupBox()
+        self.persons_group.setObjectName("flatGroup")
         self.persons_group.setCheckable(True)
         self.persons_group.setChecked(True)
         self.persons_group.setFlat(True)
-        self.persons_group.setStyleSheet("QGroupBox { border: none; }")
         pg_layout = QVBoxLayout(self.persons_group)
         pg_layout.setContentsMargins(0, 0, 0, 0)
         self.person_check = QCheckBox("Person (class 0)")
@@ -870,10 +872,10 @@ class MainWindow(QMainWindow):
         # Objects
         card_objects = CardWidget("Personal Objects")
         self.objects_group = QGroupBox()
+        self.objects_group.setObjectName("flatGroup")
         self.objects_group.setCheckable(True)
         self.objects_group.setChecked(True)
         self.objects_group.setFlat(True)
-        self.objects_group.setStyleSheet("QGroupBox { border: none; }")
         og_layout = QVBoxLayout(self.objects_group)
         og_layout.setContentsMargins(0, 0, 0, 0)
         self.backpack_check = QCheckBox("Backpack (24)")
@@ -900,10 +902,10 @@ class MainWindow(QMainWindow):
         # Animals
         card_animals = CardWidget("Animals")
         self.animals_group = QGroupBox()
+        self.animals_group.setObjectName("flatGroup")
         self.animals_group.setCheckable(True)
         self.animals_group.setChecked(False)
         self.animals_group.setFlat(True)
-        self.animals_group.setStyleSheet("QGroupBox { border: none; }")
         ag_layout = QVBoxLayout(self.animals_group)
         ag_layout.setContentsMargins(0, 0, 0, 0)
         self.bird_check = QCheckBox("Bird (14)")
@@ -919,7 +921,7 @@ class MainWindow(QMainWindow):
         self.horse_check.setChecked(True)
         ag_layout.addWidget(self.horse_check)
         other_lbl = QLabel("+ sheep, cow, elephant, bear, zebra, giraffe")
-        other_lbl.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px;")
+        other_lbl.setProperty("role", "mutedSmall")
         ag_layout.addWidget(other_lbl)
         card_animals.addWidget(self.animals_group)
         cats_layout_h.addWidget(card_animals)
@@ -928,9 +930,7 @@ class MainWindow(QMainWindow):
         
         # Model Settings card
         card_model = CardWidget("Model Settings")
-        
-        engine_row = QHBoxLayout()
-        engine_row.addWidget(QLabel("Masking Engine:"))
+
         self.masking_engine_combo = QComboBox()
         self.masking_engine_combo.addItem("YOLO (ONNX) - Fast", "yolo_onnx")
         self.masking_engine_combo.addItem("YOLO (PyTorch) - Full", "yolo_pytorch")
@@ -939,27 +939,23 @@ class MainWindow(QMainWindow):
         self.masking_engine_combo.setCurrentIndex(0)
         self.masking_engine_combo.setMinimumWidth(280)
         self.masking_engine_combo.currentIndexChanged.connect(self.on_masking_engine_changed)
-        engine_row.addWidget(self.masking_engine_combo)
-        engine_row.addStretch()
-        card_model.addLayout(engine_row)
+        card_model.addWidget(FormRow("Masking Engine:", self.masking_engine_combo))
         
         self.engine_description_label = QLabel("NMS-free inference | 3-4x faster | CUDA accelerated")
-        self.engine_description_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px;")
+        self.engine_description_label.setProperty("role", "mutedSmall")
         card_model.addWidget(self.engine_description_label)
         
         # Model size
         self.model_size_container = QWidget()
         ms_layout = QHBoxLayout(self.model_size_container)
         ms_layout.setContentsMargins(0, 0, 0, 0)
-        ms_layout.addWidget(QLabel("Model Size:"))
         self.model_size_combo = QComboBox()
         self.model_size_combo.addItem("Nano (10MB) - Fastest", "nano")
         self.model_size_combo.addItem("Small (40MB) - Balanced", "small")
         self.model_size_combo.addItem("Medium (90MB) - Best", "medium")
         self.model_size_combo.setCurrentIndex(2)
         self.model_size_combo.setFixedWidth(240)
-        ms_layout.addWidget(self.model_size_combo)
-        ms_layout.addStretch()
+        ms_layout.addWidget(FormRow("Model Size:", self.model_size_combo))
         card_model.addWidget(self.model_size_container)
         
         conf_row = QHBoxLayout()
@@ -971,7 +967,7 @@ class MainWindow(QMainWindow):
         self.confidence_spin.setFixedWidth(80)
         conf_row.addWidget(self.confidence_spin)
         conf_hint = QLabel("(0.5-0.7 recommended)")
-        conf_hint.setStyleSheet(f"color: {COLORS['text_muted']};")
+        conf_hint.setProperty("role", "muted")
         conf_row.addWidget(conf_hint)
         conf_row.addStretch()
         card_model.addLayout(conf_row)
@@ -983,9 +979,14 @@ class MainWindow(QMainWindow):
         self.use_gpu_check.setChecked(True)
         card_gpu.addWidget(self.use_gpu_check)
         gpu_hint = QLabel("3-4x faster with compatible NVIDIA GPU. Auto-fallback to CPU if unavailable.")
-        gpu_hint.setStyleSheet(f"color: {COLORS['accent']}; font-size: 11px;")
+        gpu_hint.setProperty("role", "accent")
         card_gpu.addWidget(gpu_hint)
         layout.addWidget(card_gpu)
+
+        stage3_footer = StageActionFooter("Run Stage 3")
+        stage3_footer.primary_button.clicked.connect(self.run_stage_3_only)
+        stage3_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(4))
+        layout.addWidget(stage3_footer)
         
         layout.addStretch()
         return self._scroll_wrap(page)
@@ -996,12 +997,17 @@ class MainWindow(QMainWindow):
     def _create_stage4_page(self) -> QScrollArea:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
             "Stage 4: Alignment (SfM Reconstruction)",
             "Reconstruct camera poses and 3D structure using COLMAP. Required for Gaussian Splatting."
+        ))
+
+        layout.addWidget(StageSummaryStrip(
+            "Stage 4",
+            "Select reconstruction strategy and quality preset, then resolve dependency warnings before alignment."
         ))
         
         # Reconstruction Method card
@@ -1019,7 +1025,7 @@ class MainWindow(QMainWindow):
         self.alignment_mode_group.addButton(self.mode_rig_sfm_radio, 0)
         card_method.addWidget(self.mode_rig_sfm_radio)
         desc_b = QLabel("  Virtual perspectives + rig constraints (9 cameras per frame)")
-        desc_b.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; padding-left: 24px;")
+        desc_b.setProperty("role", "indentedMuted")
         card_method.addWidget(desc_b)
         
         card_method.addSpacing(4)
@@ -1030,7 +1036,7 @@ class MainWindow(QMainWindow):
         self.alignment_mode_group.addButton(self.mode_sphere_sfm_radio, 1)
         card_method.addWidget(self.mode_sphere_sfm_radio)
         desc_a = QLabel("  Direct spherical matching on equirect images (no cubic conversion)")
-        desc_a.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; padding-left: 24px;")
+        desc_a.setProperty("role", "indentedMuted")
         card_method.addWidget(desc_a)
         
         card_method.addSpacing(4)
@@ -1044,12 +1050,13 @@ class MainWindow(QMainWindow):
         self.alignment_mode_group.addButton(self.mode_pose_transfer_radio, 2)
         card_method.addWidget(self.mode_pose_transfer_radio)
         desc_c = QLabel("  SphereSfM alignment -> perspective extraction -> pose transfer")
-        desc_c.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; padding-left: 24px;")
+        desc_c.setProperty("role", "indentedMuted")
         card_method.addWidget(desc_c)
         
         # SphereSfM status
         self.spheresfm_status_label = QLabel("  Checking SphereSfM...")
-        self.spheresfm_status_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 10px; padding-left: 24px;")
+        self.spheresfm_status_label.setObjectName("sphereStatus")
+        self.spheresfm_status_label.setProperty("status", "idle")
         card_method.addWidget(self.spheresfm_status_label)
         QTimer.singleShot(300, self._check_spheresfm_status)
         
@@ -1072,22 +1079,18 @@ class MainWindow(QMainWindow):
             "Forward ring: 5 cameras | Backward ring: 4 cameras | FOV: 90 | Baseline: 6.5cm"
         )
         cam_info.setWordWrap(True)
-        cam_info.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
+        cam_info.setProperty("role", "secondary")
         self.pose_transfer_config_group.addWidget(cam_info)
         self.pose_transfer_config_group.setVisible(False)
         layout.addWidget(self.pose_transfer_config_group)
         
         # Quality card
         card_quality = CardWidget("Reconstruction Quality")
-        q_row = QHBoxLayout()
-        q_row.addWidget(QLabel("Quality Preset:"))
         self.colmap_quality_combo = QComboBox()
         self.colmap_quality_combo.addItems(["Draft (Fast)", "Medium (Balanced)", "High (Best Quality)"])
         self.colmap_quality_combo.setCurrentIndex(1)
         self.colmap_quality_combo.setFixedWidth(240)
-        q_row.addWidget(self.colmap_quality_combo)
-        q_row.addStretch()
-        card_quality.addLayout(q_row)
+        card_quality.addWidget(FormRow("Quality Preset:", self.colmap_quality_combo))
         layout.addWidget(card_quality)
         
         # Performance card
@@ -1113,9 +1116,14 @@ class MainWindow(QMainWindow):
         self.output_info_label = QLabel(
             "COLMAP output: <output_dir>/stage4_alignment/sparse/0/"
         )
-        self.output_info_label.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        self.output_info_label.setProperty("role", "muted")
         self.output_info_label.setWordWrap(True)
         layout.addWidget(self.output_info_label)
+
+        stage4_footer = StageActionFooter("Run Stage 4")
+        stage4_footer.primary_button.clicked.connect(self.run_stage_4_only)
+        stage4_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(5))
+        layout.addWidget(stage4_footer)
         
         layout.addStretch()
         return self._scroll_wrap(page)
@@ -1126,12 +1134,17 @@ class MainWindow(QMainWindow):
     def _create_stage5_page(self) -> QScrollArea:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
             "Stage 5: Training",
             "Launch Gaussian Splatting training with LichtFeld Studio using the generated COLMAP model."
+        ))
+
+        layout.addWidget(StageSummaryStrip(
+            "Stage 5",
+            "Configure optional training launch and executable path after alignment output is ready."
         ))
         
         card = CardWidget("Training Target")
@@ -1140,7 +1153,6 @@ class MainWindow(QMainWindow):
         card.addWidget(self.train_lichtfeld_check)
         
         path_row = QHBoxLayout()
-        path_row.addWidget(QLabel("Lichtfeld Path:"))
         self.lichtfeld_path_edit = QLineEdit()
         self.lichtfeld_path_edit.setPlaceholderText("Auto-detect or browse...")
         path_row.addWidget(self.lichtfeld_path_edit, stretch=1)
@@ -1148,14 +1160,22 @@ class MainWindow(QMainWindow):
         lf_browse.setFixedWidth(80)
         lf_browse.clicked.connect(self.browse_lichtfeld_path)
         path_row.addWidget(lf_browse)
-        card.addLayout(path_row)
+        path_row_widget = QWidget()
+        path_row_widget.setLayout(path_row)
+        card.addWidget(FormRow("Lichtfeld Path:", path_row_widget))
         
         note = QLabel("Lichtfeld Studio will be launched with the generated COLMAP model for 3DGS training.")
-        note.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 11px;")
+        note.setProperty("role", "muted")
         note.setWordWrap(True)
         card.addWidget(note)
         
         layout.addWidget(card)
+
+        stage5_footer = StageActionFooter("Run Stage 5")
+        stage5_footer.primary_button.clicked.connect(self.run_stage_5_only)
+        stage5_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(6))
+        layout.addWidget(stage5_footer)
+
         layout.addStretch()
         return self._scroll_wrap(page)
     
@@ -1164,13 +1184,16 @@ class MainWindow(QMainWindow):
     # ========================================================================
     def _create_log_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumHeight(120)
+        panel.setObjectName("rightLogPanel")
+        panel.setMinimumWidth(240)
+        panel.setMaximumWidth(340)
+        self.log_panel = panel
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(4)
         
         header = QLabel("Processing Log")
-        header.setStyleSheet(f"font-size: 11px; font-weight: bold; color: {COLORS['text_secondary']};")
+        header.setObjectName("logPanelTitle")
         layout.addWidget(header)
         
         self.log_text = QTextEdit()
@@ -1180,10 +1203,162 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log_text)
         
         return panel
+
+    def _on_log_toggle_clicked(self, checked: bool):
+        self._user_log_visible = checked
+        self._update_responsive_layout()
+
+    def _toggle_theme(self):
+        next_theme = "light" if self._resolved_theme == "dark" else "dark"
+        self.settings.set_theme(next_theme)
+        self.apply_theme()
+
+    def _set_log_panel_visible(self, visible: bool):
+        if visible == self._effective_log_visible:
+            return
+
+        self._effective_log_visible = visible
+        if hasattr(self, "log_panel"):
+            self.log_panel.setVisible(visible)
+
+        if hasattr(self, "main_splitter"):
+            if visible:
+                self.main_splitter.setSizes([196, 1080, 280])
+            else:
+                self.main_splitter.setSizes([196, 1180, 0])
+
+    def _update_responsive_layout(self):
+        compact_controls = self.width() < 1700
+        auto_hide_log = self.width() < 1460
+
+        self._set_control_bar_compact(compact_controls)
+
+        if auto_hide_log:
+            if hasattr(self, "log_toggle_button"):
+                self.log_toggle_button.setEnabled(False)
+                self.log_toggle_button.blockSignals(True)
+                self.log_toggle_button.setChecked(False)
+                self.log_toggle_button.blockSignals(False)
+                self.log_toggle_button.setToolTip("Log auto-hidden on smaller window widths")
+            self._set_log_panel_visible(False)
+            return
+
+        if hasattr(self, "log_toggle_button"):
+            self.log_toggle_button.setEnabled(True)
+            self.log_toggle_button.blockSignals(True)
+            self.log_toggle_button.setChecked(self._user_log_visible)
+            self.log_toggle_button.blockSignals(False)
+            self.log_toggle_button.setToolTip("Show or hide the right log panel")
+
+        self._set_log_panel_visible(self._user_log_visible)
+
+    def _set_control_bar_compact(self, compact: bool):
+        if compact == self._control_bar_compact:
+            return
+
+        self._control_bar_compact = compact
+
+        # Reduce secondary chrome first in compact mode
+        for widget in (
+            self.input_label,
+            self.output_label,
+            self.control_sep1,
+            self.control_sep2,
+            self.progress_bar,
+            self.status_label,
+        ):
+            widget.setVisible(not compact)
+
+        if compact:
+            self.control_bar.setFixedHeight(56)
+            self.input_file_edit.setMinimumWidth(90)
+            self.output_dir_edit.setMinimumWidth(90)
+            self.input_browse_btn.setFixedSize(30, 28)
+            self.output_browse_btn.setFixedSize(30, 28)
+            self.start_button.setFixedSize(80, 28)
+            self.pause_button.setFixedSize(68, 28)
+            self.stop_button.setFixedSize(68, 28)
+            self.log_toggle_button.setFixedSize(30, 28)
+            self.theme_toggle_button.setFixedSize(30, 28)
+        else:
+            self.control_bar.setFixedHeight(64)
+            self.input_file_edit.setMinimumWidth(130)
+            self.output_dir_edit.setMinimumWidth(120)
+            self.input_browse_btn.setFixedSize(34, 30)
+            self.output_browse_btn.setFixedSize(34, 30)
+            self.start_button.setFixedSize(90, 30)
+            self.pause_button.setFixedSize(78, 30)
+            self.stop_button.setFixedSize(78, 30)
+            self.log_toggle_button.setFixedSize(34, 30)
+            self.theme_toggle_button.setFixedSize(34, 30)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_responsive_layout()
     
     # ========================================================================
     # HELPERS
     # ========================================================================
+    def _open_stage_page(self, page_index: int):
+        """Navigate to a specific stage page and sync sidebar selection."""
+        self.page_stack.setCurrentIndex(page_index)
+        if 0 <= page_index < len(self.nav_buttons):
+            self.nav_buttons[page_index].setChecked(True)
+
+    def _validate_stage_config(self, stage_index: int):
+        """Lightweight inline validation checks for each stage."""
+        input_path = self.input_file_edit.text().strip()
+        output_path = self.output_dir_edit.text().strip()
+
+        if stage_index in (0, 1, 2, 3, 4, 5, 6):
+            if not input_path:
+                self.log_message("[WARN] Validation: Input path is not set.")
+                self._set_control_status("Input path missing", "warn")
+                return
+            if not output_path:
+                self.log_message("[WARN] Validation: Output path is not set.")
+                self._set_control_status("Output path missing", "warn")
+                return
+
+        if stage_index == 1 and not self.full_video_check.isChecked():
+            if self.end_time_spin.value() <= self.start_time_spin.value():
+                self.log_message("[WARN] Stage 1 validation: End time must be greater than start time.")
+                self._set_control_status("Invalid Stage 1 time range", "warn")
+                return
+
+        if stage_index in (2, 3) and self.skip_transform_check.isChecked():
+            self.log_message("[INFO] Stage 2 validation: Transform is skipped (direct masking mode enabled).")
+            self._set_control_status("Stage 2 skipped (direct mask)", "info")
+            return
+
+        if stage_index == 4 and not (
+            self.persons_group.isChecked() or self.objects_group.isChecked() or self.animals_group.isChecked()
+        ):
+            self.log_message("[WARN] Stage 3 validation: No masking category group is enabled.")
+            self._set_control_status("No masking categories enabled", "warn")
+            return
+
+        if stage_index == 6 and self.train_lichtfeld_check.isChecked() and not self.lichtfeld_path_edit.text().strip():
+            self.log_message("[WARN] Stage 5 validation: Lichtfeld path is required when training is enabled.")
+            self._set_control_status("Lichtfeld path required", "warn")
+            return
+
+        self.log_message("[OK] Validation passed for current stage configuration.")
+        self._set_control_status("Validation passed", "ok")
+
+    def _set_control_status(self, text: str, level: str = "info"):
+        """Update top control status with semantic color states."""
+        if not hasattr(self, 'status_label'):
+            return
+        self.status_label.setText((text or "")[:40])
+        self.status_label.setProperty("level", level)
+        self._refresh_widget_style(self.status_label)
+
+    def _refresh_widget_style(self, widget: QWidget):
+        """Force Qt to re-apply dynamic property based styles."""
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
     def _scroll_wrap(self, widget: QWidget) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1195,39 +1370,48 @@ class MainWindow(QMainWindow):
     def _add_camera_group(self, camera_count=8, pitch=0, fov=110, name=None):
         """Add a camera group row"""
         w = QWidget()
+        w.setObjectName("cameraGroupRow")
         row = QHBoxLayout(w)
-        row.setContentsMargins(8, 4, 8, 4)
-        row.setSpacing(12)
+        row.setContentsMargins(10, 8, 10, 8)
+        row.setSpacing(10)
         
         if name is None:
             name = f"Group {len(self.camera_group_widgets) + 1}"
         lbl = QLabel(f"{name}:")
         lbl.setFixedWidth(90)
-        lbl.setStyleSheet("font-weight: bold;")
+        lbl.setProperty("role", "secondary")
         row.addWidget(lbl)
         
-        row.addWidget(QLabel("Cameras:"))
+        cams_lbl = QLabel("Cams")
+        cams_lbl.setProperty("role", "muted")
+        row.addWidget(cams_lbl)
         cc_spin = QSpinBox()
         cc_spin.setRange(1, 12)
         cc_spin.setValue(camera_count)
-        cc_spin.setFixedWidth(60)
+        cc_spin.setFixedWidth(68)
         row.addWidget(cc_spin)
         
-        row.addWidget(QLabel("Pitch:"))
+        pitch_lbl = QLabel("Pitch")
+        pitch_lbl.setProperty("role", "muted")
+        row.addWidget(pitch_lbl)
         p_spin = QSpinBox()
         p_spin.setRange(-90, 90)
         p_spin.setValue(pitch)
-        p_spin.setFixedWidth(60)
+        p_spin.setFixedWidth(68)
         row.addWidget(p_spin)
         
-        row.addWidget(QLabel("FOV:"))
+        fov_lbl = QLabel("FOV")
+        fov_lbl.setProperty("role", "muted")
+        row.addWidget(fov_lbl)
         f_spin = QSpinBox()
         f_spin.setRange(30, 150)
         f_spin.setValue(fov)
-        f_spin.setFixedWidth(60)
+        f_spin.setFixedWidth(68)
         row.addWidget(f_spin)
         
-        rm_btn = QPushButton("X")
+        rm_btn = QPushButton("−")
+        rm_btn.setObjectName("dangerMiniButton")
+        rm_btn.setToolTip("Remove this camera group")
         rm_btn.setFixedSize(28, 28)
         rm_btn.clicked.connect(lambda: self._remove_camera_group(w))
         row.addWidget(rm_btn)
@@ -1298,7 +1482,7 @@ class MainWindow(QMainWindow):
         
         settings_menu = menubar.addMenu("&Settings")
         pref_action = QAction("&Preferences...", self)
-        pref_action.setShortcut("Ctrl+P")
+        pref_action.setShortcut("Ctrl+,")
         pref_action.triggered.connect(self.open_settings)
         settings_menu.addAction(pref_action)
         settings_menu.addSeparator()
@@ -1310,6 +1494,34 @@ class MainWindow(QMainWindow):
         about_action = QAction("&About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
+
+    def _setup_shortcuts(self):
+        """Keyboard shortcuts for core pipeline controls."""
+        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.start_pipeline)
+        QShortcut(QKeySequence("Ctrl+P"), self, activated=self.toggle_pause)
+        QShortcut(QKeySequence("Ctrl+Shift+P"), self, activated=self.stop_pipeline)
+        QShortcut(QKeySequence("F5"), self, activated=self._refresh_current_page)
+
+    def _refresh_current_page(self):
+        """Soft refresh hook for current page state feedback."""
+        self.log_message("[INFO] UI refreshed.")
+        self._update_overview_stage_summary()
+
+    def _update_overview_stage_summary(self):
+        """Update overview readiness summary from stage toggles."""
+        if not hasattr(self, 'overview_stage_status_label'):
+            return
+        checks = [
+            getattr(self, 'stage1_enable', None),
+            getattr(self, 'stage2_enable', None),
+            getattr(self, 'stage3_enable', None),
+            getattr(self, 'stage4_enable', None),
+            getattr(self, 'stage5_enable', None),
+        ]
+        enabled_count = sum(1 for check in checks if check is not None and check.isChecked())
+        self.overview_stage_status_label.setText(
+            f"Enabled stages: {enabled_count}/5 | Ready: {'Yes' if enabled_count > 0 else 'No'}"
+        )
     
     # ========================================================================
     # DIALOG HANDLERS
@@ -1337,6 +1549,7 @@ class MainWindow(QMainWindow):
         self.on_settings_changed()
     
     def on_settings_changed(self):
+        self.apply_theme()
         sdk_path = self.settings.get_sdk_path()
         ffmpeg_path = self.settings.get_ffmpeg_path()
         parts = []
@@ -1562,16 +1775,19 @@ class MainWindow(QMainWindow):
             status = verify_spheresfm_installation()
             if status['installed']:
                 self.spheresfm_status_label.setText(f"  SphereSfM available ({status.get('version', 'Unknown')})")
-                self.spheresfm_status_label.setStyleSheet(f"color: {COLORS['green']}; font-size: 10px; padding-left: 24px;")
+                self.spheresfm_status_label.setProperty("status", "ok")
+                self._refresh_widget_style(self.spheresfm_status_label)
                 self.mode_sphere_sfm_radio.setEnabled(True)
             else:
                 self.spheresfm_status_label.setText(f"  SphereSfM not available: {status.get('error', 'Unknown')}")
-                self.spheresfm_status_label.setStyleSheet(f"color: {COLORS['red']}; font-size: 10px; padding-left: 24px;")
+                self.spheresfm_status_label.setProperty("status", "error")
+                self._refresh_widget_style(self.spheresfm_status_label)
                 self.mode_sphere_sfm_radio.setEnabled(False)
                 self.mode_rig_sfm_radio.setChecked(True)
         except Exception as e:
             self.spheresfm_status_label.setText(f"  SphereSfM error: {e}")
-            self.spheresfm_status_label.setStyleSheet(f"color: {COLORS['red']}; font-size: 10px; padding-left: 24px;")
+            self.spheresfm_status_label.setProperty("status", "error")
+            self._refresh_widget_style(self.spheresfm_status_label)
             self.mode_sphere_sfm_radio.setEnabled(False)
             self.mode_rig_sfm_radio.setChecked(True)
     
@@ -1619,10 +1835,8 @@ class MainWindow(QMainWindow):
                 f"<b>Camera:</b> {info.get('camera_model', 'Unknown')} | "
                 f"<b>Size:</b> {info.get('file_size_mb', 0):.1f} MB"
             )
-            self.file_metadata_label.setStyleSheet(f"""
-                padding: 12px; background: {COLORS['bg_light']};
-                border-radius: 6px; color: {COLORS['text_primary']};
-            """)
+            self.file_metadata_label.setProperty("state", "ok")
+            self._refresh_widget_style(self.file_metadata_label)
             duration = info.get('duration', 0)
             self.end_time_spin.setMaximum(duration)
             self.end_time_spin.setValue(duration)
@@ -1637,6 +1851,8 @@ class MainWindow(QMainWindow):
             self.log_message(f"Analyzed: {Path(input_file).name}")
         else:
             self.file_metadata_label.setText(f"Error: {info.get('error', 'Unknown')}")
+            self.file_metadata_label.setProperty("state", "error")
+            self._refresh_widget_style(self.file_metadata_label)
     
     # ========================================================================
     # PIPELINE EXECUTION
@@ -1650,12 +1866,15 @@ class MainWindow(QMainWindow):
         
         if not input_file:
             QMessageBox.warning(self, "Input Required", "Please select an input file.")
+            self._set_control_status("Input required", "warn")
             return
         if not output_dir:
             QMessageBox.warning(self, "Output Required", "Please select an output directory.")
+            self._set_control_status("Output required", "warn")
             return
         if not Path(input_file).exists():
             QMessageBox.warning(self, "Not Found", f"Input file not found:\n{input_file}")
+            self._set_control_status("Input file not found", "error")
             return
         
         stage2_method = self.stage2_method_combo.currentData()
@@ -1775,6 +1994,7 @@ class MainWindow(QMainWindow):
         
         self.log_text.clear()
         self.log_message("Starting pipeline...")
+        self._set_control_status("Starting pipeline", "running")
         
         self.orchestrator.run_pipeline(
             config=self.pipeline_config,
@@ -1787,6 +2007,7 @@ class MainWindow(QMainWindow):
     def stop_pipeline(self):
         self.orchestrator.cancel()
         self.log_message("Pipeline stopped by user")
+        self._set_control_status("Stopped", "warn")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.pause_button.setEnabled(False)
@@ -1796,11 +2017,13 @@ class MainWindow(QMainWindow):
             self.orchestrator.resume()
             self.pause_button.setText("  Pause")
             self.log_message("Pipeline resumed")
+            self._set_control_status("Running", "running")
             self._is_paused = False
         else:
             self.orchestrator.pause()
             self.pause_button.setText("  Resume")
             self.log_message("Pipeline paused")
+            self._set_control_status("Paused", "warn")
             self._is_paused = True
     
     # ========================================================================
@@ -1925,7 +2148,7 @@ class MainWindow(QMainWindow):
     def on_progress(self, current: int, total: int, message: str):
         if total > 0:
             self.progress_bar.setValue(int((current / total) * 100))
-        self.status_label.setText(message[:40])
+        self._set_control_status(message, "running")
         self.log_message(message)
     
     def on_stage_complete(self, stage_number: int, results: dict):
@@ -1960,13 +2183,16 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(100)
         if results.get('success'):
             self.log_message("Pipeline complete!")
+            self._set_control_status("Completed", "ok")
             QMessageBox.information(self, "Success", "Pipeline completed successfully!")
         else:
             self.log_message(f"Pipeline failed: {results.get('error')}")
+            self._set_control_status("Failed", "error")
             QMessageBox.warning(self, "Failed", f"Pipeline failed:\n{results.get('error')}")
     
     def on_error(self, error_message: str):
         self.log_message(f"Error: {error_message}")
+        self._set_control_status("Error", "error")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.pause_button.setEnabled(False)
@@ -1979,273 +2205,17 @@ class MainWindow(QMainWindow):
     # THEME
     # ========================================================================
     def apply_theme(self):
-        self.setStyleSheet(f"""
-            /* === GLOBAL === */
-            QMainWindow {{
-                background: {COLORS['bg_dark']};
-                color: {COLORS['text_primary']};
-            }}
-            QWidget {{
-                background: {COLORS['bg_dark']};
-                color: {COLORS['text_primary']};
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 12px;
-            }}
-            
-            /* === SIDEBAR === */
-            QWidget#sidebar {{
-                background: {COLORS['sidebar_bg']};
-                border-right: 1px solid {COLORS['border']};
-            }}
-            QWidget#sidebar QPushButton {{
-                background: transparent;
-                border: none;
-                border-radius: 0;
-                text-align: left;
-                padding: 12px 16px;
-                color: {COLORS['text_secondary']};
-                font-size: 12px;
-            }}
-            QWidget#sidebar QPushButton:hover {{
-                background: {COLORS['sidebar_hover']};
-                color: {COLORS['text_primary']};
-            }}
-            QWidget#sidebar QPushButton:checked {{
-                background: {COLORS['sidebar_active']};
-                color: {COLORS['accent']};
-                border-left: 3px solid {COLORS['accent']};
-                font-weight: bold;
-            }}
-            
-            /* === CONTROL BAR === */
-            QWidget#controlBar {{
-                background: {COLORS['bg_medium']};
-                border-bottom: 1px solid {COLORS['border']};
-            }}
-            
-            /* === CARDS === */
-            QFrame#card {{
-                background: {COLORS['bg_medium']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-            }}
-            
-            /* === INPUT FIELDS === */
-            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
-                background: {COLORS['bg_input']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 6px;
-                padding: 8px 12px;
-                color: {COLORS['text_primary']};
-                font-size: 12px;
-                min-height: 20px;
-            }}
-            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
-                border: 1px solid {COLORS['accent']};
-            }}
-            QComboBox {{
-                min-width: 120px;
-            }}
-            QComboBox::drop-down {{
-                width: 28px;
-                border: none;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {COLORS['bg_input']};
-                border: 1px solid {COLORS['border']};
-                color: {COLORS['text_primary']};
-                selection-background-color: {COLORS['accent']};
-            }}
-            
-            /* === BUTTONS === */
-            QPushButton {{
-                background: {COLORS['bg_light']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 6px;
-                padding: 8px 16px;
-                color: {COLORS['text_primary']};
-                font-size: 12px;
-            }}
-            QPushButton:hover {{
-                background: {COLORS['accent']};
-                border-color: {COLORS['accent']};
-            }}
-            QPushButton:pressed {{
-                background: {COLORS['accent_dark']};
-            }}
-            QPushButton:disabled {{
-                background: {COLORS['bg_input']};
-                color: {COLORS['text_muted']};
-            }}
-            
-            /* ACTION BUTTONS */
-            QPushButton#startButton {{
-                background: {COLORS['green']};
-                border: none;
-                font-weight: bold;
-                font-size: 13px;
-                color: #fff;
-                border-radius: 8px;
-            }}
-            QPushButton#startButton:hover {{
-                background: {COLORS['green_hover']};
-            }}
-            QPushButton#startButton:pressed {{
-                background: {COLORS['green_dark']};
-            }}
-            QPushButton#startButton:disabled {{
-                background: #3d5a4a;
-                color: #888;
-            }}
-            QPushButton#pauseButton {{
-                background: {COLORS['yellow']};
-                border: none;
-                font-weight: bold;
-                color: #1a1a2e;
-                border-radius: 8px;
-            }}
-            QPushButton#pauseButton:hover {{
-                background: {COLORS['yellow_hover']};
-            }}
-            QPushButton#stopButton {{
-                background: {COLORS['red']};
-                border: none;
-                font-weight: bold;
-                color: #fff;
-                border-radius: 8px;
-            }}
-            QPushButton#stopButton:hover {{
-                background: {COLORS['red_hover']};
-            }}
-            QPushButton#stopButton:pressed {{
-                background: {COLORS['red_dark']};
-            }}
-            
-            /* === PROGRESS BAR === */
-            QProgressBar {{
-                border: 1px solid {COLORS['border']};
-                border-radius: 6px;
-                background: {COLORS['bg_input']};
-                text-align: center;
-                color: {COLORS['text_primary']};
-                font-size: 11px;
-            }}
-            QProgressBar::chunk {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {COLORS['accent']}, stop:1 {COLORS['green']});
-                border-radius: 5px;
-            }}
-            
-            /* === CHECKBOXES & RADIOS === */
-            QCheckBox, QRadioButton {{
-                spacing: 8px;
-                padding: 4px 0;
-                font-size: 12px;
-            }}
-            QCheckBox::indicator, QRadioButton::indicator {{
-                width: 18px;
-                height: 18px;
-            }}
-            
-            /* === LOG === */
-            QTextEdit {{
-                background: #0a0e1a;
-                border: 1px solid {COLORS['border']};
-                border-radius: 6px;
-                color: {COLORS['text_primary']};
-                font-family: 'Cascadia Code', 'Consolas', monospace;
-                font-size: 11px;
-                padding: 8px;
-            }}
-            
-            /* === SCROLL AREA === */
-            QScrollArea {{
-                border: none;
-                background: {COLORS['bg_dark']};
-            }}
-            QScrollBar:vertical {{
-                width: 10px;
-                background: {COLORS['bg_dark']};
-            }}
-            QScrollBar::handle:vertical {{
-                background: {COLORS['border_light']};
-                border-radius: 4px;
-                min-height: 30px;
-            }}
-            QScrollBar::handle:vertical:hover {{
-                background: {COLORS['text_muted']};
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0;
-            }}
-            QScrollBar:horizontal {{
-                height: 10px;
-                background: {COLORS['bg_dark']};
-            }}
-            QScrollBar::handle:horizontal {{
-                background: {COLORS['border_light']};
-                border-radius: 4px;
-                min-width: 30px;
-            }}
-            
-            /* === GROUP BOX === */
-            QGroupBox {{
-                border: none;
-                margin: 0;
-                padding: 0;
-            }}
-            QGroupBox::title {{
-                color: {COLORS['text_primary']};
-            }}
-            
-            /* === SPLITTER === */
-            QSplitter::handle {{
-                background: {COLORS['border']};
-            }}
-            
-            /* === TAB WIDGET (if used) === */
-            QTabWidget::pane {{
-                border: 1px solid {COLORS['border']};
-                background: {COLORS['bg_dark']};
-            }}
-            QTabBar::tab {{
-                background: {COLORS['bg_medium']};
-                border: 1px solid {COLORS['border']};
-                padding: 10px 20px;
-                color: {COLORS['text_secondary']};
-            }}
-            QTabBar::tab:selected {{
-                background: {COLORS['accent']};
-                color: #fff;
-                font-weight: bold;
-            }}
-            
-            /* === MENU BAR === */
-            QMenuBar {{
-                background: {COLORS['sidebar_bg']};
-                color: {COLORS['text_primary']};
-                border-bottom: 1px solid {COLORS['border']};
-                padding: 4px;
-            }}
-            QMenuBar::item:selected {{
-                background: {COLORS['accent']};
-                border-radius: 4px;
-            }}
-            QMenu {{
-                background: {COLORS['bg_medium']};
-                border: 1px solid {COLORS['border']};
-                color: {COLORS['text_primary']};
-                padding: 4px;
-            }}
-            QMenu::item:selected {{
-                background: {COLORS['accent']};
-                border-radius: 4px;
-            }}
-            
-            /* === STATUS BAR === */
-            QStatusBar {{
-                background: {COLORS['sidebar_bg']};
-                color: {COLORS['text_muted']};
-                border-top: 1px solid {COLORS['border']};
-            }}
-        """)
+        mode = self.settings.get_theme()
+        if mode == "system":
+            app = QApplication.instance()
+            is_dark = bool(app and app.styleHints().colorScheme() == Qt.ColorScheme.Dark)
+            mode = "dark" if is_dark else "light"
+        if mode not in ("dark", "light"):
+            mode = "dark"
+        self._resolved_theme = mode
+        self.setStyleSheet(build_theme_stylesheet(mode))
+        if hasattr(self, "theme_toggle_button"):
+            self.theme_toggle_button.blockSignals(True)
+            self.theme_toggle_button.setChecked(mode == "dark")
+            self.theme_toggle_button.setText("☾" if mode == "dark" else "☀")
+            self.theme_toggle_button.blockSignals(False)
