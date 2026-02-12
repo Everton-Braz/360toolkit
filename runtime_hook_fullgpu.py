@@ -5,109 +5,103 @@ Sets up paths for PyTorch CUDA, ONNX Runtime CUDA, SDK, and FFmpeg
 
 import os
 import sys
-import types
-import builtins
+
+# Fix OpenMP DLL conflict (libomp.dll vs libiomp5md.dll)
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 # ==============================================================================
-# CRITICAL: Handle torch.distributed imports in frozen PyInstaller apps
-# PyTorch 2.11+ accesses torch.distributed.rpc during its own initialization
-# This causes circular import issues in frozen apps where distributed is missing
+# CRITICAL: Preload MKL/BLAS DLLs for numpy in frozen app (Python 3.10+ Windows)
+# numpy._umath_linalg needs MKL DLLs, but frozen apps restrict DLL search paths.
+# We must add DLL directories AND preload key DLLs before numpy loads.
 # ==============================================================================
-
-# Pre-create stub modules in sys.modules
-def _create_distributed_stubs():
-    """Create fake torch.distributed.* modules before torch imports."""
+if getattr(sys, 'frozen', False) and sys.platform == 'win32':
+    _base = sys._MEIPASS
+    # Add _internal to DLL search path
+    if hasattr(os, 'add_dll_directory'):
+        try:
+            os.add_dll_directory(_base)
+        except (OSError, FileNotFoundError):
+            pass
+        # Also add torch/lib subdir
+        _torch_lib = os.path.join(_base, 'torch', 'lib')
+        if os.path.isdir(_torch_lib):
+            try:
+                os.add_dll_directory(_torch_lib)
+            except (OSError, FileNotFoundError):
+                pass
     
-    # Base distributed module
-    distributed = types.ModuleType('torch.distributed')
-    distributed.__file__ = '<stub:torch.distributed>'
-    distributed.__path__ = []
-    distributed.__package__ = 'torch.distributed'
-    distributed.is_available = lambda: False
-    distributed.is_initialized = lambda: False
-    distributed.is_mpi_available = lambda: False
-    distributed.is_nccl_available = lambda: False
-    distributed.is_gloo_available = lambda: False
-    distributed.get_world_size = lambda *args, **kwargs: 1
-    distributed.get_rank = lambda *args, **kwargs: 0
-    distributed.barrier = lambda *args, **kwargs: None
-    
-    # RPC submodule (torch._jit_internal accesses this)
-    rpc = types.ModuleType('torch.distributed.rpc')
-    rpc.__file__ = '<stub:torch.distributed.rpc>'
-    rpc.__path__ = []
-    rpc.is_available = lambda: False
-    distributed.rpc = rpc
-    
-    # Register in sys.modules
-    sys.modules['torch.distributed'] = distributed
-    sys.modules['torch.distributed.rpc'] = rpc
-    
-    # Pre-create all common submodules
-    submodules = [
-        'c10d_logger', 'elastic', 'fsdp', 'launch', 'nn', 'optim',
-        'pipeline', 'rendezvous', 'tensor', 'algorithms', 'autograd',
-        'checkpoint', 'constants', 'distributed_c10d', 'utils',
-        '_sharding_spec', '_sharded_tensor', '_shard',
-        'elastic.multiprocessing', 'elastic.multiprocessing.redirects'
+    # Preload MKL DLLs in correct order via ctypes
+    import ctypes
+    _mkl_dlls = [
+        'mkl_core.2.dll',
+        'mkl_intel_thread.2.dll',
+        'mkl_rt.2.dll',
+        'mkl_def.2.dll',
+        'mkl_avx2.2.dll',
+        # NOTE: Do NOT load libiomp5md.dll here - torch provides its own LLVM
+        # version in torch/lib/ which has different exports than Intel's
+        'libblas.dll',
+        'liblapack.dll',
     ]
+    for _dll in _mkl_dlls:
+        _dll_path = os.path.join(_base, _dll)
+        if os.path.exists(_dll_path):
+            try:
+                ctypes.CDLL(_dll_path)
+            except OSError:
+                pass
     
-    for submod in submodules:
-        fullname = f'torch.distributed.{submod}'
-        if fullname not in sys.modules:
-            mod = types.ModuleType(fullname)
-            mod.__file__ = f'<stub:{fullname}>'
-            mod.__path__ = []
-            mod.is_available = lambda: False
-            sys.modules[fullname] = mod
-    
-    return distributed
+    # ======================================================================
+    # CRITICAL: Preload PyTorch DLLs in dependency order BEFORE any torch import.
+    # In PyInstaller frozen apps, torch's own DLL loading code may fail because
+    # the search paths are different from a normal Python installation.
+    # By loading these DLLs into the process early, they'll be found when
+    # torch._C.pyd tries to resolve its dependencies.
+    # ======================================================================
+    _torch_lib = os.path.join(_base, 'torch', 'lib')
+    if os.path.isdir(_torch_lib):
+        # Load in dependency order: base deps first, then torch libs
+        _torch_dlls = [
+            # CUDA runtime (no torch dependency, pure NVIDIA)
+            'cudart64_12.dll',
+            'nvToolsExt64_1.dll',
+            # cuDNN
+            'cudnn64_9.dll',
+            # cuBLAS
+            'cublasLt64_12.dll',
+            'cublas64_12.dll',
+            # NVRTC
+            'nvrtc64_120_0.dll',
+            'nvJitLink_120_0.dll',
+            'nvrtc-builtins64_128.dll',
+            # Intel OpenMP (torch version)
+            'libiomp5md.dll',
+            # Torch core (dependency chain: c10 -> torch_cpu -> c10_cuda -> torch_cuda)
+            'c10.dll',
+            'torch_cpu.dll',
+            'c10_cuda.dll',
+            'torch_cuda.dll',
+            # caffe2 NVRTC bridge
+            'caffe2_nvrtc.dll',
+        ]
+        _loaded = 0
+        for _dll in _torch_dlls:
+            _dll_path = os.path.join(_torch_lib, _dll)
+            if os.path.exists(_dll_path):
+                try:
+                    ctypes.CDLL(_dll_path)
+                    _loaded += 1
+                except OSError:
+                    pass  # Non-critical: some DLLs may fail but torch might still work
 
-_fake_distributed = _create_distributed_stubs()
-
-# Custom import hook to intercept any remaining torch.distributed.* imports
-class TorchDistributedFinder:
-    """Meta path finder that returns stubs for torch.distributed submodules."""
-    
-    def find_module(self, fullname, path=None):
-        if fullname.startswith('torch.distributed.'):
-            return TorchDistributedLoader()
-        return None
-
-class TorchDistributedLoader:
-    """Loader that returns stub modules for torch.distributed submodules."""
-    
-    def load_module(self, fullname):
-        if fullname in sys.modules:
-            return sys.modules[fullname]
-        
-        mod = types.ModuleType(fullname)
-        mod.__file__ = f'<stub:{fullname}>'
-        mod.__path__ = []
-        mod.__loader__ = self
-        mod.is_available = lambda: False
-        mod.is_initialized = lambda: False
-        sys.modules[fullname] = mod
-        return mod
-
-# Install at the FRONT of meta_path
-sys.meta_path.insert(0, TorchDistributedFinder())
-
-# Patch builtins.__import__ to inject 'distributed' attr into torch module
-_original_import = builtins.__import__
-
-def _patched_import(name, globals=None, locals=None, fromlist=(), level=0):
-    result = _original_import(name, globals, locals, fromlist, level)
-    
-    # After torch is imported, ensure it has 'distributed' attribute
-    if name == 'torch' or (name.startswith('torch.') and 'torch' in sys.modules):
-        torch_mod = sys.modules.get('torch')
-        if torch_mod is not None and not hasattr(torch_mod, 'distributed'):
-            torch_mod.distributed = _fake_distributed
-    
-    return result
-
-builtins.__import__ = _patched_import
+# ==============================================================================
+# torch.distributed: INCLUDED in PYZ archive but PYZ-patched to a minimal stub.
+# The stub's is_available() returns False, so no distributed code runs.
+# No runtime stubs, no meta_path finders, no sys.modules hacks needed.
+# The patched __init__.py is compiled into PYZ by the spec file's a.pure
+# patching step, so FrozenImporter loads the stub directly.
+# ==============================================================================
+os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'
 
 def setup_bundled_paths():
     """Configure paths for bundled executables and DLLs."""
@@ -127,18 +121,25 @@ def setup_bundled_paths():
     sdk_bin_path = os.path.join(base_path, 'sdk', 'bin')
     ffmpeg_path = os.path.join(base_path, 'ffmpeg')
     onnx_capi_path = os.path.join(base_path, 'onnxruntime', 'capi')
+    torch_lib_path = os.path.join(base_path, 'torch', 'lib')
+    numpy_core_path = os.path.join(base_path, 'numpy', 'core')
+    numpy_linalg_path = os.path.join(base_path, 'numpy', 'linalg')
     
     # Build PATH with all DLL locations
     dll_paths = [
-        internal_path,          # Main binaries + PyTorch CUDA DLLs
+        internal_path,          # Main binaries + MKL DLLs
+        torch_lib_path,         # PyTorch CUDA DLLs
         sdk_bin_path,           # Insta360 SDK
         ffmpeg_path,            # FFmpeg
         onnx_capi_path,         # ONNX Runtime CUDA
+        numpy_core_path,        # NumPy core
+        numpy_linalg_path,      # NumPy linalg
     ]
     
     # Add CUDA from system if available
     cuda_paths = [
         r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin',
+        r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin',
         r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin',
         r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin',
     ]
@@ -163,30 +164,27 @@ def setup_bundled_paths():
     
     return base_path, app_path
 
-def setup_torch_cuda():
-    """Configure PyTorch for optimal GPU performance."""
-    try:
-        import torch
-        
-        if torch.cuda.is_available():
-            # Enable TF32 for RTX 30/40/50 series
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            
-            # Enable cudnn benchmark for consistent input sizes
-            torch.backends.cudnn.benchmark = True
-            
-            # Set memory allocation strategy
-            os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-            
-            device_name = torch.cuda.get_device_name(0)
-            cuda_version = torch.version.cuda
-            print(f"[GPU] PyTorch CUDA: {device_name} (CUDA {cuda_version})")
-            return True
-    except Exception as e:
-        print(f"[WARN] PyTorch CUDA setup: {e}")
+def setup_torch_env():
+    """Set environment variables for PyTorch CUDA performance.
     
-    return False
+    IMPORTANT: Do NOT import torch here! In PyInstaller frozen apps, importing
+    torch in a runtime hook can cause C-extension double-initialization errors
+    ('function already has a docstring', 'partially initialized module').
+    
+    Instead, we set environment variables that torch will pick up when it's
+    actually imported by the application code (in _detect_gpu or _test_torch_cuda).
+    """
+    # Set memory allocation strategy for CUDA
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+    
+    # Allow TF32 via env var (torch will also set programmatically on import)
+    os.environ['NVIDIA_TF32_OVERRIDE'] = '1'
+    
+    # Signal that the hook ran (app can check this)
+    os.environ['_360TK_RUNTIME_HOOK'] = '1'
+    
+    print("[OK] PyTorch environment configured (import deferred to app startup)")
+    return True
 
 def setup_onnx_cuda():
     """Configure ONNX Runtime for GPU inference."""
@@ -222,17 +220,13 @@ def setup_sdk_path():
 try:
     base_path, app_path = setup_bundled_paths()
     setup_sdk_path()
-    torch_gpu = setup_torch_cuda()
+    setup_torch_env()
     onnx_gpu = setup_onnx_cuda()
     
-    if torch_gpu and onnx_gpu:
-        print("[OK] Full GPU acceleration enabled (PyTorch + ONNX)")
-    elif torch_gpu:
-        print("[OK] GPU acceleration: PyTorch only")
-    elif onnx_gpu:
-        print("[OK] GPU acceleration: ONNX only")
-    else:
-        print("[INFO] CPU mode (no GPU acceleration)")
+    if onnx_gpu:
+        print("[OK] ONNX Runtime GPU available")
+    
+    print("[OK] Runtime hook complete - DLL paths configured")
         
 except Exception as e:
     print(f"[WARN] Runtime hook error: {e}")

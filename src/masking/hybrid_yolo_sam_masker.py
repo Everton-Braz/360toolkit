@@ -20,7 +20,7 @@ try:
     from segment_anything import sam_model_registry, SamPredictor
     import torch
     SAM_AVAILABLE = True
-except ImportError as e:
+except Exception as e:
     logger.warning(f"SAM not available: {e}")
 
 try:
@@ -124,15 +124,14 @@ class HybridYOLOSAMMasker:
         self.yolo_confidence = yolo_confidence
         self.cancelled = False
         
-        # Device selection
-        self.device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
+        # Device selection - test actual CUDA kernel execution (catches SM incompatibility)
+        self.device = self._select_device(use_gpu)
         logger.info(f"[Hybrid] Using device: {self.device}")
         
         # Load YOLO for detection
         logger.info(f"[Hybrid] Loading YOLO: {yolo_model}")
         self.yolo = YOLO(yolo_model)
-        if use_gpu:
-            self.yolo.to(self.device)
+        self.yolo.to(self.device)
         
         # Load SAM for segmentation
         logger.info(f"[Hybrid] Loading SAM: {sam_checkpoint}")
@@ -156,15 +155,109 @@ class HybridYOLOSAMMasker:
             'animals': False  # Not implemented yet
         }
         
-        logger.info(f"[Hybrid] ✓ Initialized: YOLO + SAM")
+        logger.info(f"[Hybrid] [OK] Initialized: YOLO + SAM")
         logger.info(f"[Hybrid] YOLO confidence threshold: {yolo_confidence}")
         logger.info(f"[Hybrid] Mask dilation: {mask_dilation_pixels}px")
+    
+    def _select_device(self, use_gpu: bool) -> str:
+        """Select compute device with actual CUDA kernel testing (matches MultiCategoryMasker pattern)."""
+        if not use_gpu:
+            logger.info("[Hybrid] CPU mode selected (GPU disabled in settings)")
+            return 'cpu'
+        
+        try:
+            if not torch.cuda.is_available():
+                logger.warning("[Hybrid] CUDA not available, using CPU")
+                return 'cpu'
+            
+            device_name = torch.cuda.get_device_name(0)
+            try:
+                cc = torch.cuda.get_device_capability(0)
+                cc_str = f"sm_{cc[0]}{cc[1]}"
+            except Exception:
+                cc_str = "unknown"
+            
+            logger.info(f"[Hybrid] GPU: {device_name} ({cc_str})")
+            
+            # Test actual GPU kernel execution (catches SM compatibility issues like sm_120)
+            try:
+                test_tensor = torch.zeros(1, device='cuda')
+                test_result = test_tensor + 1
+                del test_tensor, test_result
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                logger.info("[Hybrid] [OK] GPU compatibility verified - CUDA operations successful")
+                return 'cuda'
+            except RuntimeError as e:
+                error_msg = str(e).lower()
+                if "no kernel image" in error_msg or "sm_" in error_msg or "cuda capability" in error_msg:
+                    logger.warning(f"[Hybrid] GPU architecture incompatibility: {device_name} ({cc_str})")
+                    logger.warning(f"[Hybrid] PyTorch lacks kernel for this GPU. Need PyTorch 2.7+ for Blackwell.")
+                else:
+                    logger.warning(f"[Hybrid] GPU test failed: {e}")
+                logger.warning("[Hybrid] => Falling back to CPU")
+                torch.cuda.empty_cache()
+                return 'cpu'
+        except Exception as e:
+            logger.warning(f"[Hybrid] CUDA detection error: {e}. Using CPU.")
+            return 'cpu'
+    
+    def _fallback_to_cpu(self):
+        """Switch YOLO and SAM models to CPU after a CUDA runtime error."""
+        if self.device == 'cpu':
+            return
+        logger.warning("[Hybrid] Switching YOLO + SAM to CPU")
+        self.device = 'cpu'
+        self.yolo.to('cpu')
+        # Re-load SAM on CPU
+        self.sam_predictor.model.to('cpu')
+        torch.cuda.empty_cache()
+        logger.info("[Hybrid] [OK] Now running on CPU")
     
     def set_enabled_categories(self, categories: dict):
         """Enable/disable masking categories."""
         self.enabled_categories.update(categories)
         enabled = [k for k, v in self.enabled_categories.items() if v]
         logger.info(f"[Hybrid] Enabled categories: {', '.join(enabled) if enabled else 'None'}")
+    
+    def set_specific_classes(self, persons_classes: List[int] = None, 
+                             objects_classes: List[int] = None,
+                             animals_classes: List[int] = None):
+        """
+        Set specific COCO class IDs to detect for each category.
+        This allows fine-grained control over which objects are masked.
+        
+        Note: Hybrid masker currently primarily supports 'persons' (class 0).
+        
+        Args:
+            persons_classes: List of class IDs for persons (e.g., [0])
+            objects_classes: List of class IDs for personal objects (e.g., [24, 26, 67])
+            animals_classes: List of class IDs for animals (e.g., [15, 16])
+        """
+        if not hasattr(self, '_custom_classes'):
+            self._custom_classes = {}
+        
+        if persons_classes is not None:
+            self._custom_classes['persons'] = persons_classes
+            self.enabled_categories['persons'] = len(persons_classes) > 0
+            
+        if objects_classes is not None:
+            self._custom_classes['personal_objects'] = objects_classes
+            self.enabled_categories['personal_objects'] = len(objects_classes) > 0
+            
+        if animals_classes is not None:
+            self._custom_classes['animals'] = animals_classes
+            self.enabled_categories['animals'] = len(animals_classes) > 0
+        
+        # Log what classes are enabled
+        all_classes = []
+        for cat, classes in self._custom_classes.items():
+            if classes:
+                all_classes.extend(classes)
+                logger.info(f"[Hybrid] Custom {cat} classes: {classes}")
+        
+        if all_classes:
+            logger.info(f"[Hybrid] Total target classes: {sorted(set(all_classes))}")
     
     def cancel(self):
         """Cancel ongoing operations."""
@@ -221,7 +314,15 @@ class HybridYOLOSAMMasker:
         
         # Step 1: YOLO Detection
         logger.info(f"[Hybrid] Step 1: YOLO detecting persons...")
-        yolo_results = self.yolo(image, conf=self.yolo_confidence, verbose=False)
+        try:
+            yolo_results = self.yolo(image, conf=self.yolo_confidence, verbose=False)
+        except RuntimeError as e:
+            if "CUDA error" in str(e) or "no kernel image" in str(e):
+                logger.warning(f"[Hybrid] CUDA inference failed: {e}")
+                self._fallback_to_cpu()
+                yolo_results = self.yolo(image, conf=self.yolo_confidence, verbose=False)
+            else:
+                raise
         
         # Set SAM image once
         self.sam_predictor.set_image(image_rgb)
@@ -249,7 +350,7 @@ class HybridYOLOSAMMasker:
             logger.info("[Hybrid] No persons detected")
             return None
         
-        logger.info(f"[Hybrid] ✓ Detected {len(person_boxes)} person(s)")
+        logger.info(f"[Hybrid] [OK] Detected {len(person_boxes)} person(s)")
         
         # Step 2: SAM Segmentation
         logger.info(f"[Hybrid] Step 2: SAM segmenting {len(person_boxes)} person(s)...")
@@ -299,10 +400,10 @@ class HybridYOLOSAMMasker:
         if output_path:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(output_path), combined_mask)
-            logger.info(f"[Hybrid] ✓ Saved mask: {output_path.name}")
+            logger.info(f"[Hybrid] [OK] Saved mask: {output_path.name}")
         
         masked_percent = 100 * np.sum(combined_mask == 0) / (height * width)
-        logger.info(f"[Hybrid] ✓ Final mask: {masked_percent:.1f}% masked")
+        logger.info(f"[Hybrid] [OK] Final mask: {masked_percent:.1f}% masked")
         
         return combined_mask
     

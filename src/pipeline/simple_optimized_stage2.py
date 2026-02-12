@@ -8,7 +8,10 @@ Focuses on HIGH-IMPACT optimizations with minimal overhead:
 Removes: Ring Buffer (overhead for small datasets), CUDA Graphs (memory issues)
 """
 
-import torch
+try:
+    import torch
+except Exception:
+    torch = None
 import cv2
 import time
 import logging
@@ -37,7 +40,7 @@ class SimpleOptimizedProcessor:
         
         # CUDA stream for overlapped execution
         self.stream = None
-        if torch.cuda.is_available():
+        if torch is not None and torch.cuda.is_available():
             try:
                 self.stream = torch.cuda.Stream()
                 logger.info("[Simple Optimized] CUDA stream created")

@@ -3,6 +3,10 @@ Launcher script for 360toolkit
 Ensures proper Python path setup
 """
 
+import os
+# Fix OpenMP conflict: PyTorch (libomp.dll) + NumPy/MKL (libiomp5md.dll)
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import sys
 import multiprocessing
 from pathlib import Path

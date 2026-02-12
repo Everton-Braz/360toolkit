@@ -87,7 +87,7 @@ REM Build
 echo.
 echo [6/6] Building with PyInstaller...
 echo.
-python -m PyInstaller 360ToolkitGS-Build.spec --noconfirm
+python -m PyInstaller 360ToolkitGS.spec --noconfirm
 
 if errorlevel 1 (
     echo.

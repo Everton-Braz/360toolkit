@@ -23,6 +23,10 @@ def main():
     parser.add_argument("--use-gpu", action="store_true", help="Enable GPU acceleration if available")
     parser.add_argument("--cleanup", action="store_true", help="Delete intermediate files after run")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    
+    # New Alignment / Training options
+    parser.add_argument("--use-rig-sfm", action="store_true", help="Enable Rig-based SfM alignment (requires pycolmap)")
+    parser.add_argument("--train-lighting", action="store_true", help="Launch Lichtfeld Studio training after processing")
 
     args = parser.parse_args()
 
@@ -46,21 +50,25 @@ def main():
         "use_gpu": args.use_gpu,
         "cleanup": args.cleanup,
         "stage": args.stage,
+        "use_rig_sfm": args.use_rig_sfm,
+        "train_lighting": args.train_lighting,
     }
 
     # Run pipeline
 
     worker = PipelineWorker(config)
-    worker.run()
-    print("\n✅ Pipeline run() completed. Check output folders for results.")
+    result = worker.run()
+    if result is None:
+        result = {}
+    print("\n[OK] Pipeline run() completed. Check output folders for results.")
 
     # Print summary
     if result.get("success", False):
-        print("\n✅ Pipeline completed successfully!")
+        print("\n[OK] Pipeline completed successfully!")
         print(f"Output: {args.output}")
         print(f"Details: {result}")
     else:
-        print("\n❌ Pipeline failed.")
+        print("\n[FAIL] Pipeline failed.")
         print(f"Error: {result.get('error', 'Unknown error')}")
         sys.exit(1)
 

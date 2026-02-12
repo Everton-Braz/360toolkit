@@ -146,6 +146,22 @@ class SAMMasker:
         enabled = [k for k, v in self.enabled_categories.items() if v]
         logger.info(f"[SAM] Enabled categories: {', '.join(enabled) if enabled else 'None'}")
     
+    def set_specific_classes(self, persons_classes: List[int] = None, 
+                             objects_classes: List[int] = None,
+                             animals_classes: List[int] = None):
+        """
+        Set specific COCO class IDs to detect for each category (Stub for API compatibility).
+        SAM uses a different detection approach but we maintain this method for consistency.
+        """
+        if persons_classes is not None:
+            self.enabled_categories['persons'] = len(persons_classes) > 0
+        if objects_classes is not None:
+            self.enabled_categories['personal_objects'] = len(objects_classes) > 0
+        if animals_classes is not None:
+            self.enabled_categories['animals'] = len(animals_classes) > 0
+        
+        logger.debug("[SAM] set_specific_classes called (API stub)")
+    
     def cancel(self):
         """Cancel ongoing batch operations"""
         self.cancelled = True

@@ -9,7 +9,10 @@ Provides pre-allocated pinned (page-locked) memory buffers that enable:
 Performance Impact: ~600ms savings for 240 images
 """
 
-import torch
+try:
+    import torch
+except Exception:
+    torch = None
 import threading
 from queue import Queue, Empty
 import logging
@@ -32,7 +35,7 @@ class PinnedMemoryPool:
         pool.release(idx)
     """
     
-    def __init__(self, num_buffers=8, buffer_shape=(3, 3840, 7680), dtype=torch.float32):
+    def __init__(self, num_buffers=8, buffer_shape=(3, 3840, 7680), dtype=None):
         """
         Initialize pinned memory pool.
         
@@ -41,6 +44,8 @@ class PinnedMemoryPool:
             buffer_shape: Shape of each buffer (C, H, W for images)
             dtype: Data type (float32 for normalized images, uint8 for raw)
         """
+        if dtype is None and torch is not None:
+            dtype = torch.float32
         self.buffer_shape = buffer_shape
         self.dtype = dtype
         self.num_buffers = num_buffers
@@ -74,11 +79,13 @@ class PinnedMemoryPool:
         for dim in self.buffer_shape:
             numel *= dim
         
-        bytes_per_element = {
-            torch.float32: 4,
-            torch.float16: 2,
-            torch.uint8: 1,
-        }.get(self.dtype, 4)
+        bytes_per_element = 4  # default
+        if torch is not None:
+            bytes_per_element = {
+                torch.float32: 4,
+                torch.float16: 2,
+                torch.uint8: 1,
+            }.get(self.dtype, 4)
         
         bytes_size = numel * bytes_per_element
         return bytes_size / (1024 * 1024)
@@ -144,7 +151,7 @@ _pinned_pool = None
 _pool_lock = threading.Lock()
 
 
-def get_pinned_pool(num_buffers=8, buffer_shape=(3, 3840, 7680), dtype=torch.float32):
+def get_pinned_pool(num_buffers=8, buffer_shape=(3, 3840, 7680), dtype=None):
     """
     Get or create global pinned memory pool (singleton).
     

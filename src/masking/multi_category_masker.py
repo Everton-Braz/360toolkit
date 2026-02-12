@@ -229,19 +229,63 @@ class MultiCategoryMasker:
         self.cancelled = True
         logger.info("Masking cancellation requested")
     
+    def set_specific_classes(self, persons_classes: List[int] = None, 
+                             objects_classes: List[int] = None,
+                             animals_classes: List[int] = None):
+        """
+        Set specific COCO class IDs to detect for each category.
+        This allows fine-grained control over which objects are masked.
+        
+        Args:
+            persons_classes: List of class IDs for persons (e.g., [0])
+            objects_classes: List of class IDs for personal objects (e.g., [24, 26, 67])
+            animals_classes: List of class IDs for animals (e.g., [15, 16])
+        """
+        if not hasattr(self, '_custom_classes'):
+            self._custom_classes = {}
+        
+        if persons_classes is not None:
+            self._custom_classes['persons'] = persons_classes
+            self.enabled_categories['persons'] = len(persons_classes) > 0
+            
+        if objects_classes is not None:
+            self._custom_classes['personal_objects'] = objects_classes
+            self.enabled_categories['personal_objects'] = len(objects_classes) > 0
+            
+        if animals_classes is not None:
+            self._custom_classes['animals'] = animals_classes
+            self.enabled_categories['animals'] = len(animals_classes) > 0
+        
+        # Log what classes are enabled
+        all_classes = []
+        for cat, classes in self._custom_classes.items():
+            if classes:
+                all_classes.extend(classes)
+                logger.info(f"Custom {cat} classes: {classes}")
+        
+        logger.info(f"Total target classes: {sorted(set(all_classes))}")
+
     def get_target_classes(self) -> List[int]:
         """
         Get list of COCO class IDs to detect based on enabled categories.
+        Uses custom classes if set via set_specific_classes(), otherwise uses defaults.
         
         Returns:
             List of class IDs
         """
         target_classes = []
         
-        for category, enabled in self.enabled_categories.items():
-            if enabled:
-                classes = MASKING_CATEGORIES[category]['classes']
-                target_classes.extend(classes)
+        # Check if custom classes were set
+        if hasattr(self, '_custom_classes') and self._custom_classes:
+            for category, classes in self._custom_classes.items():
+                if self.enabled_categories.get(category, False) and classes:
+                    target_classes.extend(classes)
+        else:
+            # Use default classes from MASKING_CATEGORIES
+            for category, enabled in self.enabled_categories.items():
+                if enabled:
+                    classes = MASKING_CATEGORIES[category]['classes']
+                    target_classes.extend(classes)
         
         # Remove duplicates and sort
         target_classes = sorted(list(set(target_classes)))

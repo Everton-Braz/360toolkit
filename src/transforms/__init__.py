@@ -8,5 +8,9 @@ from .e2c_transform import E2CTransform
 
 __all__ = ['E2PTransform', 'E2CTransform']
 
-# Defer TorchE2PTransform import to avoid DLL errors on incompatible GPUs
-# It will be imported at runtime only when GPU acceleration is actually used
+# TorchE2PTransform is always importable but requires torch at runtime
+try:
+    from .e2p_transform import TorchE2PTransform
+    __all__.append('TorchE2PTransform')
+except ImportError:
+    pass
