@@ -102,13 +102,13 @@ from ..config.defaults import (
 logger = logging.getLogger(__name__)
 
 # Log PyTorch/CUDA status
-logger.info(f"[Stage 2 GPU] {logger_msg}")
-logger.info(f"[Stage 2 GPU] HAS_TORCH_TRANSFORM={HAS_TORCH_TRANSFORM}, HAS_TORCH_CUDA={HAS_TORCH_CUDA}")
+logger.info(f"[Split GPU] {logger_msg}")
+logger.info(f"[Split GPU] HAS_TORCH_TRANSFORM={HAS_TORCH_TRANSFORM}, HAS_TORCH_CUDA={HAS_TORCH_CUDA}")
 
 
 def process_frame_cpu(frame_data):
     """
-    Worker function for CPU parallel processing of Stage 2.
+    Worker function for CPU parallel processing of perspective splitting.
     Must be at module level for pickling.
     Uses absolute imports for PyInstaller compatibility.
     """
@@ -199,16 +199,16 @@ class PipelineWorker(QThread):
         self.metadata_handler = MetadataHandler()
         self.masker = None  # Initialize only if masking enabled
         
-        # Temp folder for Stage 1 when skip_intermediate_save is enabled
+        # Temp folder for extraction when skip_intermediate_save is enabled
         self._temp_stage1_dir = None
     
     def _cleanup_temp_stage1(self):
-        """Clean up temp Stage 1 folder after Stage 2 completes (if skip_intermediate_save was used)"""
+        """Clean up temp extraction folder after splitting completes (if skip_intermediate_save was used)"""
         if self._temp_stage1_dir and Path(self._temp_stage1_dir).exists():
             import shutil
             try:
                 shutil.rmtree(self._temp_stage1_dir)
-                logger.info(f"[CLEANUP] Deleted temp Stage 1 folder: {self._temp_stage1_dir}")
+                logger.info(f"[CLEANUP] Deleted temp extraction folder: {self._temp_stage1_dir}")
             except Exception as e:
                 logger.warning(f"Failed to clean up temp folder: {e}")
             self._temp_stage1_dir = None
@@ -217,33 +217,33 @@ class PipelineWorker(QThread):
         """
         Smart folder discovery for individual stage processing.
         
-        Stage 1: Looks for input file (returns None - user must select)
-        Stage 2: Looks for stage1_frames folder with equirectangular images
-        Stage 3: Looks for stage2_perspectives folder with perspective images
+        Extraction: Looks for input file (returns None - user must select)
+        Split: Looks for extracted_frames folder with equirectangular images
+        Masking: Looks for perspective_views folder with perspective images
         
         Returns Path to folder if found, None if not found (user must select manually)
         """
         output_path = Path(output_dir)
         
         if stage == 1:
-            # Stage 1 requires input file - user must select
+            # Extraction requires input file - user must select
             return None
         
         elif stage == 2:
-            # Look for stage1_frames folder (match common image extensions, case-insensitive)
-            stage1_folder = output_path / 'stage1_frames'
+            # Look for extracted_frames folder (match common image extensions, case-insensitive)
+            stage1_folder = output_path / 'extracted_frames'
             image_patterns = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
             if stage1_folder.exists() and any(stage1_folder.glob(p) for p in image_patterns):
-                logger.info(f"[OK] Auto-discovered Stage 1 output: {stage1_folder}")
+                logger.info(f"[OK] Auto-discovered extraction output: {stage1_folder}")
                 return stage1_folder
             return None
         
         elif stage == 3:
-            # Look for stage2_perspectives folder (match common image extensions)
-            stage2_folder = output_path / 'stage2_perspectives'
+            # Look for perspective_views folder (match common image extensions)
+            stage2_folder = output_path / 'perspective_views'
             image_patterns = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
             if stage2_folder.exists() and any(stage2_folder.glob(p) for p in image_patterns):
-                logger.info(f"[OK] Auto-discovered Stage 2 output: {stage2_folder}")
+                logger.info(f"[OK] Auto-discovered perspective output: {stage2_folder}")
                 return stage2_folder
             return None
         
@@ -257,22 +257,22 @@ class PipelineWorker(QThread):
         folder_path = Path(folder_path)
         
         if stage == 2:
-            # Stage 2 input is equirectangular images from Stage 1
+            # Split input is equirectangular images from extraction
             self.config['stage2_input_dir'] = str(folder_path)
-            # Disable Stage 1, enable Stage 2
+            # Disable extraction, enable split
             self.config['enable_stage1'] = False
             self.config['enable_stage2'] = True
             self.config['enable_stage3'] = False
-            logger.info(f"[OK] Set Stage 2 input: {folder_path}")
+            logger.info(f"[OK] Set split input: {folder_path}")
         
         elif stage == 3:
-            # Stage 3 input is perspective images from Stage 2
+            # Masking input is perspective images from split
             self.config['stage3_input_dir'] = str(folder_path)
-            # Disable Stages 1 & 2, enable Stage 3
+            # Disable extraction & split, enable masking
             self.config['enable_stage1'] = False
             self.config['enable_stage2'] = False
             self.config['enable_stage3'] = True
-            logger.info(f"[OK] Set Stage 3 input: {folder_path}")
+            logger.info(f"[OK] Set masking input: {folder_path}")
     
     def run(self):
         """Execute the pipeline"""
@@ -295,33 +295,33 @@ class PipelineWorker(QThread):
             # Track which stages were executed
             stages_executed = []
             
-            # Stage 1: Extract Frames
+            # Frame Extraction
             if self.config.get('enable_stage1', True):
                 if self.is_cancelled:
-                    logger.info("Pipeline cancelled before Stage 1")
+                    logger.info("Pipeline cancelled before Frame Extraction")
                     self.finished.emit({'success': False, 'error': 'Cancelled by user'})
                     return
                 
-                logger.info("=== Starting Stage 1: Frame Extraction ===")
+                logger.info("=== Starting Frame Extraction ===")
                 stage1_result = self._execute_stage1()
                 results['stage1'] = stage1_result
                 stages_executed.append(1)
                 self.stage_complete.emit(1, stage1_result)
                 
                 if not stage1_result.get('success'):
-                    self.error.emit(f"Stage 1 failed: {stage1_result.get('error')}")
+                    self.error.emit(f"Frame Extraction failed: {stage1_result.get('error')}")
                     results['success'] = False
                     results['stages_executed'] = stages_executed
                     self.finished.emit(results)
                     return
             
-            # Stage 2: Split Perspectives (Skip if direct masking mode)
+            # Perspective Splitting (Skip if direct masking mode)
             skip_transform = self.config.get('skip_transform', False)
             
             if skip_transform:
-                logger.info("=== Stage 2: SKIPPED (Direct Masking Mode) ===")
-                logger.info("Stage 1 frames will be used directly for Stage 3 masking")
-                # Pass Stage 1 output to Stage 3 input
+                logger.info("=== Perspective Split: SKIPPED (Direct Masking Mode) ===")
+                logger.info("Extracted frames will be used directly for masking")
+                # Pass extraction output to masking input
                 results['stage2'] = {
                     'success': True,
                     'skipped': True,
@@ -331,21 +331,21 @@ class PipelineWorker(QThread):
                 self.stage_complete.emit(2, results['stage2'])
             elif self.config.get('enable_stage2', True):
                 if self.is_cancelled:
-                    logger.info("Pipeline cancelled before Stage 2")
+                    logger.info("Pipeline cancelled before Perspective Split")
                     results['stages_executed'] = stages_executed
                     self.finished.emit({'success': False, 'error': 'Cancelled by user'})
                     return
                 
-                logger.info("=== Starting Stage 2: Perspective Splitting ===")
+                logger.info("=== Starting Perspective Splitting ===")
                 stage2_result = self._execute_stage2()
                 results['stage2'] = stage2_result
                 stages_executed.append(2)
                 self.stage_complete.emit(2, stage2_result)
 
-                # Clean up temp Stage 1 folder if skip_intermediate_save was enabled
+                # Clean up temp extraction folder if skip_intermediate_save was enabled
                 self._cleanup_temp_stage1()
 
-                # Clean up GPU memory after Stage 2 to free VRAM for Stage 3
+                # Clean up GPU memory after splitting to free VRAM for masking
                 if HAS_TORCH_CUDA:
                     try:
                         import torch
@@ -355,75 +355,75 @@ class PipelineWorker(QThread):
                         # Force GPU memory cleanup
                         torch.cuda.empty_cache()
                         torch.cuda.synchronize()
-                        logger.info("[GPU Cleanup] Released Stage 2 GPU memory before Stage 3")
+                        logger.info("[GPU Cleanup] Released split GPU memory before masking")
                     except Exception as e:
                         logger.warning(f"[GPU Cleanup] Failed to clean GPU memory: {e}")
 
                 if not stage2_result.get('success'):
-                    self.error.emit(f"Stage 2 failed: {stage2_result.get('error')}")
+                    self.error.emit(f"Perspective Split failed: {stage2_result.get('error')}")
                     results['success'] = False
                     results['stages_executed'] = stages_executed
                     self.finished.emit(results)
                     return
             
-            # Stage 3: Generate Masks
+            # AI Masking
             if self.config.get('enable_stage3', True):
                 if self.is_cancelled:
-                    logger.info("Pipeline cancelled before Stage 3")
+                    logger.info("Pipeline cancelled before Masking")
                     results['stages_executed'] = stages_executed
                     self.finished.emit({'success': False, 'error': 'Cancelled by user'})
                     return
                 
-                logger.info("=== Starting Stage 3: Mask Generation ===")
+                logger.info("=== Starting Mask Generation ===")
                 stage3_result = self._execute_stage3()
                 results['stage3'] = stage3_result
                 stages_executed.append(3)
                 self.stage_complete.emit(3, stage3_result)
                 
                 if not stage3_result.get('success'):
-                    self.error.emit(f"Stage 3 failed: {stage3_result.get('error')}")
+                    self.error.emit(f"Masking failed: {stage3_result.get('error')}")
                     results['success'] = False
                     results['stages_executed'] = stages_executed
                     self.finished.emit(results)
                     return
             
-            # Stage 4: Alignment (Rig SfM / SphereSfM)
+            # 3D Reconstruction
             if self.config.get('use_rig_sfm', False):
                 if self.is_cancelled:
-                    logger.info("Pipeline cancelled before Stage 4")
+                    logger.info("Pipeline cancelled before Reconstruction")
                     results['stages_executed'] = stages_executed
                     self.finished.emit({'success': False, 'error': 'Cancelled by user'})
                     return
                 
-                logger.info("=== Starting Stage 4: Alignment (Rig SfM) ===")
+                logger.info("=== Starting 3D Reconstruction ===")
                 stage4_result = self._execute_stage4()
                 results['stage4'] = stage4_result
                 stages_executed.append(4)
                 self.stage_complete.emit(4, stage4_result)
                 
                 if not stage4_result.get('success'):
-                    self.error.emit(f"Stage 4 failed: {stage4_result.get('error')}")
+                    self.error.emit(f"Reconstruction failed: {stage4_result.get('error')}")
                     results['success'] = False
                     results['stages_executed'] = stages_executed
                     self.finished.emit(results)
                     return
 
-            # Stage 5: Training (Lichtfeld Studio)
+            # Training (Lichtfeld Studio)
             if self.config.get('train_lighting', False):
                 if self.is_cancelled:
-                    logger.info("Pipeline cancelled before Stage 5")
+                    logger.info("Pipeline cancelled before Training")
                     results['stages_executed'] = stages_executed
                     self.finished.emit({'success': False, 'error': 'Cancelled by user'})
                     return
                 
-                logger.info("=== Starting Stage 5: Lichtfeld Training ===")
+                logger.info("=== Starting Training (Lichtfeld Studio) ===")
                 stage5_result = self._execute_stage5(results.get('stage4', {}))
                 results['stage5'] = stage5_result
                 stages_executed.append(5)
                 self.stage_complete.emit(5, stage5_result)
                 
                 if not stage5_result.get('success'):
-                    self.error.emit(f"Stage 5 failed: {stage5_result.get('error')}")
+                    self.error.emit(f"Training failed: {stage5_result.get('error')}")
                     results['success'] = False
                     results['stages_executed'] = stages_executed
                     self.finished.emit(results)
@@ -444,7 +444,7 @@ class PipelineWorker(QThread):
             self.finished.emit({'success': False, 'error': str(e)})
     
     def _execute_stage1(self) -> Dict:
-        """Execute Stage 1: Frame Extraction"""
+        """Execute Frame Extraction"""
         try:
             input_file = self.config['input_file']
             
@@ -452,14 +452,14 @@ class PipelineWorker(QThread):
             skip_intermediate = self.config.get('skip_intermediate_save', False)
             
             if skip_intermediate:
-                # Use a temp folder that will be cleaned up after Stage 2
+                # Use a temp folder that will be cleaned up after splitting
                 import tempfile
                 temp_dir = tempfile.mkdtemp(prefix='360toolkit_stage1_')
                 output_dir = Path(temp_dir)
                 self._temp_stage1_dir = temp_dir  # Store for cleanup
-                logger.info(f"[FAST] Using temp folder for Stage 1: {temp_dir}")
+                logger.info(f"[FAST] Using temp folder for extraction: {temp_dir}")
             else:
-                output_dir = Path(self.config['output_dir']) / 'stage1_frames'
+                output_dir = Path(self.config['output_dir']) / 'extracted_frames'
                 self._temp_stage1_dir = None
             
             fps = self.config.get('fps', DEFAULT_FPS)
@@ -470,7 +470,7 @@ class PipelineWorker(QThread):
             end_time = self.config.get('end_time', None)
             
             def progress_callback(current, total, message):
-                self.progress.emit(current, total, f"Stage 1: {message}")
+                self.progress.emit(current, total, f"Extraction: {message}")
             
             # Map extraction method names
             # 'dual_fisheye' is raw extraction, so it should use opencv
@@ -598,18 +598,18 @@ class PipelineWorker(QThread):
             return result
         
         except Exception as e:
-            logger.error(f"Stage 1 error: {e}")
+            logger.error(f"Extraction error: {e}")
             return {'success': False, 'error': str(e)}
     
     def _execute_stage2(self) -> Dict:
-        """Execute Stage 2: Perspective Splitting"""
+        """Execute Perspective Splitting"""
         try:
             # Get input frames (auto-discovery runs ONLY ONCE)
             if self.config.get('enable_stage1', True):
-                # Stage 1 was enabled - use its output directly
-                input_dir = Path(self.config['output_dir']) / 'stage1_frames'
+                # Extraction was enabled - use its output directly
+                input_dir = Path(self.config['output_dir']) / 'extracted_frames'
             else:
-                # Stage 1 disabled - check for explicit input or auto-discover ONCE
+                # Extraction disabled - check for explicit input or auto-discover ONCE
                 stage2_input = self.config.get('stage2_input_dir')
                 if not stage2_input:
                     # Single auto-discovery attempt
@@ -619,7 +619,7 @@ class PipelineWorker(QThread):
                     else:
                         return {
                             'success': False,
-                            'error': 'Stage 2 input directory not specified and auto-discovery failed (Stage 1 is disabled)',
+                            'error': 'Split input directory not specified and auto-discovery failed (extraction is disabled)',
                             'output_files': []
                         }
                 else:
@@ -632,7 +632,7 @@ class PipelineWorker(QThread):
                     'output_files': []
                 }
             
-            output_dir = Path(self.config['output_dir']) / 'stage2_perspectives'
+            output_dir = Path(self.config['output_dir']) / 'perspective_views'
             output_dir.mkdir(parents=True, exist_ok=True)
             
             # Get transform settings
@@ -658,11 +658,11 @@ class PipelineWorker(QThread):
                 return self._execute_stage2_perspective(input_frames, cameras, output_dir, output_width, output_height)
         
         except Exception as e:
-            logger.error(f"Stage 2 failed: {e}", exc_info=True)
+            logger.error(f"Perspective Split failed: {e}", exc_info=True)
             return {'success': False, 'error': str(e), 'output_files': []}
     
     def _execute_stage2_perspective(self, input_frames, cameras, output_dir, output_width, output_height) -> Dict:
-        """Execute Stage 2 in perspective mode (E2P) with GPU/CPU optimization"""
+        """Execute perspective splitting (E2P) with GPU/CPU optimization"""
         try:
             output_files = []
             total_frames = len(input_frames)
@@ -672,7 +672,7 @@ class PipelineWorker(QThread):
             # Check for GPU acceleration with comprehensive compatibility testing
             use_gpu = False
             if HAS_TORCH_TRANSFORM and HAS_TORCH_CUDA:
-                logger.info("[Stage 2 GPU] Starting GPU compatibility check...")
+                logger.info("[Split GPU] Starting GPU compatibility check...")
                 try:
 
                     # Get GPU info
@@ -683,7 +683,7 @@ class PipelineWorker(QThread):
                     except Exception:
                         compute_cap_str = "unknown"
 
-                    logger.info(f"[Stage 2 GPU] Testing GPU: {device_name} ({compute_cap_str})")
+                    logger.info(f"[Split GPU] Testing GPU: {device_name} ({compute_cap_str})")
 
                     # Test GPU with actual kernel execution (not just memory allocation)
                     # This catches RTX 50-series "no kernel image available" errors early
@@ -695,36 +695,36 @@ class PipelineWorker(QThread):
                     torch.cuda.empty_cache()
 
                     use_gpu = True
-                    logger.info(f"[Stage 2 GPU] GPU acceleration ENABLED: {device_name} ({compute_cap_str})")
+                    logger.info(f"[Split GPU] GPU acceleration ENABLED: {device_name} ({compute_cap_str})")
                 except Exception as e:
                     error_msg = str(e).lower()
-                    logger.warning(f"[Stage 2 GPU] GPU test failed: {e}. Falling back to CPU.")
+                    logger.warning(f"[Split GPU] GPU test failed: {e}. Falling back to CPU.")
                     if "no kernel image" in error_msg or "cuda capability" in error_msg or "sm_" in error_msg:
-                        logger.error(f"[Stage 2 GPU] GPU incompatibility detected")
+                        logger.error(f"[Split GPU] GPU incompatibility detected")
                         try:
-                            logger.error(f"[Stage 2 GPU]    GPU: {device_name} ({compute_cap_str})")
+                            logger.error(f"[Split GPU]    GPU: {device_name} ({compute_cap_str})")
                         except:
                             pass
-                        logger.error(f"[Stage 2 GPU]    PyTorch CUDA kernels not available for this GPU architecture")
+                        logger.error(f"[Split GPU]    PyTorch CUDA kernels not available for this GPU architecture")
                     try:
                         torch.cuda.empty_cache()
                     except:
                         pass
             else:
-                logger.warning("[Stage 2 GPU] GPU transform not available (HAS_TORCH_TRANSFORM or HAS_TORCH_CUDA is False)")
+                logger.warning("[Split GPU] GPU transform not available (HAS_TORCH_TRANSFORM or HAS_TORCH_CUDA is False)")
             
             # GPU Execution Block
             if use_gpu:
-                logger.info("[Stage 2 GPU] Starting GPU-accelerated processing...")
+                logger.info("[Split GPU] Starting GPU-accelerated processing...")
                 try:
                     from concurrent.futures import ThreadPoolExecutor
                     import queue
                     import threading
 
                     # GPU Path: Optimized batch processing with async I/O
-                    logger.info("[Stage 2 GPU] Initializing TorchE2PTransform...")
+                    logger.info("[Split GPU] Initializing TorchE2PTransform...")
                     transformer = TorchE2PTransform()
-                    logger.info(f"[Stage 2 GPU] Transformer initialized on device: {transformer.device}")
+                    logger.info(f"[Split GPU] Transformer initialized on device: {transformer.device}")
                     
                     # Get sample image dimensions for batch size calculation
                     sample_img = cv2.imread(str(input_frames[0]))
@@ -927,7 +927,7 @@ class PipelineWorker(QThread):
                         
                         # Progress update
                         self.progress.emit(batch_end * len(cameras), total_operations, 
-                            f"Stage 2 (GPU): Batch {batch_idx + 1}/{total_batches}")
+                            f"Split (GPU): Batch {batch_idx + 1}/{total_batches}")
                     
                     # Wait for all saves to complete
                     logger.info("Waiting for async saves to complete...")
@@ -950,7 +950,7 @@ class PipelineWorker(QThread):
 
                 except RuntimeError as e:
                     if "no kernel image" in str(e) or "CUDA error" in str(e):
-                        logger.warning(f"GPU Stage 2 failed (RTX 50-series incompatibility): {e}")
+                        logger.warning(f"GPU Perspective Split failed (RTX 50-series incompatibility): {e}")
                         logger.warning("Falling back to CPU Multiprocessing...")
                         use_gpu = False # Fall through to CPU block
                         output_files = [] # Reset output files
@@ -965,11 +965,11 @@ class PipelineWorker(QThread):
             # CPU Execution Block (Fallback or Default)
             if not use_gpu:
                 # CPU Path: Multiprocessing
-                logger.info("[Stage 2 CPU] ⚠️ Using CPU multiprocessing (GPU not available or failed)")
+                logger.info("[Split CPU] ⚠️ Using CPU multiprocessing (GPU not available or failed)")
                 # Limit workers to avoid OOM with 8K images. 
                 # 8K image ~100MB. 20 workers = 2GB. Safe.
                 max_workers = min(os.cpu_count(), 12) 
-                logger.info(f"[Stage 2 CPU] Using {max_workers} CPU workers")
+                logger.info(f"[Split CPU] Using {max_workers} CPU workers")
                 
                 # Prepare tasks
                 tasks = []
@@ -995,17 +995,17 @@ class PipelineWorker(QThread):
                             output_files.extend(result['files'])
                             completed_ops += len(cameras)
                             self.progress.emit(completed_ops, total_operations, 
-                                f"Stage 2 (CPU): {completed_ops}/{total_operations} views")
+                                f"Split (CPU): {completed_ops}/{total_operations} views")
                         else:
                             logger.error(f"Frame processing failed: {result.get('error')}")
 
-            # Clean up GPU resources at end of Stage 2
+            # Clean up GPU resources at end of splitting
             if use_gpu and HAS_TORCH_CUDA:
                 try:
                     if 'transformer' in locals():
                         del transformer
                     torch.cuda.empty_cache()
-                    logger.info("[GPU Cleanup] Released GPU memory at end of Stage 2")
+                    logger.info("[GPU Cleanup] Released GPU memory at end of splitting")
                 except Exception as e:
                     logger.warning(f"[GPU Cleanup] Failed: {e}")
 
@@ -1017,7 +1017,7 @@ class PipelineWorker(QThread):
             }
 
         except Exception as e:
-            logger.error(f"Stage 2 PERSPECTIVE error: {e}")
+            logger.error(f"Perspective split error: {e}")
             # Clean up GPU on error
             if HAS_TORCH_CUDA:
                 try:
@@ -1027,7 +1027,7 @@ class PipelineWorker(QThread):
             return {'success': False, 'error': str(e)}
     
     def _execute_stage2_cubemap(self, input_frames, output_dir) -> Dict:
-        """Execute Stage 2 in cubemap mode (E2C)"""
+        """Execute cubemap splitting (E2C)"""
         try:
             output_files = []
             
@@ -1227,7 +1227,7 @@ class PipelineWorker(QThread):
                 self.progress.emit(
                     frame_idx + 1,
                     total_operations,
-                    f"Stage 2 CUBEMAP: Frame {frame_idx+1}/{len(input_frames)} ({cubemap_type})"
+                    f"Split CUBEMAP: Frame {frame_idx+1}/{len(input_frames)} ({cubemap_type})"
                 )
             
             faces_per_frame = 6 if cubemap_type == '6-face' else 8
@@ -1242,27 +1242,27 @@ class PipelineWorker(QThread):
             }
         
         except Exception as e:
-            logger.error(f"Stage 2 CUBEMAP error: {e}", exc_info=True)
+            logger.error(f"Split CUBEMAP error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
     
     def _execute_stage3(self) -> Dict:
-        """Execute Stage 3: AI Masking"""
+        """Execute AI Masking"""
         try:
             # Determine input directory based on mask_target setting
             mask_target = self.config.get('mask_target', 'split')
             skip_transform = self.config.get('skip_transform', False)
             
             if mask_target == 'equirect' or skip_transform:
-                # Use Stage 1 output (equirectangular frames) for masking
-                input_dir = Path(self.config['output_dir']) / 'stage1_frames'
+                # Use extraction output (equirectangular frames) for masking
+                input_dir = Path(self.config['output_dir']) / 'extracted_frames'
                 if mask_target == 'equirect':
                     logger.info("[Equirect Masking] Masking equirectangular frames for Rig SfM workflow")
                 else:
-                    logger.info("[Direct Masking] Using Stage 1 frames (equirectangular/fisheye) for masking")
+                    logger.info("[Direct Masking] Using extracted frames (equirectangular/fisheye) for masking")
             else:
-                # Use Stage 2 output (perspective images) - traditional workflow
+                # Use split output (perspective images) - traditional workflow
                 input_dir = Path(self.config.get('stage3_input_dir', 
-                                               str(Path(self.config['output_dir']) / 'stage2_perspectives')))
+                                               str(Path(self.config['output_dir']) / 'perspective_views')))
                 logger.info(f"[Split Masking] Masking perspective views: {input_dir}")
             
             # Initialize masker if not done
@@ -1488,7 +1488,7 @@ class PipelineWorker(QThread):
                         except ImportError as e:
                             # If we are here, it means we failed to use ONNX AND failed to use PyTorch
                             error_msg = (
-                                f"Stage 3 Initialization Failed: Could not load masking engine.\n"
+                                f"Masking Initialization Failed: Could not load masking engine.\n"
                                 f"1. ONNX Model check: Failed ({onnx_error})\n"
                                 f"2. PyTorch fallback: Failed ({str(e)})\n"
                                 f"Ensure '{onnx_model_name}' is present in the application folder."
@@ -1523,39 +1523,39 @@ class PipelineWorker(QThread):
             skip_transform = self.config.get('skip_transform', False)
             
             if skip_transform:
-                # Direct Masking Mode - use Stage 1 frames (equirectangular/fisheye)
-                input_dir = Path(self.config['output_dir']) / 'stage1_frames'
-                logger.info(f"[Direct Masking] Using Stage 1 frames directly: {input_dir}")
+                # Direct Masking Mode - use extracted frames (equirectangular/fisheye)
+                input_dir = Path(self.config['output_dir']) / 'extracted_frames'
+                logger.info(f"[Direct Masking] Using extracted frames directly: {input_dir}")
             elif self.config.get('enable_stage2', True):
-                # Stage 2 was enabled - use its output (perspective images)
-                input_dir = Path(self.config['output_dir']) / 'stage2_perspectives'
-                logger.info(f"Using Stage 2 perspectives: {input_dir}")
+                # Split was enabled - use its output (perspective images)
+                input_dir = Path(self.config['output_dir']) / 'perspective_views'
+                logger.info(f"Using perspective views: {input_dir}")
             else:
-                # Stage 2 disabled - check for explicit input or auto-discover ONCE
+                # Split disabled - check for explicit input or auto-discover ONCE
                 stage3_input = self.config.get('stage3_input_dir')
                 if not stage3_input:
                     # Single auto-discovery attempt
                     discovered = self.discover_stage_input_folder(3, self.config['output_dir'])
                     if discovered:
                         input_dir = discovered
-                        logger.info(f"Auto-discovered Stage 3 input: {input_dir}")
+                        logger.info(f"Auto-discovered masking input: {input_dir}")
                     else:
                         return {
                             'success': False,
-                            'error': 'Stage 3 input directory not specified and auto-discovery failed',
+                            'error': 'Masking input directory not specified and auto-discovery failed',
                             'masks_created': 0,
                             'skipped': 0,
                             'failed': 0
                         }
                 else:
                     input_dir = Path(stage3_input)
-                    logger.info(f"Using specified Stage 3 input: {input_dir}")
+                    logger.info(f"Using specified masking input: {input_dir}")
             
-            output_dir = Path(self.config['output_dir']) / 'stage3_masks'
+            output_dir = Path(self.config['output_dir']) / 'masks'
             save_visualization = self.config.get('save_visualization', False)
             
             def progress_callback(current, total, message):
-                self.progress.emit(current, total, f"Stage 3: {message}")
+                self.progress.emit(current, total, f"Masking: {message}")
             
             def cancellation_check():
                 """Check for cancellation or pause"""
@@ -1580,43 +1580,43 @@ class PipelineWorker(QThread):
             return result
         
         except Exception as e:
-            logger.error(f"Stage 3 error: {e}")
+            logger.error(f"Masking error: {e}")
             return {'success': False, 'error': str(e)}
 
     def _execute_stage4(self) -> Dict:
-        """Execute Stage 4: Alignment (Mode A: SphereSfM or Mode B: Rig SfM or Mode C: Pose Transfer)"""
+        """Execute 3D Reconstruction (Panorama SfM or Perspective Reconstruction)"""
         try:
              # Lazy import
              from .colmap_stage import ColmapStage, ColmapSettings, ALIGNMENT_MODE_SPHERE_SFM, ALIGNMENT_MODE_RIG_SFM, ALIGNMENT_MODE_POSE_TRANSFER
              
-             # Determine input directory (usually from Stage 1)
+             # Determine input directory (usually from extraction)
              if self.config.get('enable_stage1', True):
-                 input_dir = Path(self.config['output_dir']) / 'stage1_frames'
+                 input_dir = Path(self.config['output_dir']) / 'extracted_frames'
              else:
                  # Auto-discovery or config
-                 discovered = self.discover_stage_input_folder(2, self.config['output_dir']) # Re-use stage 2 discovery (equirectangulars)
+                 discovered = self.discover_stage_input_folder(2, self.config['output_dir']) # Re-use split discovery (equirectangulars)
                  if discovered:
                      input_dir = discovered
                  else:
-                     return {'success': False, 'error': 'Stage 4 input (equirectangular frames) not found'}
+                     return {'success': False, 'error': 'Reconstruction input (equirectangular frames) not found'}
              
-             output_dir = Path(self.config['output_dir']) / 'stage4_alignment'
+             output_dir = Path(self.config['output_dir']) / 'reconstruction'
              
-             # Check if equirectangular masking was used (Stage 3)
+             # Check if equirectangular masking was used
              masks_dir = None
              mask_target = self.config.get('mask_target', 'split')
              if mask_target == 'equirect' and self.config.get('stage3_enabled', False):
-                 # Use masks from Stage 3 (applied to equirectangular frames)
-                 potential_masks_dir = Path(self.config['output_dir']) / 'stage3_masks'
+                 # Use masks (applied to equirectangular frames)
+                 potential_masks_dir = Path(self.config['output_dir']) / 'masks'
                  if potential_masks_dir.exists():
                      masks_dir = potential_masks_dir
-                     logger.info(f"[Stage 4] Using equirectangular masks from Stage 3: {masks_dir}")
+                     logger.info(f"[Reconstruction] Using equirectangular masks: {masks_dir}")
                  else:
-                     logger.warning("[Stage 4] Equirect masking enabled but no masks found. Proceeding without masks.")
+                     logger.warning("[Reconstruction] Equirect masking enabled but no masks found. Proceeding without masks.")
              
              # Determine alignment mode from config
              alignment_mode = self.config.get('alignment_mode', ALIGNMENT_MODE_RIG_SFM)
-             logger.info(f"[Stage 4] Using alignment mode: {alignment_mode}")
+             logger.info(f"[Reconstruction] Using alignment mode: {alignment_mode}")
              
              # Settings
              settings = ColmapSettings(
@@ -1631,7 +1631,7 @@ class PipelineWorker(QThread):
              stage = ColmapStage(settings)
              
              def progress_callback(msg):
-                 self.progress.emit(0, 0, f"Stage 4: {msg}")
+                 self.progress.emit(0, 0, f"Reconstruction: {msg}")
                  
              result = stage.run(
                  frames_dir=input_dir,
@@ -1643,8 +1643,8 @@ class PipelineWorker(QThread):
              # Export to RealityScan if enabled
              if result.get('success') and self.config.get('export_realityscan', False):
                  try:
-                     logger.info("[Stage 4] Exporting to RealityScan format...")
-                     self.progress.emit(0, 0, "Stage 4: Exporting to RealityScan...")
+                     logger.info("[Reconstruction] Exporting to RealityScan format...")
+                     self.progress.emit(0, 0, "Reconstruction: Exporting to RealityScan...")
 
                      from src.premium.pose_transfer_integration import export_for_realityscan
 
@@ -1666,7 +1666,7 @@ class PipelineWorker(QThread):
                              if perspective_masks.exists():
                                  export_masks_dir = perspective_masks
                              else:
-                                 split_masks = Path(self.config['output_dir']) / 'stage3_masks'
+                                 split_masks = Path(self.config['output_dir']) / 'masks'
                                  if split_masks.exists():
                                      export_masks_dir = split_masks
 
@@ -1680,19 +1680,19 @@ class PipelineWorker(QThread):
                      )
 
                      if rs_success:
-                         logger.info(f"[Stage 4] RealityScan export complete: {realityscan_dir}")
+                         logger.info(f"[Reconstruction] RealityScan export complete: {realityscan_dir}")
                          result['realityscan_export'] = str(realityscan_dir)
                      else:
-                         logger.warning("[Stage 4] RealityScan export failed")
+                         logger.warning("[Reconstruction] RealityScan export failed")
 
                  except Exception as e:
-                     logger.error(f"[Stage 4] RealityScan export error: {e}", exc_info=True)
+                     logger.error(f"[Reconstruction] RealityScan export error: {e}", exc_info=True)
 
              # Optional sidecar export (XMP metadata alongside aligned images)
              if result.get('success') and self.config.get('export_sidecars', False):
                  try:
-                     logger.info("[Stage 4] Exporting XMP sidecar metadata...")
-                     self.progress.emit(0, 0, "Stage 4: Exporting sidecar metadata...")
+                     logger.info("[Reconstruction] Exporting XMP sidecar metadata...")
+                     self.progress.emit(0, 0, "Reconstruction: Exporting sidecar metadata...")
 
                      from .export_formats import RealityScanExporter
 
@@ -1709,21 +1709,21 @@ class PipelineWorker(QThread):
                      if exporter.parse_colmap_text():
                          xmp_ok = exporter.export_xmp_sidecars(str(sidecar_images_dir), use_perspective=False)
                          if xmp_ok:
-                             logger.info(f"[Stage 4] XMP sidecar export complete: {sidecar_images_dir}")
+                             logger.info(f"[Reconstruction] XMP sidecar export complete: {sidecar_images_dir}")
                              result['xmp_sidecars_dir'] = str(sidecar_images_dir)
                          else:
-                             logger.warning("[Stage 4] XMP sidecar export completed with no files")
+                             logger.warning("[Reconstruction] XMP sidecar export completed with no files")
                      else:
-                         logger.warning("[Stage 4] Could not parse COLMAP text model for sidecar export")
+                         logger.warning("[Reconstruction] Could not parse COLMAP text model for sidecar export")
 
                  except Exception as e:
-                     logger.error(f"[Stage 4] Sidecar export error: {e}", exc_info=True)
+                     logger.error(f"[Reconstruction] Sidecar export error: {e}", exc_info=True)
              
              # Export to LichtFeld Studio if enabled
              if result.get('success') and self.config.get('export_lichtfeld', True):
                  try:
-                     logger.info("[Stage 4] Exporting to LichtFeld Studio format...")
-                     self.progress.emit(0, 0, "Stage 4: Exporting to LichtFeld Studio...")
+                     logger.info("[Reconstruction] Exporting to LichtFeld Studio format...")
+                     self.progress.emit(0, 0, "Reconstruction: Exporting to LichtFeld Studio...")
                      
                      from .export_formats import LichtfeldExporter
                      
@@ -1741,8 +1741,8 @@ class PipelineWorker(QThread):
                          if mask_target == 'equirect' and masks_dir:
                              export_masks_dir = masks_dir
                          else:
-                             # Check for Stage 3 split masks
-                             split_masks = Path(self.config['output_dir']) / 'stage3_masks'
+                             # Check for split masks
+                             split_masks = Path(self.config['output_dir']) / 'masks'
                              if split_masks.exists():
                                  export_masks_dir = split_masks
                      
@@ -1758,22 +1758,22 @@ class PipelineWorker(QThread):
                      )
                      
                      if export_success:
-                         logger.info(f"[Stage 4] LichtFeld Studio export complete: {lichtfeld_dir}")
+                         logger.info(f"[Reconstruction] LichtFeld Studio export complete: {lichtfeld_dir}")
                          result['lichtfeld_export'] = str(lichtfeld_dir)
                      else:
-                         logger.warning("[Stage 4] LichtFeld Studio export failed")
+                         logger.warning("[Reconstruction] LichtFeld Studio export failed")
                  
                  except Exception as e:
-                     logger.error(f"[Stage 4] LichtFeld export error: {e}", exc_info=True)
+                     logger.error(f"[Reconstruction] LichtFeld export error: {e}", exc_info=True)
              
              return result
 
         except Exception as e:
-            logger.error(f"Stage 4 error: {e}", exc_info=True)
+            logger.error(f"Reconstruction error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
 
     def _execute_stage5(self, stage4_result: Dict) -> Dict:
-        """Execute Stage 5: Lichtfeld Training"""
+        """Execute Training (Lichtfeld Studio)"""
         try:
             from .lichtfeld_stage import LichtfeldTrainingStage
             
@@ -1782,9 +1782,9 @@ class PipelineWorker(QThread):
             if stage4_result.get('success') and stage4_result.get('colmap_output'):
                 colmap_model = Path(stage4_result['colmap_output'])
             
-            # Fallback path if stage 4 wasn't just run but we want to train on existing
+            # Fallback path if reconstruction wasn't just run but we want to train on existing
             if not colmap_model:
-                 possible_path = Path(self.config['output_dir']) / 'stage4_alignment' / 'sparse' / '0'
+                 possible_path = Path(self.config['output_dir']) / 'reconstruction' / 'sparse' / '0'
                  if possible_path.exists():
                      colmap_model = possible_path
             
@@ -1792,8 +1792,8 @@ class PipelineWorker(QThread):
                 return {'success': False, 'error': 'No aligned COLMAP model found for training'}
             
             # Images path (perspectives used in alignment)
-            # Rig SfM puts them in stage4_alignment/images
-            images_path = Path(self.config['output_dir']) / 'stage4_alignment' / 'images'
+            # Rig SfM puts them in reconstruction/images
+            images_path = Path(self.config['output_dir']) / 'reconstruction' / 'images'
             if not images_path.exists():
                 # Try finding from result
                  if stage4_result.get('perspectives_dir'):
@@ -1803,7 +1803,7 @@ class PipelineWorker(QThread):
             return stage.run(colmap_model, images_path)
             
         except Exception as e:
-            logger.error(f"Stage 5 error: {e}", exc_info=True)
+            logger.error(f"Training error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
     
     def _get_default_cameras(self) -> List[Dict]:

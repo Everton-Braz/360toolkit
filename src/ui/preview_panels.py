@@ -1,6 +1,6 @@
 """
 Perspective Preview Panel Widget
-Real-time preview for Stage 2 perspective mode with circular compass.
+Real-time preview for perspective split with circular compass.
 """
 
 import cv2

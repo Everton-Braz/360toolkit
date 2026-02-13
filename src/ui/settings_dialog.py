@@ -191,10 +191,10 @@ class SettingsDialog(QDialog):
         perf_group = QGroupBox("Performance Options")
         perf_layout = QVBoxLayout()
         
-        self.skip_intermediate_checkbox = QCheckBox("Skip saving Stage 1 frames (faster)")
+        self.skip_intermediate_checkbox = QCheckBox("Skip saving extracted frames (faster)")
         self.skip_intermediate_checkbox.setToolTip(
             "When enabled, equirectangular frames are saved to a temp folder\n"
-            "and automatically deleted after Stage 2 completes.\n"
+            "and automatically deleted after perspective splitting completes.\n"
             "This saves disk space and can be faster on SSDs.\n\n"
             "Disable this if you want to keep the equirectangular frames."
         )

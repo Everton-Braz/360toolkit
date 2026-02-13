@@ -178,13 +178,13 @@ class MainWindow(QMainWindow):
         # Navigation buttons
         self.nav_buttons = []
         nav_items = [
-            ("Overview",           "\u2302"),   # ⌂
-            ("Stage 1: Extract",   "1"),
-            ("Stage 2: Perspective","2"),
-            ("Stage 2: Cubemap",   "2"),
-            ("Stage 3: Masking",   "3"),
-            ("Stage 4: Alignment", "4"),
-            ("Stage 5: Training",  "5"),
+            ("Overview",              "\u2302"),   # ⌂
+            ("Frame Extraction",     "1"),
+            ("Perspective Split",    "2"),
+            ("Cubemap Split",        "2"),
+            ("AI Masking",           "3"),
+            ("3D Reconstruction",    "4"),
+            ("Training",             "5"),
         ]
         
         self.nav_group = QButtonGroup(self)
@@ -395,7 +395,7 @@ class MainWindow(QMainWindow):
         ))
 
         summary_card = CardWidget("Pipeline Readiness")
-        self.overview_stage_status_label = QLabel("Enabled stages: 0/5")
+        self.overview_stage_status_label = QLabel("Enabled steps: 0/5")
         self.overview_stage_status_label.setObjectName("stageSummaryText")
         summary_card.addWidget(self.overview_stage_status_label)
         layout.addWidget(summary_card)
@@ -404,21 +404,21 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         grid.setSpacing(16)
         
-        # Stage 1
-        card1 = CardWidget("Stage 1: Frame Extraction")
+        # Frame Extraction
+        card1 = CardWidget("Frame Extraction")
         self.stage1_enable = QCheckBox("Enable extraction from .INSV/.mp4")
         self.stage1_enable.setChecked(True)
         self.stage1_enable.toggled.connect(self._update_overview_stage_summary)
         card1.addWidget(self.stage1_enable)
-        self.run_stage1_btn = QPushButton("Configure Stage 1")
+        self.run_stage1_btn = QPushButton("Configure Extraction")
         self.run_stage1_btn.setFixedHeight(36)
         self.run_stage1_btn.clicked.connect(lambda: self._open_stage_page(1))
         self.run_stage1_btn.setObjectName("stageSecondaryButton")
         card1.addWidget(self.run_stage1_btn)
         grid.addWidget(card1, 0, 0)
         
-        # Stage 2
-        card2 = CardWidget("Stage 2: Split Views")
+        # Split Views
+        card2 = CardWidget("Split Views")
         stage2_header = QHBoxLayout()
         self.stage2_enable = QCheckBox("Enable perspective/cubemap splitting")
         self.stage2_enable.setChecked(True)
@@ -435,46 +435,46 @@ class MainWindow(QMainWindow):
         self.skip_transform_check.setToolTip("Skip splitting, mask equirect images directly")
         self.skip_transform_check.toggled.connect(self.on_skip_transform_toggled)
         card2.addWidget(self.skip_transform_check)
-        self.run_stage2_btn = QPushButton("Configure Stage 2")
+        self.run_stage2_btn = QPushButton("Configure Split")
         self.run_stage2_btn.setFixedHeight(36)
         self.run_stage2_btn.clicked.connect(lambda: self._open_stage_page(2))
         self.run_stage2_btn.setObjectName("stageSecondaryButton")
         card2.addWidget(self.run_stage2_btn)
         grid.addWidget(card2, 0, 1)
         
-        # Stage 3
-        card3 = CardWidget("Stage 3: AI Masking")
+        # AI Masking
+        card3 = CardWidget("AI Masking")
         self.stage3_enable = QCheckBox("Enable AI person/object masking")
         self.stage3_enable.setChecked(True)
         self.stage3_enable.toggled.connect(self._update_overview_stage_summary)
         card3.addWidget(self.stage3_enable)
-        self.run_stage3_btn = QPushButton("Configure Stage 3")
+        self.run_stage3_btn = QPushButton("Configure Masking")
         self.run_stage3_btn.setFixedHeight(36)
         self.run_stage3_btn.clicked.connect(lambda: self._open_stage_page(4))
         self.run_stage3_btn.setObjectName("stageSecondaryButton")
         card3.addWidget(self.run_stage3_btn)
         grid.addWidget(card3, 1, 0)
         
-        # Stage 4
-        card4 = CardWidget("Stage 4: Alignment (SfM)")
+        # 3D Reconstruction
+        card4 = CardWidget("3D Reconstruction")
         self.stage4_enable = QCheckBox("Enable COLMAP reconstruction")
         self.stage4_enable.setChecked(True)
         self.stage4_enable.toggled.connect(self._update_overview_stage_summary)
         card4.addWidget(self.stage4_enable)
-        self.run_stage4_btn = QPushButton("Configure Stage 4")
+        self.run_stage4_btn = QPushButton("Configure Reconstruction")
         self.run_stage4_btn.setFixedHeight(36)
         self.run_stage4_btn.clicked.connect(lambda: self._open_stage_page(5))
         self.run_stage4_btn.setObjectName("stageSecondaryButton")
         card4.addWidget(self.run_stage4_btn)
         grid.addWidget(card4, 1, 1)
         
-        # Stage 5
-        card5 = CardWidget("Stage 5: Training")
+        # Training
+        card5 = CardWidget("Training")
         self.stage5_enable = QCheckBox("Enable Gaussian Splatting training")
         self.stage5_enable.setChecked(False)
         self.stage5_enable.toggled.connect(self._update_overview_stage_summary)
         card5.addWidget(self.stage5_enable)
-        self.run_stage5_btn = QPushButton("Configure Stage 5")
+        self.run_stage5_btn = QPushButton("Configure Training")
         self.run_stage5_btn.setFixedHeight(36)
         self.run_stage5_btn.clicked.connect(lambda: self._open_stage_page(6))
         self.run_stage5_btn.setObjectName("stageSecondaryButton")
@@ -493,7 +493,7 @@ class MainWindow(QMainWindow):
         return self._scroll_wrap(page)
     
     # ========================================================================
-    # PAGE 1: STAGE 1 - EXTRACTION
+    # PAGE 1: FRAME EXTRACTION
     # ========================================================================
     def _create_stage1_page(self) -> QScrollArea:
         page = QWidget()
@@ -502,13 +502,13 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
-            "Stage 1: Frame Extraction",
+            "Frame Extraction",
             "Extract equirectangular frames from Insta360 .INSV or .mp4 video files."
         ))
 
         layout.addWidget(StageSummaryStrip(
-            "Stage 1",
-            "Configure extraction range, method, and quality, then validate metadata before running Stage 1."
+            "Extraction",
+            "Configure extraction range, method, and quality, then validate metadata before running."
         ))
         
         # File Analysis card
@@ -621,7 +621,7 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(card_extract)
 
-        stage1_footer = StageActionFooter("Run Stage 1")
+        stage1_footer = StageActionFooter("Run Extraction")
         stage1_footer.primary_button.clicked.connect(self.run_stage_1_only)
         stage1_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(1))
         layout.addWidget(stage1_footer)
@@ -630,7 +630,7 @@ class MainWindow(QMainWindow):
         return self._scroll_wrap(page)
     
     # ========================================================================
-    # PAGE 2: STAGE 2 - PERSPECTIVE
+    # PAGE 2: PERSPECTIVE SPLIT
     # ========================================================================
     def _create_stage2_persp_page(self) -> QScrollArea:
         page = QWidget()
@@ -639,12 +639,12 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
-            "Stage 2: Perspective Transform (E2P)",
+            "Perspective Split (E2P)",
             "Convert equirectangular panoramas to multiple perspective camera views."
         ))
 
         layout.addWidget(StageSummaryStrip(
-            "Stage 2A",
+            "Perspective",
             "Configure perspective output size and camera groups for split-view workflows."
         ))
         
@@ -716,7 +716,7 @@ class MainWindow(QMainWindow):
         self.stage2_perspective_params_group = card_cameras
         layout.addWidget(card_cameras)
 
-        stage2_footer = StageActionFooter("Run Stage 2 (Perspective)")
+        stage2_footer = StageActionFooter("Run Perspective Split")
         stage2_footer.primary_button.clicked.connect(self.run_stage_2_only)
         stage2_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(2))
         layout.addWidget(stage2_footer)
@@ -725,7 +725,7 @@ class MainWindow(QMainWindow):
         return self._scroll_wrap(page)
     
     # ========================================================================
-    # PAGE 3: STAGE 2 - CUBEMAP
+    # PAGE 3: CUBEMAP SPLIT
     # ========================================================================
     def _create_stage2_cube_page(self) -> QScrollArea:
         page = QWidget()
@@ -734,12 +734,12 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
-            "Stage 2: Cubemap Transform (E2C)",
+            "Cubemap Split (E2C)",
             "Convert equirectangular panoramas to cubemap tiles for VR or photogrammetry."
         ))
 
         layout.addWidget(StageSummaryStrip(
-            "Stage 2B",
+            "Cubemap",
             "Configure cubemap tiling mode and tile dimensions; use 8-tile mode for photogrammetry output layouts."
         ))
         
@@ -801,7 +801,7 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(card_type)
 
-        stage2_cube_footer = StageActionFooter("Run Stage 2 (Cubemap)")
+        stage2_cube_footer = StageActionFooter("Run Cubemap Split")
         stage2_cube_footer.primary_button.clicked.connect(self.run_stage_2_only)
         stage2_cube_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(3))
         layout.addWidget(stage2_cube_footer)
@@ -810,7 +810,7 @@ class MainWindow(QMainWindow):
         return self._scroll_wrap(page)
     
     # ========================================================================
-    # PAGE 4: STAGE 3 - MASKING
+    # PAGE 4: AI MASKING
     # ========================================================================
     def _create_stage3_page(self) -> QScrollArea:
         page = QWidget()
@@ -819,13 +819,13 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
-            "Stage 3: AI Masking",
+            "AI Masking",
             "Detect and mask persons, objects, and animals using YOLO + SAM for photogrammetry."
         ))
 
         layout.addWidget(StageSummaryStrip(
-            "Stage 3",
-            "Choose masking target, categories, engine, and confidence, then validate before running Stage 3."
+            "Masking",
+            "Choose masking target, categories, engine, and confidence, then validate before running."
         ))
         
         # Masking Target card
@@ -837,14 +837,14 @@ class MainWindow(QMainWindow):
         
         self.mask_split_radio = QRadioButton("Apply to Split Views (RealityScan Workflow)")
         self.mask_split_radio.setChecked(True)
-        self.mask_split_radio.setToolTip("Stage 1 -> Stage 2 (split) -> Stage 3 (mask)")
+        self.mask_split_radio.setToolTip("Extract -> Split -> Mask")
         card_target.addWidget(self.mask_split_radio)
         
         self.mask_equirect_radio = QRadioButton("Apply to Equirectangular (Rig SfM Workflow)")
-        self.mask_equirect_radio.setToolTip("Stage 1 -> Stage 3 (mask equirect) -> Stage 4 (alignment)")
+        self.mask_equirect_radio.setToolTip("Extract -> Mask equirect -> Reconstruct")
         card_target.addWidget(self.mask_equirect_radio)
         
-        tip = QLabel("Tip: Use 'Equirectangular' if enabling Stage 4 for Gaussian Splatting.")
+        tip = QLabel("Tip: Use 'Equirectangular' if enabling 3D Reconstruction for Gaussian Splatting.")
         tip.setObjectName("stageTip")
         tip.setWordWrap(True)
         card_target.addWidget(tip)
@@ -983,7 +983,7 @@ class MainWindow(QMainWindow):
         card_gpu.addWidget(gpu_hint)
         layout.addWidget(card_gpu)
 
-        stage3_footer = StageActionFooter("Run Stage 3")
+        stage3_footer = StageActionFooter("Run Masking")
         stage3_footer.primary_button.clicked.connect(self.run_stage_3_only)
         stage3_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(4))
         layout.addWidget(stage3_footer)
@@ -992,7 +992,7 @@ class MainWindow(QMainWindow):
         return self._scroll_wrap(page)
     
     # ========================================================================
-    # PAGE 5: STAGE 4 - ALIGNMENT
+    # PAGE 5: 3D RECONSTRUCTION
     # ========================================================================
     def _create_stage4_page(self) -> QScrollArea:
         page = QWidget()
@@ -1001,57 +1001,43 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
-            "Stage 4: Alignment (SfM Reconstruction)",
-            "Reconstruct camera poses and 3D structure using COLMAP. Required for Gaussian Splatting."
+            "3D Reconstruction",
+            "Reconstruct camera poses and 3D structure. Required for Gaussian Splatting and photogrammetry."
         ))
 
         layout.addWidget(StageSummaryStrip(
-            "Stage 4",
-            "Select reconstruction strategy and quality preset, then resolve dependency warnings before alignment."
+            "Reconstruction",
+            "Select reconstruction workflow and quality preset, then resolve dependency warnings before running."
         ))
         
-        # Reconstruction Method card
-        card_method = CardWidget("Reconstruction Method")
+        # Reconstruction Workflow card
+        card_method = CardWidget("Reconstruction Workflow")
         
         self.alignment_mode_group = QButtonGroup(self)
         
-        # Mode B
-        self.mode_rig_sfm_radio = QRadioButton("Mode B: Rig-based SfM (Recommended)")
+        # Perspective Reconstruction (was Mode B — the default/recommended)
+        self.mode_rig_sfm_radio = QRadioButton("Perspective Reconstruction (Recommended)")
         self.mode_rig_sfm_radio.setChecked(True)
         self.mode_rig_sfm_radio.setToolTip(
-            "Virtual perspectives + rig constraints (9 cameras per frame)\n"
-            "100% registration rate | Works with pycolmap"
+            "Split equirect → perspectives, then COLMAP GPU / GLOMAP SfM\n"
+            "Works for RealityScan, Metashape, COLMAP, Lichtfeld Studio, any 3DGS trainer"
         )
         self.alignment_mode_group.addButton(self.mode_rig_sfm_radio, 0)
         card_method.addWidget(self.mode_rig_sfm_radio)
-        desc_b = QLabel("  Virtual perspectives + rig constraints (9 cameras per frame)")
+        desc_b = QLabel("  COLMAP GPU / GLOMAP on perspective images | Universal output")
         desc_b.setProperty("role", "indentedMuted")
         card_method.addWidget(desc_b)
         
         card_method.addSpacing(4)
         
-        # Mode A
-        self.mode_sphere_sfm_radio = QRadioButton("Mode A: SphereSfM Direct (Equirectangular Only)")
-        self.mode_sphere_sfm_radio.setToolTip("Direct spherical matching | SPHERE camera model")
+        # Panorama SfM (was Mode A)
+        self.mode_sphere_sfm_radio = QRadioButton("Panorama SfM (Equirectangular)")
+        self.mode_sphere_sfm_radio.setToolTip("Direct spherical matching on equirectangular images | SPHERE camera model")
         self.alignment_mode_group.addButton(self.mode_sphere_sfm_radio, 1)
         card_method.addWidget(self.mode_sphere_sfm_radio)
-        desc_a = QLabel("  Direct spherical matching on equirect images (no cubic conversion)")
+        desc_a = QLabel("  SphereSfM on equirect images (no perspective split required)")
         desc_a.setProperty("role", "indentedMuted")
         card_method.addWidget(desc_a)
-        
-        card_method.addSpacing(4)
-        
-        # Mode C
-        self.mode_pose_transfer_radio = QRadioButton("Mode C: SphereSfM + Pose Transfer (9-Camera Rig)")
-        self.mode_pose_transfer_radio.setToolTip(
-            "SphereSfM alignment -> 9-camera perspective extraction -> pose transfer\n"
-            "Best quality for 3DGS training"
-        )
-        self.alignment_mode_group.addButton(self.mode_pose_transfer_radio, 2)
-        card_method.addWidget(self.mode_pose_transfer_radio)
-        desc_c = QLabel("  SphereSfM alignment -> perspective extraction -> pose transfer")
-        desc_c.setProperty("role", "indentedMuted")
-        card_method.addWidget(desc_c)
         
         # SphereSfM status
         self.spheresfm_status_label = QLabel("  Checking SphereSfM...")
@@ -1061,7 +1047,6 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(300, self._check_spheresfm_status)
         
         # Connect mode changes
-        self.mode_pose_transfer_radio.toggled.connect(self._on_alignment_mode_changed)
         self.mode_sphere_sfm_radio.toggled.connect(self._on_alignment_mode_changed)
         self.mode_rig_sfm_radio.toggled.connect(self._on_alignment_mode_changed)
         
@@ -1070,17 +1055,15 @@ class MainWindow(QMainWindow):
         self.use_rig_sfm_check.setVisible(False)
         self.use_rig_sfm_check.setChecked(True)
         
+        # Legacy: hidden pose_transfer radio (kept for config compat, never shown)
+        self.mode_pose_transfer_radio = QRadioButton()
+        self.mode_pose_transfer_radio.setVisible(False)
+        self.alignment_mode_group.addButton(self.mode_pose_transfer_radio, 2)
+        
         layout.addWidget(card_method)
         
-        # Pose Transfer Config (Mode C only)
-        self.pose_transfer_config_group = CardWidget("Virtual Camera Configuration (Mode C)")
-        cam_info = QLabel(
-            "9-Camera Rig: Reference cam at pitch=0, yaw=90 | "
-            "Forward ring: 5 cameras | Backward ring: 4 cameras | FOV: 90 | Baseline: 6.5cm"
-        )
-        cam_info.setWordWrap(True)
-        cam_info.setProperty("role", "secondary")
-        self.pose_transfer_config_group.addWidget(cam_info)
+        # Legacy: hidden pose_transfer config (kept for attribute compat)
+        self.pose_transfer_config_group = CardWidget("Virtual Camera Configuration")
         self.pose_transfer_config_group.setVisible(False)
         layout.addWidget(self.pose_transfer_config_group)
         
@@ -1161,13 +1144,13 @@ class MainWindow(QMainWindow):
         
         # Output info
         self.output_info_label = QLabel(
-            "COLMAP output: <output_dir>/stage4_alignment/sparse/0/"
+            "Output: <output_dir>/reconstruction/sparse/0/"
         )
         self.output_info_label.setProperty("role", "muted")
         self.output_info_label.setWordWrap(True)
         layout.addWidget(self.output_info_label)
 
-        stage4_footer = StageActionFooter("Run Stage 4")
+        stage4_footer = StageActionFooter("Run Reconstruction")
         stage4_footer.primary_button.clicked.connect(self.run_stage_4_only)
         stage4_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(5))
         layout.addWidget(stage4_footer)
@@ -1176,7 +1159,7 @@ class MainWindow(QMainWindow):
         return self._scroll_wrap(page)
     
     # ========================================================================
-    # PAGE 6: STAGE 5 - TRAINING
+    # PAGE 6: TRAINING
     # ========================================================================
     def _create_stage5_page(self) -> QScrollArea:
         page = QWidget()
@@ -1185,13 +1168,13 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         
         layout.addWidget(StageHeader(
-            "Stage 5: Training",
+            "Training",
             "Launch Gaussian Splatting training with LichtFeld Studio using the generated COLMAP model."
         ))
 
         layout.addWidget(StageSummaryStrip(
-            "Stage 5",
-            "Configure optional training launch and executable path after alignment output is ready."
+            "Training",
+            "Configure optional training launch and executable path after reconstruction output is ready."
         ))
         
         card = CardWidget("Training Target")
@@ -1218,7 +1201,7 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(card)
 
-        stage5_footer = StageActionFooter("Run Stage 5")
+        stage5_footer = StageActionFooter("Run Training")
         stage5_footer.primary_button.clicked.connect(self.run_stage_5_only)
         stage5_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(6))
         layout.addWidget(stage5_footer)
@@ -1369,24 +1352,24 @@ class MainWindow(QMainWindow):
 
         if stage_index == 1 and not self.full_video_check.isChecked():
             if self.end_time_spin.value() <= self.start_time_spin.value():
-                self.log_message("[WARN] Stage 1 validation: End time must be greater than start time.")
-                self._set_control_status("Invalid Stage 1 time range", "warn")
+                self.log_message("[WARN] Extraction validation: End time must be greater than start time.")
+                self._set_control_status("Invalid extraction time range", "warn")
                 return
 
         if stage_index in (2, 3) and self.skip_transform_check.isChecked():
-            self.log_message("[INFO] Stage 2 validation: Transform is skipped (direct masking mode enabled).")
-            self._set_control_status("Stage 2 skipped (direct mask)", "info")
+            self.log_message("[INFO] Split validation: Transform is skipped (direct masking mode enabled).")
+            self._set_control_status("Split skipped (direct mask)", "info")
             return
 
         if stage_index == 4 and not (
             self.persons_group.isChecked() or self.objects_group.isChecked() or self.animals_group.isChecked()
         ):
-            self.log_message("[WARN] Stage 3 validation: No masking category group is enabled.")
+            self.log_message("[WARN] Masking validation: No masking category group is enabled.")
             self._set_control_status("No masking categories enabled", "warn")
             return
 
         if stage_index == 6 and self.train_lichtfeld_check.isChecked() and not self.lichtfeld_path_edit.text().strip():
-            self.log_message("[WARN] Stage 5 validation: Lichtfeld path is required when training is enabled.")
+            self.log_message("[WARN] Training validation: Lichtfeld path is required when training is enabled.")
             self._set_control_status("Lichtfeld path required", "warn")
             return
 
@@ -1567,7 +1550,7 @@ class MainWindow(QMainWindow):
         ]
         enabled_count = sum(1 for check in checks if check is not None and check.isChecked())
         self.overview_stage_status_label.setText(
-            f"Enabled stages: {enabled_count}/5 | Ready: {'Yes' if enabled_count > 0 else 'No'}"
+            f"Enabled steps: {enabled_count}/5 | Ready: {'Yes' if enabled_count > 0 else 'No'}"
         )
     
     # ========================================================================
@@ -1610,7 +1593,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(self, f"About {APP_NAME}",
             f"{APP_NAME} v{APP_VERSION}\n\n"
             "Unified photogrammetry preprocessing pipeline.\n"
-            "Extract -> Split -> Mask -> Align -> Train\n\n"
+            "Extract -> Split -> Mask -> Reconstruct -> Train\n\n"
             "Copyright 2026 | MIT License"
         )
     
@@ -1678,12 +1661,10 @@ class MainWindow(QMainWindow):
     
     def _get_alignment_mode(self) -> str:
         if self.mode_rig_sfm_radio.isChecked():
-            return 'rig_sfm'
+            return 'perspective_reconstruction'
         elif self.mode_sphere_sfm_radio.isChecked():
-            return 'sphere_sfm'
-        elif self.mode_pose_transfer_radio.isChecked():
-            return 'pose_transfer'
-        return 'rig_sfm'
+            return 'panorama_sfm'
+        return 'perspective_reconstruction'
     
     def apply_loaded_config(self, config: dict):
         try:
@@ -1731,11 +1712,10 @@ class MainWindow(QMainWindow):
                 self.stage4_enable.setChecked(config['stage4_enabled'])
             if 'alignment_mode' in config:
                 m = config['alignment_mode']
-                if m == 'sphere_sfm':
+                if m in ('sphere_sfm', 'panorama_sfm'):
                     self.mode_sphere_sfm_radio.setChecked(True)
-                elif m == 'pose_transfer':
-                    self.mode_pose_transfer_radio.setChecked(True)
                 else:
+                    # 'rig_sfm', 'pose_transfer', 'perspective_reconstruction' all → Perspective
                     self.mode_rig_sfm_radio.setChecked(True)
             if 'use_gpu_colmap' in config:
                 self.use_gpu_colmap_check.setChecked(config['use_gpu_colmap'])
@@ -1785,7 +1765,7 @@ class MainWindow(QMainWindow):
             self.stage2_perspective_params_group.setEnabled(not checked)
         if hasattr(self, 'run_stage2_btn'):
             self.run_stage2_btn.setEnabled(not checked)
-        self.log_message("[SKIP] Direct Mask Mode" if checked else "[INFO] Stage 2 transform enabled")
+        self.log_message("[SKIP] Direct Mask Mode" if checked else "[INFO] Perspective split enabled")
     
     def on_stage2_method_changed(self, index: int):
         method = self.stage2_method_combo.currentData()
@@ -1819,15 +1799,13 @@ class MainWindow(QMainWindow):
                 self.engine_description_label.setText("Full-featured YOLO | PyTorch backend")
     
     def _on_alignment_mode_changed(self, checked: bool = True):
-        is_c = self.mode_pose_transfer_radio.isChecked()
-        self.pose_transfer_config_group.setVisible(is_c)
         if self.mode_rig_sfm_radio.isChecked():
-            info = "Mode B: 9 virtual perspectives + COLMAP rig constraints"
+            info = "Perspective Reconstruction: COLMAP GPU / GLOMAP on perspective images"
         elif self.mode_sphere_sfm_radio.isChecked():
-            info = "Mode A: Direct spherical matching on equirectangular images"
+            info = "Panorama SfM: SphereSfM on equirectangular images"
         else:
-            info = "Mode C: SphereSfM alignment -> perspective extraction -> pose transfer"
-        self.output_info_label.setText(f"COLMAP output: <output_dir>/stage4_alignment/sparse/0/\n{info}")
+            info = "Perspective Reconstruction (default)"
+        self.output_info_label.setText(f"Output: <output_dir>/reconstruction/sparse/0/\n{info}")
     
     def toggle_time_range(self, checked: bool):
         self.start_time_spin.setEnabled(not checked)
@@ -1985,7 +1963,7 @@ class MainWindow(QMainWindow):
             'camera_config': {'cameras': self._generate_camera_positions()},
         }
         
-        # Stage 2 method-specific params
+        # Split method-specific params
         if stage2_method == 'perspective':
             camera_groups = []
             for gd in self.camera_group_widgets:
@@ -2014,7 +1992,7 @@ class MainWindow(QMainWindow):
                 }
             })
         
-        # Stage 3 masking classes
+        # Masking classes
         if self.stage3_enable.isChecked():
             person_classes = [0] if self.persons_group.isChecked() and self.person_check.isChecked() else []
             
@@ -2055,7 +2033,7 @@ class MainWindow(QMainWindow):
                 }
             })
         
-        # Stage 4 config
+        # Reconstruction config
         if self.stage4_enable.isChecked():
             self.pipeline_config.update({
                 'alignment_mode': self._get_alignment_mode(),
@@ -2115,7 +2093,7 @@ class MainWindow(QMainWindow):
     # STAGE-ONLY RUNNERS
     # ========================================================================
     def run_stage_1_only(self):
-        self.log_message("Running Stage 1 only")
+        self.log_message("Running extraction only")
         self._auto_advance_enabled = True
         s2, s3 = self.stage2_enable.isChecked(), self.stage3_enable.isChecked()
         self.stage2_enable.setChecked(False)
@@ -2125,7 +2103,7 @@ class MainWindow(QMainWindow):
         self.stage3_enable.setChecked(s3)
     
     def run_stage_2_only(self):
-        self.log_message("Running Stage 2 only")
+        self.log_message("Running split only")
         output_dir = self.output_dir_edit.text()
         if not output_dir:
             QMessageBox.warning(self, "Missing", "Configure output directory first")
@@ -2135,7 +2113,7 @@ class MainWindow(QMainWindow):
         worker = PipelineWorker({})
         folder = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
         if not folder:
-            folder_str = QFileDialog.getExistingDirectory(self, "Select Stage 1 Output", str(Path(output_dir)))
+            folder_str = QFileDialog.getExistingDirectory(self, "Select Extraction Output", str(Path(output_dir)))
             if not folder_str:
                 return
             folder = Path(folder_str)
@@ -2158,7 +2136,7 @@ class MainWindow(QMainWindow):
         self.stage3_enable.setChecked(s3)
     
     def run_stage_3_only(self):
-        self.log_message("Running Stage 3 only")
+        self.log_message("Running masking only")
         output_dir = self.output_dir_edit.text()
         if not output_dir:
             QMessageBox.warning(self, "Missing", "Configure output directory first")
@@ -2168,7 +2146,7 @@ class MainWindow(QMainWindow):
         worker = PipelineWorker({})
         folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
         if not folder:
-            folder_str = QFileDialog.getExistingDirectory(self, "Select Stage 2 Output", str(Path(output_dir)))
+            folder_str = QFileDialog.getExistingDirectory(self, "Select Split Output", str(Path(output_dir)))
             if not folder_str:
                 return
             folder = Path(folder_str)
@@ -2191,13 +2169,13 @@ class MainWindow(QMainWindow):
         self.stage2_enable.setChecked(s2)
     
     def run_stage_4_only(self):
-        self.log_message("Running Stage 4 only")
+        self.log_message("Running reconstruction only")
         output_dir = self.output_dir_edit.text()
         if not output_dir:
             QMessageBox.warning(self, "Missing", "Configure output directory first")
             return
         
-        input_dir = Path(output_dir) / 'stage1_frames'
+        input_dir = Path(output_dir) / 'extracted_frames'
         if not input_dir.exists():
             from src.pipeline.batch_orchestrator import PipelineWorker
             worker = PipelineWorker({})
@@ -2217,7 +2195,7 @@ class MainWindow(QMainWindow):
         self.stage4_enable.setChecked(orig)
     
     def run_stage_5_only(self):
-        self.log_message("Running Stage 5 only")
+        self.log_message("Running training only")
         output_dir = self.output_dir_edit.text()
         if not output_dir:
             QMessageBox.warning(self, "Missing", "Configure output directory first")

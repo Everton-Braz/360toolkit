@@ -4,7 +4,7 @@ Handles camera metadata preservation and EXIF embedding.
 
 IMPORTANT: Does NOT extract/preserve GPS or GYRO data (not needed for photogrammetry).
 Only preserves camera info (make, model, lens, focal length, etc.) and embeds
-camera orientation (yaw, pitch, roll) for Stage 2 outputs.
+camera orientation (yaw, pitch, roll) for perspective split outputs.
 """
 
 import piexif

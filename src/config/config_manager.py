@@ -217,14 +217,14 @@ class ConfigManager:
         )
         
         return {
-            # Stage 1: Extraction
+            # Extraction
             'stage1_enabled': True,
             'fps_interval': DEFAULT_FPS,
             'extraction_method': DEFAULT_EXTRACTION_METHOD,
             'sdk_quality': DEFAULT_SDK_QUALITY,
             'output_format': 'png',
             
-            # Stage 2: Transform
+            # Perspective Split
             'stage2_enabled': True,
             'transform_type': DEFAULT_TRANSFORM_TYPE,
             'split_count': DEFAULT_SPLIT_COUNT,
@@ -236,7 +236,7 @@ class ConfigManager:
             'cubemap_fov': DEFAULT_CUBEMAP_FOV,
             'skip_transform': False,
             
-            # Stage 3: Masking
+            # AI Masking
             'stage3_enabled': True,
             'model_size': 'small',
             'confidence_threshold': DEFAULT_CONFIDENCE_THRESHOLD,
@@ -247,12 +247,12 @@ class ConfigManager:
                 'animals': True
             },
             
-            # Stage 4: Alignment
+            # 3D Reconstruction
             'stage4_enabled': True,
             'alignment_tool': 'glomap',
             'use_gpu_colmap': True,
             
-            # Stage 5: Export
+            # Training/Export
             'stage5_enabled': True,
             'export_lithcfeld': True,
             'export_realityscan': True,

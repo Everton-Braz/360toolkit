@@ -1,7 +1,7 @@
 """
 Advanced GPU Optimizations Integration for Batch Orchestrator
 
-This module provides the enhanced Stage 2 processing with:
+This module provides the enhanced perspective splitting with:
 - Pinned Memory Pool (55% faster H2D transfers)
 - CUDA Streams (3-stream overlap for I/O + Transfer + Compute)
 - Ring Buffer (decouples disk I/O from GPU processing)
@@ -39,9 +39,9 @@ except ImportError as e:
 
 class OptimizedStage2Processor:
     """
-    Fully optimized Stage 2 processor with all advanced GPU techniques.
+    Fully optimized perspective split processor with all advanced GPU techniques.
     
-    Replaces the inline Stage 2 processing in batch_orchestrator.py with
+    Replaces the inline perspective processing in batch_orchestrator.py with
     a highly optimized version that uses:
     1. Pinned memory pool for zero-copy DMA
     2. CUDA streams for overlapped execution
@@ -65,7 +65,7 @@ class OptimizedStage2Processor:
         self.enabled = ADVANCED_GPU_AVAILABLE and torch is not None and torch.cuda.is_available()
         
         if not self.enabled:
-            logger.warning("[Optimized Stage 2] Advanced GPU not available, using standard processing")
+            logger.warning("[Optimized Split] Advanced GPU not available, using standard processing")
             return
         
         # Initialize components
@@ -81,7 +81,7 @@ class OptimizedStage2Processor:
         """Initialize all GPU optimization components"""
         try:
             # 1. Pinned Memory Pool (4 buffers for memory efficiency)
-            logger.info("[Optimized Stage 2] Initializing Pinned Memory Pool...")
+            logger.info("[Optimized Split] Initializing Pinned Memory Pool...")
             self.pinned_pool = get_pinned_pool(
                 num_buffers=4,  # Reduced from 8 to save VRAM
                 buffer_shape=(3, 3840, 7680),  # C, H, W
@@ -89,11 +89,11 @@ class OptimizedStage2Processor:
             )
             
             # 2. CUDA Stream Manager (3 streams)
-            logger.info("[Optimized Stage 2] Initializing CUDA Streams...")
+            logger.info("[Optimized Split] Initializing CUDA Streams...")
             self.stream_manager = CUDAStreamManager(device=0)
             
             # 3. Ring Buffer (adaptive depth 2-4 for memory efficiency)
-            logger.info("[Optimized Stage 2] Initializing Ring Buffer...")
+            logger.info("[Optimized Split] Initializing Ring Buffer...")
             self.ring_buffer = AdaptiveRingBuffer(
                 initial_depth=2,  # Reduced from 8
                 max_depth=4,      # Reduced from 16
@@ -101,20 +101,20 @@ class OptimizedStage2Processor:
             )
             
             # 4. Predictive Prefetcher (4 workers, depth 2)
-            logger.info("[Optimized Stage 2] Initializing Prefetcher...")
+            logger.info("[Optimized Split] Initializing Prefetcher...")
             self.prefetcher = PredictivePrefetcher(
                 max_workers=4,
                 prefetch_depth=2
             )
             
             # 5. CUDA Graph Cache (DISABLED - too memory intensive for large images)
-            logger.info("[Optimized Stage 2] CUDA Graphs DISABLED (memory optimization)...")
+            logger.info("[Optimized Split] CUDA Graphs DISABLED (memory optimization)...")
             self.graph_cache = None  # Disabled due to memory constraints
             
-            logger.info("[Optimized Stage 2] ✅ All components initialized successfully!")
+            logger.info("[Optimized Split] ✅ All components initialized successfully!")
             
         except Exception as e:
-            logger.error(f"[Optimized Stage 2] Failed to initialize: {e}")
+            logger.error(f"[Optimized Split] Failed to initialize: {e}")
             self.enabled = False
     
     def process_batch_optimized(
@@ -145,13 +145,13 @@ class OptimizedStage2Processor:
             Dict with success status and results
         """
         if not self.enabled:
-            logger.warning("[Optimized Stage 2] Falling back to standard processing")
+            logger.warning("[Optimized Split] Falling back to standard processing")
             return self._fallback_standard_processing(
                 input_frames, cameras, output_dir, output_width, 
                 output_height, image_format, progress_callback, cancel_check
             )
         
-        logger.info(f"[Optimized Stage 2] Processing {len(input_frames)} frames with {len(cameras)} cameras")
+        logger.info(f"[Optimized Split] Processing {len(input_frames)} frames with {len(cameras)} cameras")
         
         try:
             # Determine batch size - REDUCED for memory efficiency with optimizations
@@ -160,7 +160,7 @@ class OptimizedStage2Processor:
             )
             # Use smaller batch size when using advanced optimizations (more memory overhead)
             batch_size = min(4, batch_size)  # Cap at 4 for memory safety
-            logger.info(f"[Optimized Stage 2] Using batch size: {batch_size} (reduced for memory efficiency)")
+            logger.info(f"[Optimized Split] Using batch size: {batch_size} (reduced for memory efficiency)")
             
             # Start producer thread (loads images into ring buffer)
             producer_thread = threading.Thread(
@@ -183,7 +183,7 @@ class OptimizedStage2Processor:
             processed_frames = 0
             while processed_frames < total_frames:
                 if cancel_check and cancel_check():
-                    logger.info("[Optimized Stage 2] Cancelled by user")
+                    logger.info("[Optimized Split] Cancelled by user")
                     save_executor.shutdown(wait=False)
                     break
                 
@@ -253,7 +253,7 @@ class OptimizedStage2Processor:
                                     f"Processing frame {processed_frames}/{total_frames}")
             
             # Wait for all saves to complete
-            logger.info("[Optimized Stage 2] Waiting for saves to complete...")
+            logger.info("[Optimized Split] Waiting for saves to complete...")
             for future, out_path in save_futures:
                 result = future.result()
                 if result:
@@ -266,7 +266,7 @@ class OptimizedStage2Processor:
             ring_stats = self.ring_buffer.get_stats()
             prefetch_stats = self.prefetcher.get_stats()
             
-            logger.info(f"[Optimized Stage 2] ✅ Complete! Processed {len(processed_files)} images")
+            logger.info(f"[Optimized Split] ✅ Complete! Processed {len(processed_files)} images")
             logger.info(f"[Ring Buffer] Depth={ring_stats['depth']}, "
                        f"Avg I/O={ring_stats['avg_io_ms']:.1f}ms, "
                        f"Avg GPU={ring_stats['avg_gpu_ms']:.1f}ms")
@@ -282,7 +282,7 @@ class OptimizedStage2Processor:
             }
             
         except Exception as e:
-            logger.error(f"[Optimized Stage 2] Error: {e}", exc_info=True)
+            logger.error(f"[Optimized Split] Error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
     
     def _producer_thread(self, input_frames: List[Path], batch_size: int):
@@ -363,7 +363,7 @@ class OptimizedStage2Processor:
                                      output_width, output_height, image_format,
                                      progress_callback, cancel_check):
         """Fallback to standard processing if advanced GPU unavailable"""
-        logger.info("[Optimized Stage 2] Using standard fallback processing")
+        logger.info("[Optimized Split] Using standard fallback processing")
         # This would call the original batch_orchestrator logic
         return {'success': False, 'error': 'Advanced GPU not available, use standard processing'}
     
@@ -373,4 +373,4 @@ class OptimizedStage2Processor:
             self.prefetcher.shutdown()
         if self.stream_manager:
             self.stream_manager.synchronize_all()
-        logger.info("[Optimized Stage 2] Cleanup complete")
+        logger.info("[Optimized Split] Cleanup complete")

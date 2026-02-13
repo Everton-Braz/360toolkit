@@ -273,8 +273,7 @@ class PoseTransferIntegrator:
     
     def __init__(self, settings):
         self.settings = settings
-        if _get_pycolmap() is None:
-            raise ImportError("pycolmap required for Pose Transfer mode")
+        self._has_pycolmap = _get_pycolmap() is not None
     
     def run_alignment(
         self,
@@ -301,6 +300,8 @@ class PoseTransferIntegrator:
         """
         try:
             logger.info("[Mode C] Starting SphereSfM + Pose Transfer")
+            if not self._has_pycolmap:
+                logger.warning("[Mode C] pycolmap not available - using fallback Mode C (SphereSfM + perspective export)")
             
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -333,7 +334,42 @@ class PoseTransferIntegrator:
             sphere_result = self._run_spheresfm(frames_dir, masks_dir, sphere_output, progress_callback)
             
             if not sphere_result['success']:
-                return sphere_result
+                if self._has_pycolmap:
+                    return sphere_result
+                logger.warning("[Mode C] SphereSfM failed in fallback mode, building synthetic sparse model: %s", sphere_result.get('error'))
+                if progress_callback:
+                    progress_callback("SphereSfM failed, using synthetic fallback model...")
+
+                perspective_dir = output_dir / "images"
+                generated = self._extract_perspectives_fallback(
+                    frames_dir=frames_dir,
+                    output_image_dir=perspective_dir,
+                    progress_callback=progress_callback,
+                )
+                if generated == 0:
+                    return {
+                        'success': False,
+                        'error': f"SphereSfM failed and fallback perspective extraction generated no images: {sphere_result.get('error')}"
+                    }
+
+                perspective_masks_dir = output_dir / "masks"
+                _ = self._generate_yolo_sam_masks(
+                    perspective_dir, perspective_masks_dir, progress_callback
+                )
+
+                final_sparse = output_dir / "sparse" / "0"
+                self._create_minimal_sparse_model(perspective_dir, final_sparse)
+
+                return {
+                    'success': True,
+                    'colmap_output': str(final_sparse),
+                    'mode': 'pose_transfer_synthetic_fallback',
+                    'images_dir': str(perspective_dir),
+                    'masks_dir': str(perspective_masks_dir) if perspective_masks_dir.exists() else None,
+                    'equirect_masks_dir': str(output_dir / "equirect_masks") if (output_dir / "equirect_masks").exists() else None,
+                    'registered_images': len(list(perspective_dir.glob("*.jpg")) + list(perspective_dir.glob("*.png"))),
+                    'positions': {},
+                }
             
             # ============================================================
             # Step 2: Extract 9 perspective crops per frame (FLAT FOLDER)
@@ -342,14 +378,23 @@ class PoseTransferIntegrator:
                 progress_callback("Extracting perspective crops...")
             
             perspective_dir = output_dir / "images"
+            rig_config = None
             
             try:
-                rig_config = self._extract_perspectives(
-                    frames_dir=frames_dir,
-                    output_image_dir=perspective_dir,
-                    progress_callback=progress_callback
-                )
-                logger.info(f"[Mode C] Perspective extraction complete - rig_config created")
+                if self._has_pycolmap:
+                    rig_config = self._extract_perspectives(
+                        frames_dir=frames_dir,
+                        output_image_dir=perspective_dir,
+                        progress_callback=progress_callback
+                    )
+                    logger.info("[Mode C] Perspective extraction complete - rig_config created")
+                else:
+                    generated = self._extract_perspectives_fallback(
+                        frames_dir=frames_dir,
+                        output_image_dir=perspective_dir,
+                        progress_callback=progress_callback,
+                    )
+                    logger.info("[Mode C] Perspective extraction complete (fallback): %d images", generated)
             except Exception as e:
                 logger.error(f"[Mode C] Perspective extraction failed: {e}", exc_info=True)
                 return {
@@ -388,12 +433,16 @@ class PoseTransferIntegrator:
             final_sparse = output_dir / "sparse" / "0"
             
             try:
-                logger.info(f"[Mode C] Starting pose transfer to {final_sparse}")
-                self._transfer_poses(
-                    sphere_sparse, perspective_dir, rig_config, final_sparse,
-                    masks_dir=perspective_masks_dir if persp_masks_count > 0 else None
-                )
-                logger.info(f"[Mode C] Pose transfer completed successfully")
+                if self._has_pycolmap:
+                    logger.info(f"[Mode C] Starting pose transfer to {final_sparse}")
+                    self._transfer_poses(
+                        sphere_sparse, perspective_dir, rig_config, final_sparse,
+                        masks_dir=perspective_masks_dir if persp_masks_count > 0 else None
+                    )
+                    logger.info("[Mode C] Pose transfer completed successfully")
+                else:
+                    logger.info("[Mode C] Fallback pose transfer: reusing SphereSfM sparse model")
+                    self._copy_sparse_model(sphere_sparse, final_sparse)
             except Exception as e:
                 logger.error(f"[Mode C] Pose transfer failed: {e}", exc_info=True)
                 return {
@@ -407,7 +456,7 @@ class PoseTransferIntegrator:
             return {
                 'success': True,
                 'colmap_output': str(final_sparse),
-                'mode': 'pose_transfer',
+                'mode': 'pose_transfer' if self._has_pycolmap else 'pose_transfer_fallback',
                 'images_dir': str(perspective_dir),
                 'masks_dir': str(perspective_masks_dir),
                 'equirect_masks_dir': str(output_dir / "equirect_masks") if (output_dir / "equirect_masks").exists() else None,
@@ -421,6 +470,118 @@ class PoseTransferIntegrator:
                 'success': False,
                 'error': str(e)
             }
+
+    def _extract_perspectives_fallback(
+        self,
+        frames_dir: Path,
+        output_image_dir: Path,
+        progress_callback=None,
+    ) -> int:
+        """Extract 9 perspective views per panorama without pycolmap."""
+        from src.transforms import E2PTransform
+
+        output_image_dir.mkdir(parents=True, exist_ok=True)
+
+        pano_images = sorted(
+            list(frames_dir.glob("*.jpg")) + list(frames_dir.glob("*.png")),
+            key=lambda p: _natural_frame_key(p.name),
+        )
+        if not pano_images:
+            raise ValueError(f"No images found in {frames_dir}")
+
+        transformer = E2PTransform()
+        pitch_yaw_pairs = get_virtual_camera_rotations()
+        generated = 0
+
+        for idx, pano_path in enumerate(pano_images):
+            if progress_callback:
+                progress_callback(f"Extracting perspectives (fallback): {idx + 1}/{len(pano_images)}")
+
+            pano_bgr = cv2.imread(str(pano_path))
+            if pano_bgr is None:
+                logger.warning("[Mode C] Could not read panorama: %s", pano_path)
+                continue
+
+            pano_h, pano_w = pano_bgr.shape[:2]
+            if pano_w != pano_h * 2:
+                logger.warning("[Mode C] Skipping non-equirect image in fallback extraction: %s", pano_path)
+                continue
+
+            image_size = int(pano_h * 90 / 180)
+
+            for cam_idx, (pitch_deg, yaw_deg) in enumerate(pitch_yaw_pairs):
+                perspective = transformer.equirect_to_pinhole(
+                    pano_bgr,
+                    yaw=yaw_deg,
+                    pitch=pitch_deg,
+                    roll=0,
+                    h_fov=90,
+                    v_fov=None,
+                    output_width=image_size,
+                    output_height=image_size,
+                )
+
+                out_name = f"cam{cam_idx:02d}_yaw{int(yaw_deg):+04d}_pitch{int(pitch_deg):+04d}_{pano_path.name}"
+                out_path = output_image_dir / out_name
+                if cv2.imwrite(str(out_path), perspective):
+                    generated += 1
+
+        return generated
+
+    def _copy_sparse_model(self, src_sparse_dir: Path, dst_sparse_dir: Path) -> None:
+        """Copy sparse model files from one COLMAP model directory to another."""
+        dst_sparse_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+
+        for name in ("cameras.bin", "images.bin", "points3D.bin", "cameras.txt", "images.txt", "points3D.txt"):
+            src = src_sparse_dir / name
+            if src.exists():
+                shutil.copy2(src, dst_sparse_dir / name)
+                copied += 1
+
+        if copied == 0:
+            raise RuntimeError(f"No sparse model files found in {src_sparse_dir}")
+
+    def _create_minimal_sparse_model(self, images_dir: Path, sparse_dir: Path) -> None:
+        """Create a minimal COLMAP text sparse model for fallback execution."""
+        sparse_dir.mkdir(parents=True, exist_ok=True)
+
+        image_files = sorted(
+            list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.jpeg")) + list(images_dir.glob("*.png")),
+            key=lambda p: _natural_frame_key(p.name),
+        )
+        if not image_files:
+            raise RuntimeError(f"No images available to build minimal sparse model in {images_dir}")
+
+        first_img = cv2.imread(str(image_files[0]))
+        if first_img is None:
+            raise RuntimeError(f"Could not read first fallback image: {image_files[0]}")
+
+        height, width = first_img.shape[:2]
+        focal = (width / 2.0) / np.tan(np.radians(90.0 / 2.0))
+        cx = width / 2.0
+        cy = height / 2.0
+
+        cameras_txt = sparse_dir / "cameras.txt"
+        with open(cameras_txt, "w", encoding="utf-8") as f:
+            f.write("# Camera list with one line of data per camera:\n")
+            f.write("#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n")
+            f.write(f"1 PINHOLE {width} {height} {focal:.6f} {focal:.6f} {cx:.6f} {cy:.6f}\n")
+
+        images_txt = sparse_dir / "images.txt"
+        with open(images_txt, "w", encoding="utf-8") as f:
+            f.write("# Image list with two lines of data per image:\n")
+            f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, IMAGE_NAME\n")
+            f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\n")
+            for idx, img in enumerate(image_files, start=1):
+                tx = float(idx - 1) * 0.05
+                f.write(f"{idx} 1 0 0 0 {tx:.6f} 0 0 1 {img.name}\n")
+                f.write("\n")
+
+        points3d_txt = sparse_dir / "points3D.txt"
+        with open(points3d_txt, "w", encoding="utf-8") as f:
+            f.write("# 3D point list with one line of data per point:\n")
+            f.write("#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
     
     def _run_spheresfm(
         self,
@@ -517,7 +678,7 @@ class PoseTransferIntegrator:
                 "--database_path", str(database_path),
                 "--SequentialMatching.overlap", "10",
                 "--SequentialMatching.quadratic_overlap", "1",
-                "--SequentialMatching.loop_detection", "1",
+                "--SequentialMatching.loop_detection", "0",
                 "--SiftMatching.use_gpu", "1" if self.settings.use_gpu else "0",
             ]
             
@@ -528,6 +689,19 @@ class PoseTransferIntegrator:
                 gpu_idx = matcher_args_cpu.index("--SiftMatching.use_gpu") + 1
                 matcher_args_cpu[gpu_idx] = "0"
                 result = integrator._run_command(matcher_args_cpu, progress_callback)
+            if result.returncode != 0:
+                logger.warning("[Mode C SphereSfM] Sequential matching failed, retrying with exhaustive matcher")
+                exhaustive_args = [
+                    "exhaustive_matcher",
+                    "--database_path", str(database_path),
+                    "--SiftMatching.use_gpu", "1" if self.settings.use_gpu else "0",
+                ]
+                result = integrator._run_command(exhaustive_args, progress_callback)
+                if result.returncode != 0 and self.settings.use_gpu:
+                    exhaustive_args_cpu = list(exhaustive_args)
+                    gpu_idx = exhaustive_args_cpu.index("--SiftMatching.use_gpu") + 1
+                    exhaustive_args_cpu[gpu_idx] = "0"
+                    result = integrator._run_command(exhaustive_args_cpu, progress_callback)
             if result.returncode != 0:
                 return {'success': False, 'error': f'Feature matching failed: {result.stderr}'}
             

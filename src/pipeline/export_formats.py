@@ -643,7 +643,7 @@ class RealityScanExporter:
                             if self.perspective_dir:
                                 name = str(self.perspective_dir / persp_name)
                             elif images_dir:
-                                # WARNING: This uses the provided images_dir which might be Stage 1 dir.
+                                # WARNING: This uses the provided images_dir which might be extraction dir.
                                 # But if perspective_dir is None, we might not have a choice.
                                 # However, usually perspective_dir IS set if use_perspective is True.
                                 name = str(Path(images_dir) / persp_name)

@@ -1,6 +1,6 @@
 """
 SAM (Segment Anything Model) ViT-B Masking Module
-Alternative to YOLO for Stage 3 masking with improved segmentation quality.
+Alternative to YOLO for AI masking with improved segmentation quality.
 
 SAM advantages over YOLO:
 - Superior segmentation quality (especially edges and complex boundaries)

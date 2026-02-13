@@ -3,13 +3,13 @@ SphereSfM Integration Module for 360ToolKit
 
 Provides two reconstruction modes for 360° panoramic images:
 
-Mode A (SphereSfM Native): 
+Panorama SfM (SphereSfM Native): 
   - Uses SphereSfM binary (modified COLMAP) for direct spherical feature matching
   - Matches features in equirectangular space (handles wrap-around)
   - Outputs spherical reconstruction, then converts to cubic (perspective) views
   - Best for: Urban scenes, street-level captures
 
-Mode B (Rig-based SfM - Hybrid):
+Perspective Reconstruction (Rig-based SfM):
   - Renders virtual perspective cameras from panoramas
   - Uses COLMAP rig constraints for alignment
   - Proven 100% registration rate
@@ -54,6 +54,51 @@ def _compose_binary_command(binary_path: Path, args: List[str]) -> List[str]:
     if suffix in {".bat", ".cmd"}:
         return ["cmd", "/c", str(binary_path)] + args
     return [str(binary_path)] + args
+
+
+def _probe_binary(binary_path: Path) -> Tuple[bool, bool]:
+    """Check whether a COLMAP-compatible binary is runnable and supports sphere mapper option."""
+    if not binary_path.exists():
+        return False, False
+
+    run_env = os.environ.copy()
+    binary_dir = str(binary_path.parent)
+    run_env["PATH"] = binary_dir + os.pathsep + run_env.get("PATH", "")
+
+    try:
+        help_cmd = _compose_binary_command(binary_path, ["help"])
+        help_proc = subprocess.run(
+            help_cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            cwd=binary_dir,
+            env=run_env,
+        )
+        help_text = f"{help_proc.stdout}\n{help_proc.stderr}".lower()
+
+        is_runnable = help_proc.returncode == 0 and (
+            "available commands" in help_text or "usage:" in help_text or "colmap" in help_text
+        )
+        if not is_runnable:
+            return False, False
+
+        mapper_cmd = _compose_binary_command(binary_path, ["mapper", "-h"])
+        mapper_proc = subprocess.run(
+            mapper_cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            cwd=binary_dir,
+            env=run_env,
+        )
+        mapper_text = f"{mapper_proc.stdout}\n{mapper_proc.stderr}".lower()
+        supports_sphere = "mapper.sphere_camera" in mapper_text
+        return True, supports_sphere
+    except Exception:
+        return False, False
 
 
 def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] = None) -> Tuple[Path, List[str]]:
@@ -106,9 +151,15 @@ def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] =
         if which_result:
             add_candidate(which_result)
 
-    for candidate in candidates:
-        if candidate.exists():
+    existing_candidates = [candidate for candidate in candidates if candidate.exists()]
+
+    for candidate in existing_candidates:
+        runnable, _ = _probe_binary(candidate)
+        if runnable:
             return candidate, [str(c) for c in candidates]
+
+    if existing_candidates:
+        return existing_candidates[0], [str(c) for c in candidates]
 
     fallback = candidates[0] if candidates else DEFAULT_SPHERESFM_PATH
     return fallback, [str(c) for c in candidates]
@@ -118,7 +169,7 @@ class SphereSfMIntegrator:
     """
     SphereSfM integration for direct spherical feature matching.
     
-    Mode A: Uses native SphereSfM binary for end-to-end spherical reconstruction.
+    Panorama SfM: Uses native SphereSfM binary for end-to-end spherical reconstruction.
     """
     
     def __init__(self, settings, spheresfm_path: Optional[Path] = None):
@@ -202,7 +253,7 @@ class SphereSfMIntegrator:
         progress_callback: Optional[Callable] = None
     ) -> Dict:
         """
-        Mode A: Native SphereSfM reconstruction.
+        Panorama SfM: Native SphereSfM reconstruction.
         
         Workflow:
         1. database_creator - Create COLMAP database
@@ -252,7 +303,7 @@ class SphereSfMIntegrator:
         # SPHERE camera params: "1, width, height" (f=1, cx=width/2, cy=height/2)
         camera_params = f"1,{width},{height}"
         
-        logger.info(f"SphereSfM Mode A: {len(image_files)} images at {width}x{height}")
+        logger.info(f"SphereSfM Panorama: {len(image_files)} images at {width}x{height}")
         
         try:
             # Step 1: Create database
@@ -435,11 +486,11 @@ class SphereSfMIntegrator:
                 with open(points_file, 'r') as f:
                     num_points = sum(1 for l in f if not l.startswith('#') and l.strip())
             
-            logger.info(f"SphereSfM Mode A complete: {num_registered} images, {num_points} points")
+            logger.info(f"SphereSfM Panorama complete: {num_registered} images, {num_points} points")
             
             return {
                 'success': True,
-                'mode': 'SphereSfM (Mode A)',
+                'mode': 'Panorama SfM (SphereSfM)',
                 'colmap_output': model_path,
                 'cubic_output': cubic_path if (cubic_path / "sparse").exists() else None,
                 'frames_dir': frames_dir,
@@ -448,7 +499,7 @@ class SphereSfMIntegrator:
             }
             
         except Exception as e:
-            logger.error(f"SphereSfM Mode A Error: {e}")
+            logger.error(f"SphereSfM Panorama Error: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return {'success': False, 'error': str(e)}
@@ -461,10 +512,10 @@ class SphereSfMIntegrator:
         progress_callback: Optional[Callable] = None
     ):
         """
-        Convert equirectangular images to cubemap format using Stage 2 E2C transform.
+        Convert equirectangular images to cubemap format using E2C transform.
         
         Creates 6 perspective views (cubemap faces) for each equirectangular image.
-        Reuses proven transform from Stage 2.
+        Reuses proven perspective splitting transform.
         """
         import cv2
         import numpy as np
@@ -500,7 +551,7 @@ class SphereSfMIntegrator:
             # Get image base name without extension
             base_name = eq_img_path.stem
             
-            # Convert to 6 cubemap faces using Stage 2 transform
+            # Convert to 6 cubemap faces using E2C transform
             # Mode '6-face' generates: front, right, back, left, top, bottom
             cubemap_faces = e2c.equirect_to_cubemap(
                 eq_img, 
@@ -509,7 +560,7 @@ class SphereSfMIntegrator:
                 mode='6-face'
             )
             
-            # Save faces in standard order (matches Stage 2 output)
+            # Save faces in standard order (matches split output)
             face_order = ['front', 'right', 'back', 'left', 'top', 'bottom']
             
             for idx, face_name in enumerate(face_order):
@@ -605,10 +656,10 @@ class SphereSfMIntegrator:
 
 class DualModeAlignmentIntegrator:
     """
-    Dual-mode alignment integrator providing both Mode A and Mode B.
+    Dual-mode alignment integrator providing both Panorama SfM and Perspective Reconstruction.
     
-    Mode A: SphereSfM (native spherical matching)
-    Mode B: Rig-based SfM (virtual perspectives + rig constraints)
+    Panorama SfM: SphereSfM (native spherical matching)
+    Perspective Reconstruction: Rig-based SfM (virtual perspectives + rig constraints)
     """
     
     MODE_A = "sphere_sfm"      # SphereSfM native
@@ -623,7 +674,7 @@ class DualModeAlignmentIntegrator:
         self.rig_sfm = RigColmapIntegrator(settings)
     
     def is_mode_a_available(self) -> bool:
-        """Check if SphereSfM (Mode A) is available."""
+        """Check if SphereSfM (Panorama SfM) is available."""
         return self.sphere_sfm.is_available()
     
     def get_available_modes(self) -> List[str]:
@@ -668,13 +719,13 @@ class DualModeAlignmentIntegrator:
                     'success': False,
                     'error': 'SphereSfM binary not available. Please use Rig-based SfM.'
                 }
-            logger.info("Running Mode A: SphereSfM (native spherical)")
+            logger.info("Running Panorama SfM: SphereSfM (native spherical)")
             return self.sphere_sfm.run_alignment_mode_a(
                 frames_dir, masks_dir, output_dir, progress_callback
             )
         
         elif mode == self.MODE_B:
-            logger.info("Running Mode B: Rig-based SfM (virtual perspectives)")
+            logger.info("Running Perspective Reconstruction: Rig-based SfM (virtual perspectives)")
             return self.rig_sfm.run_alignment(
                 frames_dir, masks_dir, output_dir, progress_callback
             )
@@ -736,16 +787,12 @@ def verify_spheresfm_installation(settings=None) -> Dict:
     
     # Try to execute binary/help
     try:
-        cmd = _compose_binary_command(spheresfm_path, ["help"])
-        proc = subprocess.run(
-            cmd,
-            capture_output=True, text=True, timeout=10,
-            stdin=subprocess.DEVNULL
-        )
-        help_text = f"{proc.stdout}\n{proc.stderr}".lower()
-        result['installed'] = True
-        result['version'] = "SphereSfM/COLMAP-compatible"
-        result['supports_sphere_camera'] = "mapper.sphere_camera" in help_text
+        runnable, supports_sphere = _probe_binary(spheresfm_path)
+        result['installed'] = runnable
+        result['version'] = "SphereSfM/COLMAP-compatible" if runnable else None
+        result['supports_sphere_camera'] = supports_sphere
+        if not runnable:
+            result['error'] = f"Binary exists but failed to run correctly: {spheresfm_path}"
         
     except subprocess.TimeoutExpired:
         result['error'] = "SphereSfM command timed out"

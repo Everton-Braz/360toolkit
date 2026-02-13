@@ -4,7 +4,7 @@ Central location for all default settings across the pipeline.
 """
 
 # ============================================================================
-# STAGE 1: FRAME EXTRACTION DEFAULTS
+# FRAME EXTRACTION DEFAULTS
 # ============================================================================
 
 # Extraction parameters
@@ -48,13 +48,13 @@ DEFAULT_OUTPUT_FORMAT = 'png'
 # File handling
 DELETE_INTERMEDIATE_FILES = False
 
-# Stage 1 intermediate frame handling
-# When True, equirectangular frames are saved to a temp folder and cleaned up after Stage 2
-# When False, equirectangular frames are saved to output_dir/stage1_frames (default)
+# Intermediate frame handling
+# When True, equirectangular frames are saved to a temp folder and cleaned up after splitting
+# When False, equirectangular frames are saved to output_dir/extracted_frames (default)
 SKIP_INTERMEDIATE_SAVE = False
 
 # ============================================================================
-# STAGE 2: PERSPECTIVE SPLITTING DEFAULTS
+# PERSPECTIVE SPLITTING DEFAULTS
 # ============================================================================
 
 # Camera configuration
@@ -81,7 +81,7 @@ TRANSFORM_TYPES = {
 DEFAULT_TRANSFORM_TYPE = 'cubemap_8tile'  # CHANGED: Default is now 8-tile cubemap
 
 # Output dimensions (SQUARE for photogrammetry)
-DEFAULT_OUTPUT_WIDTH = 1920  # CHANGED: 1920×1920 for Stage 2 Perspective
+DEFAULT_OUTPUT_WIDTH = 1920  # CHANGED: 1920x1920 for Perspective Split
 DEFAULT_OUTPUT_HEIGHT = 1920
 
 # Cubemap settings
@@ -137,7 +137,7 @@ CAMERA_STATE_NAMES = {
 }
 
 # ============================================================================
-# STAGE 3: MASKING DEFAULTS
+# MASKING DEFAULTS
 # ============================================================================
 
 # COCO dataset class IDs
@@ -344,7 +344,7 @@ CAMERA_METADATA_FIELDS = [
     'DateTimeOriginal'
 ]
 
-# Custom EXIF fields for camera orientation (Stage 2)
+# Custom EXIF fields for camera orientation (perspective split)
 EXIF_CAMERA_YAW_TAG = 'UserComment'  # Embed yaw in UserComment
 EXIF_CAMERA_PITCH_TAG = 'ImageDescription'  # Embed pitch
 EXIF_CAMERA_ROLL_TAG = 'Software'  # Embed roll

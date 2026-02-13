@@ -544,7 +544,7 @@ class SettingsManager:
         self.save_settings()
     
     def get_skip_intermediate_save(self) -> bool:
-        """Get skip intermediate save setting (Stage 1 frames saved to temp folder)"""
+        """Get skip intermediate save setting (extracted frames saved to temp folder)"""
         return self.settings.get('skip_intermediate_save', False)
 
     def get_theme(self) -> str:

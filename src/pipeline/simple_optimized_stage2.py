@@ -69,7 +69,7 @@ class SimpleOptimizedProcessor:
         logger.info(f"[Simple Optimized] Processing {len(input_frames)} frames × {len(cameras)} cameras")
         
         try:
-            # Batch size = 16 (tested optimal for Stage 2)
+            # Batch size = 16 (tested optimal for perspective splitting)
             batch_size = 16
             logger.info(f"[Simple Optimized] Using batch size: {batch_size}")
             

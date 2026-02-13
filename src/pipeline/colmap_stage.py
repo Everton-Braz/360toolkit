@@ -2,10 +2,9 @@
 COLMAP Stage Integration for 360FrameTools Pipeline.
 Provides ColmapSettings dataclass and pipeline integration.
 
-Supports three alignment modes:
-- Mode A (SphereSfM Direct): Native spherical feature matching, equirect output only
-- Mode B (Rig SfM): Virtual perspective rendering with COLMAP rig constraints
-- Mode C (Pose Transfer): SphereSfM alignment + 9-camera rig perspective extraction
+Supports two reconstruction workflows:
+- Panorama SfM: Direct spherical feature matching on equirectangular images (SphereSfM)
+- Perspective Reconstruction: Split to perspectives, then COLMAP GPU / GLOMAP standard SfM
 """
 
 from dataclasses import dataclass, field
@@ -15,18 +14,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Alignment modes
-ALIGNMENT_MODE_SPHERE_SFM = 'sphere_sfm'  # Mode A: Native SphereSfM (equirect only)
-ALIGNMENT_MODE_RIG_SFM = 'rig_sfm'        # Mode B: Rig-based SfM
-ALIGNMENT_MODE_POSE_TRANSFER = 'pose_transfer'  # Mode C: SphereSfM + Pose Transfer (9-camera rig)
+# Reconstruction workflows
+ALIGNMENT_MODE_PANORAMA_SFM = 'panorama_sfm'                 # SphereSfM on equirectangular images
+ALIGNMENT_MODE_PERSPECTIVE = 'perspective_reconstruction'     # COLMAP GPU / GLOMAP on perspective images
+
+# Legacy aliases (backward compatibility with saved configs)
+ALIGNMENT_MODE_SPHERE_SFM = ALIGNMENT_MODE_PANORAMA_SFM      # old "Mode A"
+ALIGNMENT_MODE_RIG_SFM = ALIGNMENT_MODE_PERSPECTIVE           # old "Mode B"
+ALIGNMENT_MODE_POSE_TRANSFER = ALIGNMENT_MODE_PERSPECTIVE     # old "Mode C" → merged into Perspective
 
 
 @dataclass
 class ColmapSettings:
-    """Settings for COLMAP/SphereSfM alignment stage."""
+    """Settings for COLMAP/SphereSfM reconstruction."""
     
-    # Alignment mode (Mode A or Mode B)
-    alignment_mode: str = ALIGNMENT_MODE_RIG_SFM  # Default to proven Rig SfM
+    # Reconstruction workflow
+    alignment_mode: str = ALIGNMENT_MODE_PERSPECTIVE  # Default to Perspective Reconstruction
     
     # Paths
     sphere_alignment_path: Optional[Path] = None
@@ -54,8 +57,8 @@ class ColmapSettings:
     gpu_index: int = 0
     
     # Legacy compatibility
-    sphere_camera_model: bool = True  # Use SPHERE camera model (Mode A)
-    use_rig_sfm: bool = True  # Use Rig SFM (Mode B) - kept for compatibility
+    sphere_camera_model: bool = True  # Use SPHERE camera model (Panorama SfM)
+    use_rig_sfm: bool = True  # Legacy field — kept for config compat
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert settings to dictionary."""
@@ -90,66 +93,60 @@ class ColmapSettings:
 
 class ColmapStage:
     """
-    Pipeline stage for COLMAP/SphereSfM alignment.
+    Pipeline stage for 3D Reconstruction (COLMAP/SphereSfM).
     
-    Supports three modes:
-    - Mode A (sphere_sfm): Direct spherical feature matching using SphereSfM binary (equirect output)
-    - Mode B (rig_sfm): Virtual perspectives with COLMAP rig constraints
-    - Mode C (pose_transfer): SphereSfM alignment + 9-camera rig perspective extraction with pose transfer
+    Supports two workflows:
+    - Panorama SfM (panorama_sfm): Direct spherical feature matching using SphereSfM (equirect output)
+    - Perspective Reconstruction (perspective_reconstruction): COLMAP GPU / GLOMAP on perspective images
     """
     
     def __init__(self, settings: ColmapSettings):
         self.settings = settings
         self._integrator = None
-        self._mode = settings.alignment_mode
+        self._mode = self._normalize_mode(settings.alignment_mode)
+    
+    @staticmethod
+    def _normalize_mode(mode: str) -> str:
+        """Normalize legacy mode names to current workflow names."""
+        legacy_map = {
+            'sphere_sfm': ALIGNMENT_MODE_PANORAMA_SFM,
+            'rig_sfm': ALIGNMENT_MODE_PERSPECTIVE,
+            'pose_transfer': ALIGNMENT_MODE_PERSPECTIVE,  # Mode C → Perspective
+        }
+        return legacy_map.get(mode, mode)
     
     @property
     def integrator(self):
-        """Lazy load appropriate integrator based on alignment mode."""
+        """Lazy load appropriate integrator based on reconstruction workflow."""
         if self._integrator is None:
             try:
-                if self._mode == ALIGNMENT_MODE_SPHERE_SFM:
-                    # Mode A: SphereSfM native (equirect only)
+                if self._mode == ALIGNMENT_MODE_PANORAMA_SFM:
+                    # Panorama SfM: SphereSfM native (equirect only)
                     from src.premium.sphere_sfm_integration import SphereSfMIntegrator
                     self._integrator = SphereSfMIntegrator(self.settings)
-                    logger.info("Using Mode A: SphereSfM Direct (equirectangular output)")
-                elif self._mode == ALIGNMENT_MODE_POSE_TRANSFER:
-                    # Mode C: SphereSfM + Pose Transfer (9-camera rig)
-                    from src.premium.pose_transfer_integration import PoseTransferIntegrator
-                    self._integrator = PoseTransferIntegrator(self.settings)
-                    logger.info("Using Mode C: SphereSfM + Pose Transfer (9-camera rig)")
+                    logger.info("Using Panorama SfM: SphereSfM (equirectangular images)")
                 else:
-                    # Mode B: Rig-based SfM (default)
+                    # Perspective Reconstruction: Rig-based SfM (default)
                     from src.premium.rig_colmap_integration import RigColmapIntegrator
                     self._integrator = RigColmapIntegrator(self.settings)
-                    logger.info("Using Mode B: Rig-based SfM (virtual perspectives)")
+                    logger.info("Using Perspective Reconstruction: COLMAP/GLOMAP (perspective images)")
             except (ImportError, NameError) as e:
-                logger.warning(f"COLMAP integration not available: {e}")
+                logger.warning(f"Reconstruction integration not available: {e}")
                 self._integrator = None
         return self._integrator
     
     def is_available(self) -> bool:
-        """Check if alignment is available for current mode."""
-        if self._mode == ALIGNMENT_MODE_SPHERE_SFM:
-            # Both require SphereSfM binary
+        """Check if reconstruction is available for current workflow."""
+        if self._mode == ALIGNMENT_MODE_PANORAMA_SFM:
+            # Panorama SfM requires SphereSfM binary
             try:
                 from src.premium.sphere_sfm_integration import verify_spheresfm_installation
                 status = verify_spheresfm_installation()
                 return status.get('installed', False)
             except Exception:
                 return False
-        elif self._mode == ALIGNMENT_MODE_POSE_TRANSFER:
-            try:
-                from src.premium.sphere_sfm_integration import verify_spheresfm_installation
-                status = verify_spheresfm_installation()
-                if not status.get('installed', False):
-                    return False
-                import pycolmap
-                return pycolmap is not None
-            except Exception:
-                return False
         else:
-            # Rig SfM just needs pycolmap
+            # Perspective Reconstruction needs rig integrator
             return self.integrator is not None
     
     def run(
@@ -185,25 +182,17 @@ class ColmapStage:
                 'positions': {}
             }
         
-        # Route to appropriate method based on mode
-        if self._mode == ALIGNMENT_MODE_SPHERE_SFM:
-            # Mode A: SphereSfM native (equirect only)
+        # Route to appropriate method based on workflow
+        if self._mode == ALIGNMENT_MODE_PANORAMA_SFM:
+            # Panorama SfM: SphereSfM native (equirect only)
             return self.integrator.run_alignment_mode_a(
                 frames_dir=frames_dir,
                 masks_dir=masks_dir,
                 output_dir=output_dir,
                 progress_callback=progress_callback
             )
-        elif self._mode == ALIGNMENT_MODE_POSE_TRANSFER:
-            # Mode C: SphereSfM + Pose Transfer
-            return self.integrator.run_alignment(
-                frames_dir=frames_dir,
-                masks_dir=masks_dir,
-                output_dir=output_dir,
-                progress_callback=progress_callback
-            )
         else:
-            # Mode B: Rig-based SfM
+            # Perspective Reconstruction
             return self.integrator.run_alignment(
                 frames_dir=frames_dir,
                 masks_dir=masks_dir,
@@ -223,8 +212,10 @@ def is_spheresfm_available() -> bool:
         return False
 
 
-def get_default_colmap_settings(alignment_mode: str = ALIGNMENT_MODE_RIG_SFM) -> ColmapSettings:
-    """Get default COLMAP settings for specified mode."""
+def get_default_colmap_settings(alignment_mode: str = ALIGNMENT_MODE_PERSPECTIVE) -> ColmapSettings:
+    """Get default COLMAP settings for specified workflow."""
+    # Normalize legacy mode names
+    alignment_mode = ColmapStage._normalize_mode(alignment_mode)
     return ColmapSettings(
         alignment_mode=alignment_mode,
         quality='medium',
@@ -235,5 +226,5 @@ def get_default_colmap_settings(alignment_mode: str = ALIGNMENT_MODE_RIG_SFM) ->
         dense_model=False,
         enable_propagation=True,
         use_gpu=True,
-        use_rig_sfm=(alignment_mode == ALIGNMENT_MODE_RIG_SFM)
+        use_rig_sfm=(alignment_mode == ALIGNMENT_MODE_PERSPECTIVE)
     )

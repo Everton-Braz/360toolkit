@@ -1,6 +1,6 @@
 {
-    "sdk_path": "C:\\Users\\Everton-PC\\Documents\\Windows_CameraSDK-2.1.1_MediaSDK-3.1.0\\MediaSDK-3.1.0.0-20250904-win64\\MediaSDK",
-    "sdk_auto_detected": true,
+    "sdk_path": "C:\\Users\\User\\Documents\\Windows_CameraSDK-2.1.1_MediaSDK-3.1.0\\MediaSDK-3.1.0.0-20250904-win64\\MediaSDK",
+    "sdk_auto_detected": false,
     "ffmpeg_path": "C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.EXE",
     "ffmpeg_auto_detected": true,
     "auto_detect_on_startup": true,
