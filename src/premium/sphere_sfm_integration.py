@@ -29,7 +29,9 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Default SphereSfM binary location (copied to bin/SphereSfM/)
+# Preferred bundled COLMAP release location (user-provided GPU build)
+DEFAULT_COLMAP_RELEASE_PATH = Path(__file__).parent.parent.parent / "bin" / "colmap" / "colmap.exe"
+# Legacy SphereSfM binary location
 DEFAULT_SPHERESFM_PATH = Path(__file__).parent.parent.parent / "bin" / "SphereSfM" / "colmap.exe"
 
 
@@ -83,10 +85,13 @@ def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] =
         if env_value:
             add_candidate(env_value)
 
+    add_candidate(DEFAULT_COLMAP_RELEASE_PATH)
     add_candidate(DEFAULT_SPHERESFM_PATH)
 
     home = Path.home()
     common_paths = [
+        home / "Documents" / "APLICATIVOS" / "360toolkit" / "bin" / "colmap" / "colmap.exe",
+        home / "Documents" / "APLICATIVOS" / "360ToolKit" / "bin" / "colmap" / "colmap.exe",
         home / "Documents" / "APLICATIVOS" / "360ToolKit" / "bin" / "SphereSfM" / "colmap.exe",
         home / "Documents" / "SphereSfM" / "colmap.exe",
         home / "Documents" / "colmap-x64-windows-cuda" / "colmap.bat",

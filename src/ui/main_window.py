@@ -1098,6 +1098,43 @@ class MainWindow(QMainWindow):
         self.use_gpu_colmap_check = QCheckBox("Use GPU Acceleration (CUDA) for feature extraction")
         self.use_gpu_colmap_check.setChecked(True)
         card_perf.addWidget(self.use_gpu_colmap_check)
+
+        self.mapping_backend_combo = QComboBox()
+        self.mapping_backend_combo.addItem("COLMAP Incremental (default)", "colmap")
+        self.mapping_backend_combo.addItem("GloMAP Global Mapper", "glomap")
+        card_perf.addWidget(FormRow("Mapping Backend:", self.mapping_backend_combo))
+
+        self.colmap_path_edit = QLineEdit()
+        self.colmap_path_edit.setPlaceholderText("Optional: path to external colmap.exe (GPU build)")
+        colmap_path_row = QHBoxLayout()
+        colmap_path_row.setContentsMargins(0, 0, 0, 0)
+        colmap_path_row.setSpacing(8)
+        colmap_path_row.addWidget(self.colmap_path_edit, 1)
+        colmap_browse = QPushButton("Browse...")
+        colmap_browse.setFixedWidth(80)
+        colmap_browse.clicked.connect(self.browse_colmap_path)
+        colmap_path_row.addWidget(colmap_browse)
+        colmap_path_widget = QWidget()
+        colmap_path_widget.setLayout(colmap_path_row)
+        card_perf.addWidget(FormRow("COLMAP Binary:", colmap_path_widget))
+
+        self.glomap_path_edit = QLineEdit()
+        self.glomap_path_edit.setPlaceholderText("Optional: path to glomap.exe")
+        glomap_path_row = QHBoxLayout()
+        glomap_path_row.setContentsMargins(0, 0, 0, 0)
+        glomap_path_row.setSpacing(8)
+        glomap_path_row.addWidget(self.glomap_path_edit, 1)
+        glomap_browse = QPushButton("Browse...")
+        glomap_browse.setFixedWidth(80)
+        glomap_browse.clicked.connect(self.browse_glomap_path)
+        glomap_path_row.addWidget(glomap_browse)
+        glomap_path_widget = QWidget()
+        glomap_path_widget.setLayout(glomap_path_row)
+        card_perf.addWidget(FormRow("GloMAP Binary:", glomap_path_widget))
+
+        default_glomap = self.settings.get_glomap_path() or self.settings.auto_detect_glomap()
+        if default_glomap:
+            self.glomap_path_edit.setText(str(default_glomap))
         layout.addWidget(card_perf)
         
         # Export card
@@ -1106,10 +1143,20 @@ class MainWindow(QMainWindow):
         self.export_lichtfeld_check.setChecked(True)
         self.export_lichtfeld_check.setToolTip("transforms.json + pointcloud.ply + images/ + masks/")
         card_export.addWidget(self.export_lichtfeld_check)
+
+        self.export_realityscan_check = QCheckBox("Export to RealityScan Format")
+        self.export_realityscan_check.setChecked(False)
+        self.export_realityscan_check.setToolTip("images/ + sparse/ + optional database.db, with masks renamed to *_mask.png")
+        card_export.addWidget(self.export_realityscan_check)
         
         self.export_include_masks_check = QCheckBox("Include Masks in Export")
         self.export_include_masks_check.setChecked(True)
         card_export.addWidget(self.export_include_masks_check)
+
+        self.export_sidecar_check = QCheckBox("Export XMP sidecar files (optional)")
+        self.export_sidecar_check.setChecked(False)
+        self.export_sidecar_check.setToolTip("Create .xmp files beside aligned images with camera pose metadata")
+        card_export.addWidget(self.export_sidecar_check)
         layout.addWidget(card_export)
         
         # Output info
@@ -1617,8 +1664,13 @@ class MainWindow(QMainWindow):
             'alignment_mode': self._get_alignment_mode(),
             'use_gpu_colmap': self.use_gpu_colmap_check.isChecked(),
             'colmap_quality': self.colmap_quality_combo.currentIndex(),
+            'sphere_alignment_path': self.colmap_path_edit.text().strip() or None,
+            'glomap_path': self.glomap_path_edit.text().strip() or None,
+            'mapping_backend': self.mapping_backend_combo.currentData(),
             'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
+            'export_realityscan': self.export_realityscan_check.isChecked(),
             'export_include_masks': self.export_include_masks_check.isChecked(),
+            'export_sidecars': self.export_sidecar_check.isChecked(),
             'stage5_enabled': self.stage5_enable.isChecked(),
             'train_lighting': self.train_lichtfeld_check.isChecked(),
             'lichtfeld_path': self.lichtfeld_path_edit.text(),
@@ -1689,10 +1741,22 @@ class MainWindow(QMainWindow):
                 self.use_gpu_colmap_check.setChecked(config['use_gpu_colmap'])
             if 'colmap_quality' in config:
                 self.colmap_quality_combo.setCurrentIndex(config['colmap_quality'])
+            if 'sphere_alignment_path' in config and config['sphere_alignment_path']:
+                self.colmap_path_edit.setText(config['sphere_alignment_path'])
+            if 'glomap_path' in config and config['glomap_path']:
+                self.glomap_path_edit.setText(config['glomap_path'])
+            if 'mapping_backend' in config:
+                backend_idx = self.mapping_backend_combo.findData(config['mapping_backend'])
+                if backend_idx >= 0:
+                    self.mapping_backend_combo.setCurrentIndex(backend_idx)
             if 'export_lichtfeld' in config:
                 self.export_lichtfeld_check.setChecked(config['export_lichtfeld'])
+            if 'export_realityscan' in config:
+                self.export_realityscan_check.setChecked(config['export_realityscan'])
             if 'export_include_masks' in config:
                 self.export_include_masks_check.setChecked(config['export_include_masks'])
+            if 'export_sidecars' in config:
+                self.export_sidecar_check.setChecked(config['export_sidecars'])
             if 'stage5_enabled' in config:
                 self.stage5_enable.setChecked(config['stage5_enabled'])
             if 'train_lighting' in config:
@@ -1815,6 +1879,22 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.lichtfeld_path_edit.setText(path)
+
+    def browse_colmap_path(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select COLMAP Binary", "C:\\Program Files",
+            "Executables (*.exe *.bat);;All (*.*)"
+        )
+        if path:
+            self.colmap_path_edit.setText(path)
+
+    def browse_glomap_path(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select GloMAP Binary", "C:\\Program Files",
+            "Executables (*.exe *.bat);;All (*.*)"
+        )
+        if path:
+            self.glomap_path_edit.setText(path)
     
     def analyze_video_file(self):
         from src.extraction import FrameExtractor
@@ -1981,8 +2061,13 @@ class MainWindow(QMainWindow):
                 'alignment_mode': self._get_alignment_mode(),
                 'use_gpu_colmap': self.use_gpu_colmap_check.isChecked(),
                 'colmap_quality': self.colmap_quality_combo.currentIndex(),
+                'sphere_alignment_path': self.colmap_path_edit.text().strip() or None,
+                'glomap_path': self.glomap_path_edit.text().strip() or None,
+                'mapping_backend': self.mapping_backend_combo.currentData(),
                 'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
+                'export_realityscan': self.export_realityscan_check.isChecked(),
                 'export_include_masks': self.export_include_masks_check.isChecked(),
+                'export_sidecars': self.export_sidecar_check.isChecked(),
             })
         
         # UI state

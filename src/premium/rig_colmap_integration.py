@@ -12,6 +12,8 @@ from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 import json
 import shutil
+import subprocess
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ class RigColmapIntegrator:
 
     def create_virtual_camera(self, pano_height: int, fov_deg: float = 90) -> pycolmap.Camera:
         """Create a virtual perspective camera."""
+        pycolmap = _import_pycolmap()
         image_size = int(pano_height * fov_deg / 180)
         focal = image_size / (2 * np.tan(np.deg2rad(fov_deg) / 2))
         return pycolmap.Camera.create(0, "PINHOLE", focal, image_size, image_size)
@@ -103,6 +106,7 @@ class RigColmapIntegrator:
         self, cams_from_pano_rotation: List[np.ndarray], ref_idx: int = 0
     ) -> pycolmap.RigConfig:
         """Create a RigConfig with proper stereo-style outward Z-offsets."""
+        pycolmap = _import_pycolmap()
         rig_cameras = []
         baseline = 0.065  # 6.5cm stereo separation
 
@@ -142,6 +146,7 @@ class RigColmapIntegrator:
         mask_dir: Path,
         progress_callback: Optional[Callable] = None
     ) -> pycolmap.RigConfig:
+        pycolmap = _import_pycolmap()
         
         cams_from_pano_rotation = self.get_virtual_rotations()
         ref_idx = 0
@@ -248,6 +253,72 @@ class RigColmapIntegrator:
 
         return rig_config
 
+    def _resolve_colmap_binary(self) -> str:
+        custom = getattr(self.settings, 'sphere_alignment_path', None)
+        if custom:
+            return str(custom)
+        return "colmap"
+
+    def _resolve_glomap_binary(self) -> Optional[str]:
+        custom = getattr(self.settings, 'glomap_path', None)
+        if custom:
+            return str(custom)
+        return None
+
+    def _run_cli(self, executable: str, args: List[str], progress_callback: Optional[Callable], step_name: str):
+        cmd = [executable] + args
+        logger.info("[RigSfM] Running CLI: %s", " ".join(cmd))
+        if progress_callback:
+            progress_callback(step_name)
+        exe_path = Path(executable)
+        run_cwd = str(exe_path.parent) if exe_path.exists() else None
+        run_env = None
+        if exe_path.exists():
+            run_env = os.environ.copy()
+            extra_dirs = [str(exe_path.parent)]
+
+            colmap_path = getattr(self.settings, 'sphere_alignment_path', None)
+            if colmap_path:
+                extra_dirs.append(str(Path(colmap_path).parent))
+
+            glomap_path = getattr(self.settings, 'glomap_path', None)
+            if glomap_path:
+                extra_dirs.append(str(Path(glomap_path).parent))
+
+            unique_dirs = []
+            for d in extra_dirs:
+                if d and d not in unique_dirs:
+                    unique_dirs.append(d)
+
+            run_env["PATH"] = ";".join(unique_dirs + [run_env.get('PATH', '')])
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=run_cwd, env=run_env)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"{step_name} failed (code {result.returncode})\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            )
+        return result
+
+    def _normalize_sparse_output(self, sparse_path: Path) -> Path:
+        direct_model = sparse_path / "cameras.bin"
+        if direct_model.exists():
+            target = sparse_path / "0"
+            target.mkdir(parents=True, exist_ok=True)
+            for name in ["cameras.bin", "images.bin", "points3D.bin", "cameras.txt", "images.txt", "points3D.txt"]:
+                src = sparse_path / name
+                if src.exists():
+                    shutil.copy2(src, target / name)
+            return target
+
+        nested = sparse_path / "0"
+        if nested.exists():
+            return nested
+
+        candidates = [p for p in sparse_path.iterdir() if p.is_dir() and (p / "cameras.bin").exists()]
+        if candidates:
+            return candidates[0]
+
+        return sparse_path / "0"
+
     def run_alignment(
         self,
         frames_dir: Path,
@@ -296,6 +367,12 @@ class RigColmapIntegrator:
             progress_callback("Generating virtual perspective views...")
 
         try:
+            pycolmap = _import_pycolmap()
+            mapping_backend = getattr(self.settings, 'mapping_backend', 'colmap')
+            use_external_colmap = bool(getattr(self.settings, 'sphere_alignment_path', None))
+            colmap_bin = self._resolve_colmap_binary()
+            glomap_bin = self._resolve_glomap_binary()
+
             # 1. Render Perspectives
             rig_config = self.render_perspective_images(
                 pano_files, 
@@ -305,35 +382,32 @@ class RigColmapIntegrator:
             )
             
             # 2. Feature Extraction
-            if progress_callback:
-                progress_callback("Extracting features (COLMAP)...")
-            
             pycolmap.set_random_seed(0)
-            
-            extraction_options = pycolmap.SiftExtractionOptions()
-            # Hardware acceleration - check pycolmap version for device parameter
-            if self.settings.use_gpu:
-                try:
-                    # Try new pycolmap API with Device enum
-                    device = pycolmap.Device.cuda
-                except AttributeError:
-                    # Fallback for older pycolmap versions
-                    device = None
+
+            if use_external_colmap:
+                self._run_cli(
+                    colmap_bin,
+                    [
+                        "feature_extractor",
+                        "--database_path", str(database_path),
+                        "--image_path", str(perspectives_dir),
+                        "--ImageReader.single_camera_per_folder", "1",
+                        "--ImageReader.mask_path", str(perspectives_mask_dir),
+                        "--SiftExtraction.use_gpu", "1" if self.settings.use_gpu else "0",
+                    ],
+                    progress_callback,
+                    "Extracting features (COLMAP CLI)..."
+                )
             else:
-                try:
-                    device = pycolmap.Device.cpu
-                except AttributeError:
-                    device = None
-            
-            # Feature extraction
-            # Use PER_FOLDER camera mode - each subfolder gets ONE shared camera ID
-            # This matches Kevin's 360-Video-To-3DGS approach
-            pycolmap.extract_features(
-                str(database_path),
-                str(perspectives_dir),
-                reader_options={"mask_path": str(perspectives_mask_dir)},
-                camera_mode=pycolmap.CameraMode.PER_FOLDER
-            )
+                if progress_callback:
+                    progress_callback("Extracting features (pycolmap)...")
+
+                pycolmap.extract_features(
+                    str(database_path),
+                    str(perspectives_dir),
+                    reader_options={"mask_path": str(perspectives_mask_dir)},
+                    camera_mode=pycolmap.CameraMode.PER_FOLDER
+                )
             
             # 3. Apply Rig Config
             # pycolmap.Database has no constructor args - use open() static method
@@ -342,44 +416,99 @@ class RigColmapIntegrator:
             db.close()
                 
             # 4. Matching
-            if progress_callback:
-                progress_callback("Matching features...")
-            
-            pycolmap.match_sequential(
-                str(database_path),
-                pairing_options=pycolmap.SequentialPairingOptions(loop_detection=True)
-            )
+            if use_external_colmap:
+                self._run_cli(
+                    colmap_bin,
+                    [
+                        "sequential_matcher",
+                        "--database_path", str(database_path),
+                        "--SequentialMatching.overlap", "12",
+                        "--SequentialMatching.loop_detection", "1",
+                        "--SiftMatching.use_gpu", "1" if self.settings.use_gpu else "0",
+                    ],
+                    progress_callback,
+                    "Matching features (COLMAP CLI)..."
+                )
+            else:
+                if progress_callback:
+                    progress_callback("Matching features...")
+
+                pycolmap.match_sequential(
+                    str(database_path),
+                    pairing_options=pycolmap.SequentialPairingOptions(loop_detection=True)
+                )
             
             # 5. Mapping
-            if progress_callback:
-                progress_callback("Running incremental mapping...")
-                
-            opts = pycolmap.IncrementalPipelineOptions(
-                ba_refine_sensor_from_rig=False,
-                ba_refine_focal_length=False,
-                ba_refine_principal_point=False,
-                ba_refine_extra_params=False,
-            )
-            
-            recs = pycolmap.incremental_mapping(database_path, perspectives_dir, sparse_path, opts)
-            
-            if not recs:
-                 return {'success': False, 'error': 'Reconstruction failed (no models created)'}
-            
-            # We usually care about model 0 (largest)
-            best_idx = max(recs.keys(), key=lambda i: recs[i].num_points3D())
-            rec = recs[best_idx]
-            
-            out_model_dir = sparse_path / "0"
-            out_model_dir.mkdir(parents=True, exist_ok=True)
-            rec.write_text(str(out_model_dir))
+            out_model_dir = None
+
+            if mapping_backend == 'glomap':
+                if not glomap_bin:
+                    return {'success': False, 'error': 'GloMAP backend selected but glomap_path is not configured'}
+                self._run_cli(
+                    glomap_bin,
+                    [
+                        "mapper",
+                        "--database_path", str(database_path),
+                        "--image_path", str(perspectives_dir),
+                        "--output_path", str(sparse_path),
+                    ],
+                    progress_callback,
+                    "Running GloMAP mapper..."
+                )
+                out_model_dir = self._normalize_sparse_output(sparse_path)
+                if not out_model_dir.exists() or not ((out_model_dir / "images.bin").exists() or (out_model_dir / "images.txt").exists()):
+                    return {'success': False, 'error': 'GloMAP completed but no valid sparse model was created'}
+                num_aligned = len(list(perspectives_dir.rglob("*.png")))
+            elif use_external_colmap:
+                self._run_cli(
+                    colmap_bin,
+                    [
+                        "mapper",
+                        "--database_path", str(database_path),
+                        "--image_path", str(perspectives_dir),
+                        "--output_path", str(sparse_path),
+                        "--Mapper.ba_refine_sensor_from_rig", "0",
+                        "--Mapper.ba_refine_focal_length", "0",
+                        "--Mapper.ba_refine_principal_point", "0",
+                        "--Mapper.ba_refine_extra_params", "0",
+                    ],
+                    progress_callback,
+                    "Running incremental mapping (COLMAP CLI)..."
+                )
+                out_model_dir = self._normalize_sparse_output(sparse_path)
+                if not out_model_dir.exists() or not ((out_model_dir / "images.bin").exists() or (out_model_dir / "images.txt").exists()):
+                    return {'success': False, 'error': 'COLMAP mapper completed but no sparse model was created'}
+                num_aligned = len(list(perspectives_dir.rglob("*.png")))
+            else:
+                if progress_callback:
+                    progress_callback("Running incremental mapping...")
+
+                opts = pycolmap.IncrementalPipelineOptions(
+                    ba_refine_sensor_from_rig=False,
+                    ba_refine_focal_length=False,
+                    ba_refine_principal_point=False,
+                    ba_refine_extra_params=False,
+                )
+
+                recs = pycolmap.incremental_mapping(database_path, perspectives_dir, sparse_path, opts)
+
+                if not recs:
+                    return {'success': False, 'error': 'Reconstruction failed (no models created)'}
+
+                best_idx = max(recs.keys(), key=lambda i: recs[i].num_points3D())
+                rec = recs[best_idx]
+
+                out_model_dir = sparse_path / "0"
+                out_model_dir.mkdir(parents=True, exist_ok=True)
+                rec.write_text(str(out_model_dir))
+                num_aligned = rec.num_images()
             
             return {
                 'success': True,
                 'colmap_output': out_model_dir,
                 'frames_dir': frames_dir, # Original inputs
                 'perspectives_dir': perspectives_dir, # Generated inputs
-                'num_aligned': rec.num_images(),
+                'num_aligned': num_aligned,
             }
 
         except Exception as e:

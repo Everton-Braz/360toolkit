@@ -13,8 +13,12 @@ This implementation:
 import os
 # Fix OpenMP conflict: PyTorch (libomp.dll) + NumPy/MKL (libiomp5md.dll) crash
 os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+import sqlite3
 
 import logging
+import re
+import shutil
+import subprocess
 import numpy as np
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
@@ -64,6 +68,59 @@ def _open_database_compat(pycolmap_module, database_path: Path):
     db_obj = pycolmap_module.Database()
     db_obj.open(db_path)
     return db_obj
+
+
+def _enforce_rig_sensor_assignments(database_path: Path, rig_config: 'pycolmap.RigConfig') -> None:
+    """Ensure frame_data sensor_id and images.camera_id follow rig image prefixes."""
+    prefix_to_sensor = {}
+    for idx, rig_camera in enumerate(rig_config.cameras):
+        image_prefix = getattr(rig_camera, "image_prefix", None)
+        if image_prefix:
+            prefix_to_sensor[image_prefix] = idx + 1
+
+    if not prefix_to_sensor:
+        logger.warning("[Mode C] Rig sensor enforcement skipped: no image_prefix entries")
+        return
+
+    con = sqlite3.connect(str(database_path))
+    cur = con.cursor()
+
+    images = cur.execute("SELECT image_id, name FROM images").fetchall()
+    image_sensor_pairs = []
+    unresolved = 0
+
+    for image_id, image_name in images:
+        sensor_id = None
+        for prefix, mapped_sensor_id in prefix_to_sensor.items():
+            if image_name.startswith(prefix):
+                sensor_id = mapped_sensor_id
+                break
+
+        if sensor_id is None:
+            unresolved += 1
+            continue
+
+        image_sensor_pairs.append((sensor_id, image_id))
+
+    if image_sensor_pairs:
+        cur.executemany("UPDATE images SET camera_id=? WHERE image_id=?", image_sensor_pairs)
+        cur.executemany("UPDATE frame_data SET sensor_id=? WHERE data_id=?", image_sensor_pairs)
+
+    con.commit()
+
+    camera_distribution = cur.execute(
+        "SELECT camera_id, COUNT(*) FROM images GROUP BY camera_id ORDER BY camera_id"
+    ).fetchall()
+    sensor_distribution = cur.execute(
+        "SELECT sensor_id, COUNT(*) FROM frame_data GROUP BY sensor_id ORDER BY sensor_id"
+    ).fetchall()
+    con.close()
+
+    logger.info("[Mode C] Rig sensor assignment enforced for %d images", len(image_sensor_pairs))
+    logger.info("[Mode C] Image camera_id distribution: %s", camera_distribution)
+    logger.info("[Mode C] Frame sensor_id distribution: %s", sensor_distribution)
+    if unresolved:
+        logger.warning("[Mode C] %d images did not match any rig prefix", unresolved)
 
 
 @dataclass
@@ -189,6 +246,18 @@ def spherical_img_from_cam(image_size: Tuple[int, int], rays_in_cam: np.ndarray)
     u = (1 + yaw / np.pi) / 2
     v = (1 - pitch * 2 / np.pi) / 2
     return np.stack([u, v], -1) * image_size
+
+
+def _natural_frame_key(name: str):
+    """Natural sort key for frame/image names ending with numeric index."""
+    stem = Path(name).stem
+    match = re.search(r"(-?\d+(?:\.\d+)?)$", stem)
+    if match:
+        try:
+            return (0, float(match.group(1)), stem)
+        except ValueError:
+            pass
+    return (1, stem.lower(), stem)
 
 
 class PoseTransferIntegrator:
@@ -342,7 +411,7 @@ class PoseTransferIntegrator:
                 'images_dir': str(perspective_dir),
                 'masks_dir': str(perspective_masks_dir),
                 'equirect_masks_dir': str(output_dir / "equirect_masks") if (output_dir / "equirect_masks").exists() else None,
-                'registered_images': len(list(perspective_dir.glob("*.jpg"))),
+                'registered_images': len(list(perspective_dir.glob("*.jpg")) + list(perspective_dir.glob("*.png"))),
                 'positions': {}
             }
             
@@ -421,7 +490,7 @@ class PoseTransferIntegrator:
                 "--image_path", str(frames_dir),
                 "--ImageReader.camera_model", "SPHERE",
                 "--ImageReader.single_camera", "1",
-                "--SiftExtraction.use_gpu", "0",
+                "--SiftExtraction.use_gpu", "1" if self.settings.use_gpu else "0",
                 "--SiftExtraction.max_image_size", "3200",
                 "--SiftExtraction.max_num_features", "8192",
                 "--SiftExtraction.max_num_orientations", "2",
@@ -430,6 +499,12 @@ class PoseTransferIntegrator:
             ]
             
             result = integrator._run_command(extractor_args, progress_callback)
+            if result.returncode != 0 and self.settings.use_gpu:
+                logger.warning("[Mode C SphereSfM] GPU feature extraction failed, retrying on CPU")
+                extractor_args_cpu = list(extractor_args)
+                gpu_idx = extractor_args_cpu.index("--SiftExtraction.use_gpu") + 1
+                extractor_args_cpu[gpu_idx] = "0"
+                result = integrator._run_command(extractor_args_cpu, progress_callback)
             if result.returncode != 0:
                 return {'success': False, 'error': f'Feature extraction failed: {result.stderr}'}
             
@@ -442,20 +517,17 @@ class PoseTransferIntegrator:
                 "--database_path", str(database_path),
                 "--SequentialMatching.overlap", "10",
                 "--SequentialMatching.quadratic_overlap", "1",
-                "--SequentialMatching.loop_detection", "0",
-                "--SiftMatching.use_gpu", "0",
-                "--SiftMatching.max_ratio", "0.8",
-                "--SiftMatching.max_distance", "0.7",
-                "--SiftMatching.cross_check", "1",
-                "--SiftMatching.max_num_matches", "8192",
-                "--SiftMatching.max_error", "4.0",
-                "--SiftMatching.confidence", "0.999",
-                "--SiftMatching.max_num_trials", "10000",
-                "--SiftMatching.min_inlier_ratio", "0.25",
-                "--SiftMatching.min_num_inliers", "15",
+                "--SequentialMatching.loop_detection", "1",
+                "--SiftMatching.use_gpu", "1" if self.settings.use_gpu else "0",
             ]
             
             result = integrator._run_command(matcher_args, progress_callback)
+            if result.returncode != 0 and self.settings.use_gpu:
+                logger.warning("[Mode C SphereSfM] GPU feature matching failed, retrying on CPU")
+                matcher_args_cpu = list(matcher_args)
+                gpu_idx = matcher_args_cpu.index("--SiftMatching.use_gpu") + 1
+                matcher_args_cpu[gpu_idx] = "0"
+                result = integrator._run_command(matcher_args_cpu, progress_callback)
             if result.returncode != 0:
                 return {'success': False, 'error': f'Feature matching failed: {result.stderr}'}
             
@@ -568,9 +640,22 @@ class PoseTransferIntegrator:
         the prefix (e.g. 'frame0001.jpg') groups cameras into rig frames.
         """
         output_image_dir.mkdir(parents=True, exist_ok=True)
+
+        def _natural_frame_key(path: Path):
+            stem = path.stem
+            match = re.search(r"(-?\d+(?:\.\d+)?)$", stem)
+            if match:
+                try:
+                    return (0, float(match.group(1)), stem)
+                except ValueError:
+                    pass
+            return (1, stem.lower(), stem)
         
         # Get equirectangular images
-        pano_images = sorted(frames_dir.glob("*.jpg")) + sorted(frames_dir.glob("*.png"))
+        pano_images = sorted(
+            list(frames_dir.glob("*.jpg")) + list(frames_dir.glob("*.png")),
+            key=_natural_frame_key,
+        )
         
         if not pano_images:
             raise ValueError(f"No images found in {frames_dir}")
@@ -747,20 +832,38 @@ class PoseTransferIntegrator:
         
         pycolmap.set_random_seed(0)
         
-        # Configure hardware - CPU for stability
+        # Configure hardware
         try:
-            device = pycolmap.Device.cpu
-            logger.info("[Mode C] Using CPU for feature extraction")
+            if self.settings.use_gpu:
+                device = pycolmap.Device.cuda
+                logger.info("[Mode C] Using CUDA for feature extraction/matching")
+            else:
+                device = pycolmap.Device.cpu
+                logger.info("[Mode C] Using CPU for feature extraction/matching")
         except AttributeError:
             device = None
+            logger.info("[Mode C] Device enum not available in pycolmap, using defaults")
         
         # Reader options: include YOLO+SAM masks if available
         reader_options = {}
         if masks_dir and masks_dir.exists():
             mask_files = list(masks_dir.glob("*.png"))
             if mask_files:
-                reader_options["mask_path"] = str(masks_dir)
-                logger.info(f"[Mode C] Using YOLO+SAM masks from: {masks_dir} ({len(mask_files)} masks)")
+                image_files = sorted(list(perspective_images_dir.glob("*.jpg")) + list(perspective_images_dir.glob("*.png")))
+                expected_masks = {f"{img.name}.png" for img in image_files}
+                available_masks = {mask.name for mask in mask_files}
+                missing_masks = expected_masks - available_masks
+
+                if not missing_masks:
+                    reader_options["mask_path"] = str(masks_dir)
+                    logger.info(f"[Mode C] Using YOLO+SAM masks from: {masks_dir} ({len(mask_files)} masks)")
+                else:
+                    logger.warning(
+                        "[Mode C] Incomplete mask set for COLMAP (%d missing of %d images). "
+                        "Proceeding without masks to keep rig camera coverage.",
+                        len(missing_masks),
+                        len(image_files),
+                    )
             else:
                 logger.info("[Mode C] No mask files found, proceeding without masks")
         
@@ -784,25 +887,37 @@ class PoseTransferIntegrator:
         db = _open_database_compat(pycolmap, database_path)
         pycolmap.apply_rig_config([rig_config], db)
         db.close()
+        _enforce_rig_sensor_assignments(database_path, rig_config)
+
+        logger.info("[Mode C] Step 2.5: Injecting SphereSfM pose priors into perspective DB")
+        prior_info = self._inject_spheresfm_position_priors(
+            sphere_sparse_dir=sphere_sparse_dir,
+            database_path=database_path,
+            rig_config=rig_config,
+        )
         
-        logger.info("[Mode C] Step 3: Sequential matching with loop detection")
-        
-        # Sequential matching (pycolmap API variants)
+        image_count = len(list(perspective_images_dir.glob("*.jpg")) + list(perspective_images_dir.glob("*.png")))
+
+        logger.info("[Mode C] Step 3: Sequential matching with loop detection (%d images)", image_count)
         if hasattr(pycolmap, "SequentialPairingOptions"):
             seq_opts = pycolmap.SequentialPairingOptions(loop_detection=True)
+            if hasattr(seq_opts, "overlap"):
+                seq_opts.overlap = 12
             match_params = {
                 'database_path': str(database_path),
                 'pairing_options': seq_opts
             }
         else:
             seq_opts = pycolmap.SequentialMatchingOptions(loop_detection=True)
+            if hasattr(seq_opts, "overlap"):
+                seq_opts.overlap = 12
             match_params = {
                 'database_path': str(database_path),
                 'matching_options': seq_opts
             }
         if device is not None:
             match_params['device'] = device
-        
+
         pycolmap.match_sequential(**match_params)
         
         logger.info("[Mode C] Step 4: Incremental mapping with rig constraints")
@@ -814,7 +929,73 @@ class PoseTransferIntegrator:
             ba_refine_principal_point=False,
             ba_refine_extra_params=False,
         )
+
+        prior_count = prior_info.get('prior_count', 0)
+        init_image_id1 = prior_info.get('init_image_id1')
+        init_image_id2 = prior_info.get('init_image_id2')
+
+        if init_image_id1 and hasattr(opts, "init_image_id1"):
+            opts.init_image_id1 = int(init_image_id1)
+        if init_image_id2 and hasattr(opts, "init_image_id2"):
+            opts.init_image_id2 = int(init_image_id2)
+
+        if prior_count > 0:
+            if hasattr(opts, "use_prior_position"):
+                opts.use_prior_position = True
+            if hasattr(opts, "use_robust_loss_on_prior_position"):
+                opts.use_robust_loss_on_prior_position = True
+            if hasattr(opts, "prior_position_loss_scale"):
+                opts.prior_position_loss_scale = 1.0
+
+            logger.info(
+                "[Mode C] Using SphereSfM position priors for initialization (%d images, init pair: %s, %s)",
+                prior_count,
+                init_image_id1,
+                init_image_id2,
+            )
+        else:
+            if init_image_id1 and init_image_id2:
+                logger.info(
+                    "[Mode C] Position prior columns unavailable; using SphereSfM-derived init pair only (%s, %s)",
+                    init_image_id1,
+                    init_image_id2,
+                )
+            else:
+                logger.warning("[Mode C] No SphereSfM priors or init pair available; mapping will initialize without pose priors")
         
+        mapping_backend = getattr(self.settings, 'mapping_backend', 'colmap')
+        if mapping_backend == 'glomap':
+            glomap_path = getattr(self.settings, 'glomap_path', None)
+            if not glomap_path:
+                raise RuntimeError("GloMAP backend selected but glomap_path is not configured")
+
+            cmd = [
+                str(glomap_path),
+                "mapper",
+                "--database_path", str(database_path),
+                "--image_path", str(perspective_images_dir),
+                "--output_path", str(output_sparse_dir.parent),
+            ]
+            logger.info("[Mode C] Running GloMAP mapper: %s", " ".join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"GloMAP mapper failed (code {result.returncode})\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+                )
+
+            direct_files = ["cameras.bin", "images.bin", "points3D.bin", "cameras.txt", "images.txt", "points3D.txt"]
+            if (output_sparse_dir.parent / "cameras.bin").exists():
+                output_sparse_dir.mkdir(parents=True, exist_ok=True)
+                for name in direct_files:
+                    src = output_sparse_dir.parent / name
+                    if src.exists():
+                        shutil.copy2(src, output_sparse_dir / name)
+            if not output_sparse_dir.exists() or not ((output_sparse_dir / "images.bin").exists() or (output_sparse_dir / "images.txt").exists()):
+                raise RuntimeError("GloMAP completed but sparse/0 model was not created")
+
+            logger.info("[Mode C] Pose transfer complete via GloMAP backend")
+            return
+
         recs = pycolmap.incremental_mapping(
             str(database_path), 
             str(perspective_images_dir), 
@@ -833,6 +1014,121 @@ class PoseTransferIntegrator:
             rec.write_text(str(out_dir))
         
         logger.info(f"[Mode C] Pose transfer complete: {len(recs)} reconstructions")
+
+    def _load_spheresfm_camera_centers(
+        self,
+        sphere_sparse_dir: Path,
+    ) -> Dict[str, np.ndarray]:
+        """Load camera centers from SphereSfM reconstruction keyed by image filename."""
+        pycolmap = _get_pycolmap()
+        if pycolmap is None:
+            return {}
+
+        reconstruction = pycolmap.Reconstruction(str(sphere_sparse_dir))
+        centers_by_name: Dict[str, np.ndarray] = {}
+
+        for image in reconstruction.images.values():
+            cam_from_world = image.cam_from_world() if callable(image.cam_from_world) else image.cam_from_world
+            if cam_from_world is None:
+                continue
+
+            matrix_attr = cam_from_world.matrix
+            mat = np.asarray(matrix_attr() if callable(matrix_attr) else matrix_attr, dtype=np.float64)
+            rotation = mat[:, :3]
+            translation = mat[:, 3]
+            camera_center = -rotation.T @ translation
+            centers_by_name[Path(image.name).name] = camera_center
+
+        return centers_by_name
+
+    def _inject_spheresfm_position_priors(
+        self,
+        sphere_sparse_dir: Path,
+        database_path: Path,
+        rig_config: 'pycolmap.RigConfig',
+    ) -> Dict[str, Optional[int]]:
+        """
+        Inject SphereSfM-derived camera-center priors into COLMAP DB for Mode C.
+
+        For each perspective image `camXX_..._<frame_name>`, this maps `<frame_name>`
+        to SphereSfM's equirect frame pose and writes `prior_tx/ty/tz`.
+        """
+        centers_by_name = self._load_spheresfm_camera_centers(sphere_sparse_dir)
+        if not centers_by_name:
+            logger.warning("[Mode C] Could not load SphereSfM camera centers from %s", sphere_sparse_dir)
+            return {'prior_count': 0, 'init_image_id1': None, 'init_image_id2': None}
+
+        centers_by_stem = {Path(name).stem: center for name, center in centers_by_name.items()}
+
+        prefixes = [
+            getattr(rig_camera, "image_prefix", "")
+            for rig_camera in rig_config.cameras
+            if getattr(rig_camera, "image_prefix", "")
+        ]
+        if not prefixes:
+            logger.warning("[Mode C] No rig prefixes available for prior mapping")
+            return {'prior_count': 0, 'init_image_id1': None, 'init_image_id2': None}
+
+        con = sqlite3.connect(str(database_path))
+        cur = con.cursor()
+        try:
+            image_rows = cur.execute("SELECT image_id, name FROM images").fetchall()
+
+            frame_to_ref_image_id: Dict[str, int] = {}
+            reference_prefix = prefixes[0]
+
+            columns = {row[1] for row in cur.execute("PRAGMA table_info(images)")}
+            required_columns = {"prior_tx", "prior_ty", "prior_tz"}
+            has_prior_columns = required_columns.issubset(columns)
+            if not has_prior_columns:
+                logger.warning("[Mode C] Database schema missing prior columns (%s)", sorted(required_columns - columns))
+
+            updates = []
+
+            for image_id, image_name in image_rows:
+                image_name_base = Path(image_name).name
+                frame_name = image_name_base
+                for prefix in prefixes:
+                    if image_name_base.startswith(prefix):
+                        frame_name = image_name_base[len(prefix):]
+                        break
+
+                center = centers_by_name.get(frame_name)
+                if center is None:
+                    center = centers_by_stem.get(Path(frame_name).stem)
+                if center is None:
+                    continue
+
+                if has_prior_columns:
+                    updates.append((float(center[0]), float(center[1]), float(center[2]), image_id))
+
+                if image_name_base.startswith(reference_prefix):
+                    frame_to_ref_image_id[frame_name] = image_id
+
+            if has_prior_columns and updates:
+                cur.executemany(
+                    "UPDATE images SET prior_tx=?, prior_ty=?, prior_tz=? WHERE image_id=?",
+                    updates,
+                )
+                con.commit()
+
+            ordered_frames = sorted(frame_to_ref_image_id.keys(), key=_natural_frame_key)
+            init_image_id1 = frame_to_ref_image_id.get(ordered_frames[0]) if len(ordered_frames) >= 1 else None
+            init_image_id2 = frame_to_ref_image_id.get(ordered_frames[1]) if len(ordered_frames) >= 2 else None
+
+            logger.info(
+                "[Mode C] SphereSfM priors applied to %d/%d perspective images",
+                len(updates),
+                len(image_rows),
+            )
+
+            return {
+                'prior_count': len(updates),
+                'init_image_id1': init_image_id1,
+                'init_image_id2': init_image_id2,
+            }
+        finally:
+            con.close()
 
 
 def export_for_lichtfeld(
@@ -949,6 +1245,34 @@ def export_for_realityscan(
         True if successful
     """
     import shutil
+
+    def _rewrite_images_txt_for_realityscan(src_images_txt: Path, dst_images_txt: Path) -> int:
+        """
+        Rewrite COLMAP images.txt NAME field to point at ../images/<name> so
+        RealityScan can resolve files when loading from sparse/.
+        """
+        rewritten = 0
+        out_lines = []
+        with open(src_images_txt, 'r', encoding='utf-8') as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#'):
+                    out_lines.append(line)
+                    continue
+
+                parts = stripped.split()
+                if len(parts) >= 10:
+                    image_name = parts[9]
+                    if not image_name.startswith('../images/'):
+                        parts[9] = f"../images/{image_name}"
+                        rewritten += 1
+                    out_lines.append(' '.join(parts) + '\n')
+                else:
+                    out_lines.append(line)
+
+        with open(dst_images_txt, 'w', encoding='utf-8') as f:
+            f.writelines(out_lines)
+        return rewritten
     
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -957,6 +1281,13 @@ def export_for_realityscan(
     sparse_out = output_path / "sparse"
     images_out.mkdir(exist_ok=True)
     sparse_out.mkdir(exist_ok=True)
+
+    # Remove stale sparse files from previous exports (especially *.bin)
+    # to ensure RealityScan loads the freshly exported TXT model with
+    # corrected ../images/ paths.
+    for existing_file in sparse_out.glob("*"):
+        if existing_file.is_file():
+            existing_file.unlink()
     
     logger.info("[Export] RealityScan: Exporting perspective images + masks")
     
@@ -964,7 +1295,11 @@ def export_for_realityscan(
         # 1. Copy perspective images
         images_source = Path(images_dir)
         images_copied = 0
-        for img_file in sorted(images_source.glob("*.jpg")):
+        image_files = []
+        for pattern in ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff"):
+            image_files.extend(images_source.glob(pattern))
+
+        for img_file in sorted(image_files):
             dst = images_out / img_file.name
             if not dst.exists():
                 shutil.copy2(img_file, dst)
@@ -997,15 +1332,34 @@ def export_for_realityscan(
             
             logger.info(f"[Export] RealityScan: Copied {masks_copied} masks into images folder")
         
-        # 3. Copy COLMAP sparse reconstruction
+        # 3. Copy COLMAP sparse reconstruction (TXT preferred)
         colmap_source = Path(colmap_dir)
-        for colmap_file in ['cameras.txt', 'images.txt', 'points3D.txt',
-                            'cameras.bin', 'images.bin', 'points3D.bin']:
+
+        copied_sparse = []
+
+        # Core text model files expected by RealityScan
+        for colmap_file in ['cameras.txt', 'points3D.txt', 'frames.txt', 'rigs.txt', 'project.ini']:
             src = colmap_source / colmap_file
             if src.exists():
                 shutil.copy2(src, sparse_out / colmap_file)
+                copied_sparse.append(colmap_file)
+
+        # Rewrite images.txt with relative path to images/ folder
+        src_images_txt = colmap_source / 'images.txt'
+        dst_images_txt = sparse_out / 'images.txt'
+        if src_images_txt.exists():
+            rewritten_count = _rewrite_images_txt_for_realityscan(src_images_txt, dst_images_txt)
+            copied_sparse.append('images.txt')
+            logger.info(f"[Export] RealityScan: Rewrote {rewritten_count} image paths in images.txt -> ../images/")
+        else:
+            # Fallback to binary only if text not available
+            for colmap_file in ['cameras.bin', 'images.bin', 'points3D.bin', 'frames.bin', 'rigs.bin']:
+                src = colmap_source / colmap_file
+                if src.exists():
+                    shutil.copy2(src, sparse_out / colmap_file)
+                    copied_sparse.append(colmap_file)
         
-        logger.info(f"[Export] RealityScan: Copied COLMAP sparse model")
+        logger.info(f"[Export] RealityScan: Copied COLMAP sparse model files: {copied_sparse}")
         
         # 4. Copy database if provided
         if database_path and Path(database_path).exists():

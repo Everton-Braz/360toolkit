@@ -396,7 +396,19 @@ class SettingsManager:
         """
         logger.info("Searching for GloMAP...")
         
-        # 1. User Documents folder - pre-built release
+        # 1. Relative to app (workspace bundled binaries)
+        app_dir = Path(__file__).parent.parent.parent
+        relative_candidates = [
+            app_dir / "bin" / "glomap" / "bin" / "glomap.exe",
+            app_dir / "bin" / "glomap" / "glomap.exe",
+            app_dir / "glomap" / "bin" / "glomap.exe",
+        ]
+        for relative_glomap in relative_candidates:
+            if self.is_glomap_valid(relative_glomap):
+                logger.info(f"[OK] GloMAP found at {relative_glomap}")
+                return relative_glomap
+
+        # 2. User Documents folder - pre-built release
         docs = Path.home() / "Documents"
         glomap_paths = [
             docs / "APLICATIVOS" / "GloMAP" / "bin" / "glomap.exe",
@@ -408,7 +420,7 @@ class SettingsManager:
                 logger.info(f"[OK] GloMAP found at {path}")
                 return path
         
-        # 2. System PATH
+        # 3. System PATH
         glomap_in_path = shutil.which('glomap')
         if glomap_in_path:
             glomap_path = Path(glomap_in_path)
@@ -416,7 +428,7 @@ class SettingsManager:
                 logger.info(f"[OK] GloMAP found in PATH: {glomap_path}")
                 return glomap_path
         
-        # 3. Standard installation locations
+        # 4. Standard installation locations
         standard_paths = [
             Path("C:/Program Files/GloMAP/bin/glomap.exe"),
             Path("C:/GloMAP/bin/glomap.exe"),
@@ -426,13 +438,6 @@ class SettingsManager:
             if self.is_glomap_valid(path):
                 logger.info(f"[OK] GloMAP found at {path}")
                 return path
-        
-        # 4. Relative to app
-        app_dir = Path(__file__).parent.parent.parent
-        relative_glomap = app_dir / "glomap" / "bin" / "glomap.exe"
-        if self.is_glomap_valid(relative_glomap):
-            logger.info(f"[OK] GloMAP found at {relative_glomap}")
-            return relative_glomap
         
         logger.warning("[X] GloMAP not found in any standard location")
         return None

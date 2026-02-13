@@ -30,7 +30,8 @@ class ColmapSettings:
     
     # Paths
     sphere_alignment_path: Optional[Path] = None
-    glomap_path: Optional[Path] = None  # For future GloMAP integration
+    glomap_path: Optional[Path] = None
+    mapping_backend: str = 'colmap'  # 'colmap' | 'glomap'
     
     # Quality settings
     quality: str = 'medium'  # 'fast', 'medium', 'high'
@@ -62,6 +63,7 @@ class ColmapSettings:
             'alignment_mode': self.alignment_mode,
             'sphere_alignment_path': str(self.sphere_alignment_path) if self.sphere_alignment_path else None,
             'glomap_path': str(self.glomap_path) if self.glomap_path else None,
+            'mapping_backend': self.mapping_backend,
             'quality': self.quality,
             'matching_method': self.matching_method,
             'extract_features': self.extract_features,

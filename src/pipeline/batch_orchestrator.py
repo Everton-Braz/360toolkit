@@ -1622,8 +1622,10 @@ class PipelineWorker(QThread):
              settings = ColmapSettings(
                  alignment_mode=alignment_mode,
                  sphere_alignment_path=Path(self.config['sphere_alignment_path']) if self.config.get('sphere_alignment_path') else None,
+                 glomap_path=Path(self.config['glomap_path']) if self.config.get('glomap_path') else None,
+                 mapping_backend=self.config.get('mapping_backend', 'colmap'),
                  use_rig_sfm=(alignment_mode == ALIGNMENT_MODE_RIG_SFM),
-                 use_gpu=self.config.get('use_gpu', True)
+                 use_gpu=self.config.get('use_gpu_colmap', self.config.get('use_gpu', True))
              )
              
              stage = ColmapStage(settings)
@@ -1637,6 +1639,85 @@ class PipelineWorker(QThread):
                  output_dir=output_dir,
                  progress_callback=progress_callback
              )
+
+             # Export to RealityScan if enabled
+             if result.get('success') and self.config.get('export_realityscan', False):
+                 try:
+                     logger.info("[Stage 4] Exporting to RealityScan format...")
+                     self.progress.emit(0, 0, "Stage 4: Exporting to RealityScan...")
+
+                     from src.premium.pose_transfer_integration import export_for_realityscan
+
+                     sparse_dir = Path(result['colmap_output'])
+                     realityscan_dir = output_dir / 'realityscan_export'
+
+                     # Determine images directory
+                     images_dir = output_dir / 'images'
+                     if not images_dir.exists():
+                         images_dir = input_dir
+
+                     # Determine masks directory for export
+                     export_masks_dir = None
+                     if self.config.get('export_include_masks', True):
+                         if mask_target == 'equirect' and masks_dir:
+                             export_masks_dir = masks_dir
+                         else:
+                             perspective_masks = output_dir / 'masks'
+                             if perspective_masks.exists():
+                                 export_masks_dir = perspective_masks
+                             else:
+                                 split_masks = Path(self.config['output_dir']) / 'stage3_masks'
+                                 if split_masks.exists():
+                                     export_masks_dir = split_masks
+
+                     database_path = output_dir / 'sparse' / 'database.db'
+                     rs_success = export_for_realityscan(
+                         colmap_dir=str(sparse_dir),
+                         images_dir=str(images_dir),
+                         masks_dir=str(export_masks_dir) if export_masks_dir else None,
+                         output_dir=str(realityscan_dir),
+                         database_path=str(database_path) if database_path.exists() else None,
+                     )
+
+                     if rs_success:
+                         logger.info(f"[Stage 4] RealityScan export complete: {realityscan_dir}")
+                         result['realityscan_export'] = str(realityscan_dir)
+                     else:
+                         logger.warning("[Stage 4] RealityScan export failed")
+
+                 except Exception as e:
+                     logger.error(f"[Stage 4] RealityScan export error: {e}", exc_info=True)
+
+             # Optional sidecar export (XMP metadata alongside aligned images)
+             if result.get('success') and self.config.get('export_sidecars', False):
+                 try:
+                     logger.info("[Stage 4] Exporting XMP sidecar metadata...")
+                     self.progress.emit(0, 0, "Stage 4: Exporting sidecar metadata...")
+
+                     from .export_formats import RealityScanExporter
+
+                     sparse_dir = Path(result['colmap_output'])
+                     sidecar_images_dir = output_dir / 'images'
+                     if not sidecar_images_dir.exists():
+                         sidecar_images_dir = input_dir
+
+                     exporter = RealityScanExporter(
+                         colmap_dir=str(sparse_dir),
+                         output_dir=str(output_dir)
+                     )
+
+                     if exporter.parse_colmap_text():
+                         xmp_ok = exporter.export_xmp_sidecars(str(sidecar_images_dir), use_perspective=False)
+                         if xmp_ok:
+                             logger.info(f"[Stage 4] XMP sidecar export complete: {sidecar_images_dir}")
+                             result['xmp_sidecars_dir'] = str(sidecar_images_dir)
+                         else:
+                             logger.warning("[Stage 4] XMP sidecar export completed with no files")
+                     else:
+                         logger.warning("[Stage 4] Could not parse COLMAP text model for sidecar export")
+
+                 except Exception as e:
+                     logger.error(f"[Stage 4] Sidecar export error: {e}", exc_info=True)
              
              # Export to LichtFeld Studio if enabled
              if result.get('success') and self.config.get('export_lichtfeld', True):
