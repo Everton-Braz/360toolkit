@@ -23,6 +23,12 @@ _SAM_AVAILABLE = False
 
 try:
     import torch
+    try:
+        import torch.distributed as _dist
+        if not hasattr(_dist, 'ProcessGroup'):
+            _dist.ProcessGroup = object
+    except Exception:
+        pass
     _TORCH_AVAILABLE = True
 except Exception:
     pass

@@ -30,6 +30,12 @@ if not getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
     # Either running in normal Python OR running from frozen exe
     try:
         import torch
+        try:
+            import torch.distributed as _dist
+            if not hasattr(_dist, 'ProcessGroup'):
+                _dist.ProcessGroup = object
+        except Exception:
+            pass
         TORCH_AVAILABLE = True
         logging.info(f"PyTorch loaded successfully. Version: {torch.__version__}, CUDA available: {torch.cuda.is_available()}")
     except ImportError as e:

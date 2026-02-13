@@ -19,6 +19,12 @@ YOLO_AVAILABLE = False
 try:
     from segment_anything import sam_model_registry, SamPredictor
     import torch
+    try:
+        import torch.distributed as _dist
+        if not hasattr(_dist, 'ProcessGroup'):
+            _dist.ProcessGroup = object
+    except Exception:
+        pass
     SAM_AVAILABLE = True
 except Exception as e:
     logger.warning(f"SAM not available: {e}")

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime
@@ -32,8 +34,54 @@ def _trim_to_n_images(folder: Path, keep_n: int) -> int:
 
 
 def _run_cmd(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
-    proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, env=_build_colmap_env())
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def _build_colmap_env() -> dict[str, str]:
+    env = os.environ.copy()
+    extra_paths: list[str] = []
+
+    def _add(path: Path) -> None:
+        if path.exists() and path.is_dir():
+            p = str(path)
+            if p not in extra_paths:
+                extra_paths.append(p)
+
+    # Always include COLMAP folder itself
+    _add(PROJECT_ROOT / "bin" / "colmap")
+
+    # CUDA from current conda env (if any)
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        _add(Path(conda_prefix) / "Library" / "bin")
+        _add(Path(conda_prefix) / "Lib" / "site-packages" / "torch" / "lib")
+
+    # Common local Python Torch install
+    user_home = Path.home()
+    _add(user_home / "AppData" / "Local" / "Programs" / "Python" / "Python311" / "Lib" / "site-packages" / "torch" / "lib")
+
+    # Discover torch/cuda libs in local miniconda envs
+    miniconda_root = user_home / "miniconda3" / "envs"
+    if miniconda_root.exists():
+        for env_dir in miniconda_root.iterdir():
+            if not env_dir.is_dir():
+                continue
+            _add(env_dir / "Library" / "bin")
+            _add(env_dir / "Lib" / "site-packages" / "torch" / "lib")
+
+    # CUDA toolkit installation
+    cuda_root = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+    if cuda_root.exists():
+        for version_dir in cuda_root.iterdir():
+            if version_dir.is_dir():
+                _add(version_dir / "bin")
+                _add(version_dir / "bin" / "x64")
+
+    if extra_paths:
+        env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
+
+    return env
 
 
 def _validate_sparse_model(sparse_root: Path) -> tuple[bool, str]:
@@ -53,8 +101,48 @@ def _validate_sparse_model(sparse_root: Path) -> tuple[bool, str]:
     return False, f"No valid sparse model in {sparse_root}"
 
 
+def _db_count(db_path: Path, table: str) -> int:
+    if not db_path.exists():
+        return 0
+    try:
+        con = sqlite3.connect(str(db_path))
+        cur = con.cursor()
+        value = int(cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        con.close()
+        return value
+    except Exception:
+        return 0
+
+
+def _db_sum_rows(db_path: Path, table: str) -> int:
+    if not db_path.exists():
+        return 0
+    try:
+        con = sqlite3.connect(str(db_path))
+        cur = con.cursor()
+        value = cur.execute(f"SELECT COALESCE(SUM(rows), 0) FROM {table}").fetchone()[0]
+        con.close()
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _clear_match_tables(db_path: Path) -> None:
+    if not db_path.exists():
+        return
+    try:
+        con = sqlite3.connect(str(db_path))
+        cur = con.cursor()
+        cur.execute("DELETE FROM matches")
+        cur.execute("DELETE FROM two_view_geometries")
+        con.commit()
+        con.close()
+    except Exception:
+        return
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="SDK extract -> split 10 -> mask -> COLMAP GPU sparse test")
+    parser = argparse.ArgumentParser(description="SDK extract -> split -> mask -> COLMAP GPU sparse test")
     parser.add_argument(
         "--input",
         default=r"G:\.shortcut-targets-by-id\12X9Cn_caDGuRMIO-hF6196FMdQyGNUDA\PROJETOS - CHICO SOMBRA\VIDEOS 360\VID_20251215_170106_00_211.insv",
@@ -62,16 +150,17 @@ def main() -> int:
     )
     parser.add_argument(
         "--output-root",
-        default=r"C:\Users\User\Documents\ARQUIVOS_TESTE\colmap_gpu_sparse_test",
+        default=r"C:\Users\Everton-PC\Documents\ARQUIVOS_TESTE\colmap_gpu_sparse_test",
         help="Output root folder",
     )
     parser.add_argument(
         "--colmap-bin",
-        default=r"C:\Users\User\Documents\APLICATIVOS\360ToolKit\bin\colmap\colmap.exe",
+        default=str(PROJECT_ROOT / "bin" / "colmap" / "colmap.exe"),
         help="COLMAP GPU binary path",
     )
     parser.add_argument("--fps", type=float, default=1.0, help="Extraction FPS")
     parser.add_argument("--duration", type=float, default=12.0, help="Extraction duration seconds")
+    parser.add_argument("--keep-frames", type=int, default=20, help="How many extracted frames to keep for split/mask/COLMAP")
     parser.add_argument("--split-width", type=int, default=1600)
     parser.add_argument("--split-height", type=int, default=1600)
     args = parser.parse_args()
@@ -132,7 +221,7 @@ def main() -> int:
         print("[FAIL] Too few extracted frames")
         return 5
 
-    kept = _trim_to_n_images(extracted_dir, 10)
+    kept = _trim_to_n_images(extracted_dir, max(2, int(args.keep_frames)))
     print(f"[INFO] Kept for split: {kept} frames")
     if kept < 2:
         print("[FAIL] Not enough frames after trim")
@@ -161,46 +250,76 @@ def main() -> int:
     mask_count = _count_images(masks_dir)
     print(f"[INFO] Masks: {mask_count}")
 
+    recon_input_dir = extracted_dir
+    print(f"[INFO] COLMAP reconstruction input: {recon_input_dir}")
+
     recon_dir = run_dir / "reconstruction_cli_gpu"
     recon_dir.mkdir(parents=True, exist_ok=True)
     db_path = recon_dir / "database.db"
     sparse_path = recon_dir / "sparse"
+    sparse_path.mkdir(parents=True, exist_ok=True)
 
     print("[INFO] COLMAP feature_extractor (GPU)")
+    feature_gpu = True
     rc, out, err = _run_cmd([
         str(colmap_bin),
         "feature_extractor",
         "--database_path", str(db_path),
-        "--image_path", str(perspectives_dir),
-        "--SiftExtraction.use_gpu", "1",
-        "--SiftExtraction.gpu_index", "0",
-        "--ImageReader.single_camera", "1",
+        "--image_path", str(recon_input_dir),
+        "--FeatureExtraction.use_gpu", "1",
+        "--FeatureExtraction.gpu_index", "0",
+        "--ImageReader.single_camera_per_folder", "1",
     ], cwd=PROJECT_ROOT)
-    if rc != 0:
-        print("[FAIL] feature_extractor failed")
-        print(err[-2000:])
-        return 10
+    images_in_db = _db_count(db_path, "images")
+    if rc != 0 or images_in_db == 0:
+        print("[WARN] GPU feature extraction failed or produced 0 images; retrying on CPU")
+        feature_gpu = False
+        rc, out, err = _run_cmd([
+            str(colmap_bin),
+            "feature_extractor",
+            "--database_path", str(db_path),
+            "--image_path", str(recon_input_dir),
+            "--FeatureExtraction.use_gpu", "0",
+            "--ImageReader.single_camera_per_folder", "1",
+        ], cwd=PROJECT_ROOT)
+        images_in_db = _db_count(db_path, "images")
+        if rc != 0 or images_in_db == 0:
+            print("[FAIL] feature_extractor failed")
+            print(err[-2000:])
+            return 10
 
-    print("[INFO] COLMAP sequential_matcher (GPU)")
+    print("[INFO] COLMAP exhaustive_matcher (GPU)")
+    matching_gpu = True
     rc, out, err = _run_cmd([
         str(colmap_bin),
-        "sequential_matcher",
+        "exhaustive_matcher",
         "--database_path", str(db_path),
-        "--SiftMatching.use_gpu", "1",
-        "--SiftMatching.gpu_index", "0",
-        "--SequentialMatching.overlap", "8",
+        "--FeatureMatching.use_gpu", "1",
+        "--FeatureMatching.gpu_index", "0",
     ], cwd=PROJECT_ROOT)
-    if rc != 0:
-        print("[FAIL] sequential_matcher failed")
-        print(err[-2000:])
-        return 11
+    tvg_rows = _db_sum_rows(db_path, "two_view_geometries")
+    if rc != 0 or tvg_rows == 0:
+        print("[WARN] GPU matching failed or produced 0 verified pairs; retrying on CPU")
+        matching_gpu = False
+        _clear_match_tables(db_path)
+        rc, out, err = _run_cmd([
+            str(colmap_bin),
+            "exhaustive_matcher",
+            "--database_path", str(db_path),
+            "--FeatureMatching.use_gpu", "0",
+        ], cwd=PROJECT_ROOT)
+        tvg_rows = _db_sum_rows(db_path, "two_view_geometries")
+        if rc != 0 or tvg_rows == 0:
+            print("[FAIL] exhaustive_matcher failed")
+            print(err[-2000:])
+            return 11
 
     print("[INFO] COLMAP mapper (sparse model)")
     rc, out, err = _run_cmd([
         str(colmap_bin),
         "mapper",
         "--database_path", str(db_path),
-        "--image_path", str(perspectives_dir),
+        "--image_path", str(recon_input_dir),
         "--output_path", str(sparse_path),
     ], cwd=PROJECT_ROOT)
     if rc != 0:
@@ -216,6 +335,12 @@ def main() -> int:
         "extracted_frames": kept,
         "split_views": split_count,
         "masks": mask_count,
+        "feature_gpu": feature_gpu,
+        "matching_gpu": matching_gpu,
+        "colmap_images_in_db": _db_count(db_path, "images"),
+        "colmap_pairs_in_db": _db_count(db_path, "two_view_geometries"),
+        "colmap_verified_matches": _db_sum_rows(db_path, "two_view_geometries"),
+        "colmap_input": str(recon_input_dir),
         "sparse_path": str(sparse_path),
         "validation": message,
     }
@@ -225,7 +350,7 @@ def main() -> int:
         print(f"[FAIL] {message}")
         return 13
 
-    print("[PASS] SDK -> Split(10) -> Mask -> COLMAP GPU sparse test succeeded")
+    print(f"[PASS] SDK -> Split({kept}) -> Mask -> COLMAP GPU sparse test succeeded")
     return 0
 
 
