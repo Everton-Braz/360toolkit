@@ -9,8 +9,14 @@ from PyQt6.QtWidgets import (
     QTextEdit, QFileDialog, QGroupBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import QUrl
 from pathlib import Path
 import logging
+import json
+import os
+import subprocess
+import sys
 
 from ..config.config_manager import get_config_manager
 
@@ -37,6 +43,23 @@ class ConfigManagementDialog(QDialog):
         self.setMinimumSize(800, 600)
         
         layout = QVBoxLayout(self)
+
+        # === CONFIG STORAGE LOCATION ===
+        location_layout = QHBoxLayout()
+        location_label = QLabel("Config folder:")
+        location_layout.addWidget(location_label)
+
+        self.config_folder_label = QLabel(str(self.config_manager.DEFAULT_CONFIG_DIR))
+        self.config_folder_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        location_layout.addWidget(self.config_folder_label, stretch=1)
+
+        open_folder_btn = QPushButton("Open Folder")
+        open_folder_btn.clicked.connect(self.open_config_folder)
+        location_layout.addWidget(open_folder_btn)
+
+        layout.addLayout(location_layout)
         
         # === SAVED CONFIGURATIONS LIST ===
         configs_group = QGroupBox("Saved Configurations")
@@ -73,6 +96,11 @@ class ConfigManagementDialog(QDialog):
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.export_selected_config)
         button_layout.addWidget(self.export_btn)
+
+        self.view_json_btn = QPushButton("📝 View/Edit JSON")
+        self.view_json_btn.setEnabled(False)
+        self.view_json_btn.clicked.connect(self.view_edit_selected_config)
+        button_layout.addWidget(self.view_json_btn)
         
         self.delete_btn = QPushButton("🗑️ Delete Selected")
         self.delete_btn.setEnabled(False)
@@ -95,10 +123,26 @@ class ConfigManagementDialog(QDialog):
         close_layout.addWidget(close_btn)
         
         layout.addLayout(close_layout)
+
+    def open_config_folder(self):
+        """Open the configuration storage directory in the system file manager."""
+        config_dir = self.config_manager.DEFAULT_CONFIG_DIR
+        config_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(config_dir)))
+
+    def _reset_selection_state(self):
+        """Reset selection-dependent UI state when no valid config is selected."""
+        self.selected_config_path = None
+        self.load_btn.setEnabled(False)
+        self.export_btn.setEnabled(False)
+        self.view_json_btn.setEnabled(False)
+        self.delete_btn.setEnabled(False)
     
     def refresh_config_list(self):
         """Refresh the list of saved configurations"""
         self.config_list.clear()
+        self._reset_selection_state()
+        self.config_info.clear()
         
         configs = self.config_manager.list_saved_configs()
         
@@ -106,6 +150,7 @@ class ConfigManagementDialog(QDialog):
             item = QListWidgetItem("No saved configurations")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.config_list.addItem(item)
+            self.config_info.setPlaceholderText("Select a configuration to view details...")
             return
         
         for filepath, config_name, saved_at in configs:
@@ -119,14 +164,14 @@ class ConfigManagementDialog(QDialog):
         filepath = item.data(Qt.ItemDataRole.UserRole)
         
         if filepath is None:
-            self.load_btn.setEnabled(False)
-            self.export_btn.setEnabled(False)
-            self.delete_btn.setEnabled(False)
+            self._reset_selection_state()
+            self.config_info.clear()
             return
         
         self.selected_config_path = filepath
         self.load_btn.setEnabled(True)
         self.export_btn.setEnabled(True)
+        self.view_json_btn.setEnabled(True)
         self.delete_btn.setEnabled(True)
         
         # Load and display config info
@@ -145,8 +190,35 @@ class ConfigManagementDialog(QDialog):
                 f"  • Split Count: {config.get('split_count', 'N/A')}",
                 f"  • FOV: {config.get('h_fov', 'N/A')}°",
                 f"  • Model Size: {config.get('model_size', 'N/A')}",
+                "",
+                "JSON Preview:",
+                json.dumps(config, indent=2, ensure_ascii=False),
             ]
             self.config_info.setText("\n".join(info_lines))
+        else:
+            self.config_info.setText("Failed to load configuration details.")
+
+    def view_edit_selected_config(self):
+        """Open selected configuration JSON in default editor for viewing/editing."""
+        if not self.selected_config_path:
+            return
+
+        config_path = Path(self.selected_config_path)
+        if not config_path.exists():
+            QMessageBox.warning(self, "Not Found", f"Configuration file not found:\n{config_path}")
+            self.refresh_config_list()
+            return
+
+        try:
+            if os.name == 'nt':
+                os.startfile(str(config_path))
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', str(config_path)])
+            else:
+                subprocess.Popen(['xdg-open', str(config_path)])
+            self.config_info.append("\nOpened JSON file in system editor.")
+        except Exception as e:
+            QMessageBox.warning(self, "Open Failed", f"Could not open JSON file:\n{e}")
     
     def load_selected_config(self):
         """Load the selected configuration"""
@@ -183,10 +255,21 @@ class ConfigManagementDialog(QDialog):
         
         config = self.config_manager.load_config(Path(filepath))
         if config:
+            source_path = Path(filepath)
+            imported_name = source_path.stem
+            save_ok = self.config_manager.save_config(config, config_name=imported_name)
+
+            self.refresh_config_list()
+
+            if save_ok:
+                imported_path = self.config_manager.DEFAULT_CONFIG_DIR / f"{imported_name}.json"
+                if imported_path.exists():
+                    self.selected_config_path = imported_path
+
             QMessageBox.information(
                 self,
                 "Configuration Imported",
-                f"Configuration imported successfully!"
+                "Configuration imported successfully!"
             )
             self.config_loaded.emit(config)
             self.accept()
@@ -254,7 +337,7 @@ class ConfigManagementDialog(QDialog):
                 )
                 self.refresh_config_list()
                 self.config_info.clear()
-                self.selected_config_path = None
+                self._reset_selection_state()
             else:
                 QMessageBox.critical(
                     self,

@@ -32,6 +32,20 @@ QComboBox QAbstractItemView {
     border: 1px solid {{color.border}};
     color: {{color.text_primary}};
     selection-background-color: {{color.accent}};
+    selection-color: {{color.text_primary}};
+    outline: 0;
+}
+
+QComboBox QAbstractItemView::item {
+    min-height: 18px;
+    padding: 4px 8px;
+    color: {{color.text_primary}};
+    background: {{color.bg_input}};
+}
+
+QComboBox QAbstractItemView::item:selected {
+    background: {{color.accent}};
+    color: {{color.text_primary}};
 }
 
 QCheckBox,

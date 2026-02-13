@@ -1383,18 +1383,18 @@ def export_for_lichtfeld(
 
 
 def export_for_realityscan(
-    colmap_dir: str,
+    colmap_dir: Optional[str],
     images_dir: str,
     masks_dir: str,
     output_dir: str,
-    database_path: Optional[str] = None
+    database_path: Optional[str] = None,
+    flat_folder: bool = False,
 ) -> bool:
     """
-    Export Mode C results for RealityScan.
+    Export images/masks for RealityScan, with optional COLMAP model.
     
-    RealityScan only supports perspective images (NOT equirectangular).
-    Masks must be inside the images folder with naming: image_mask.png
-    COLMAP database is also exported.
+    RealityScan supports importing images + masks directly.
+    If COLMAP sparse files are provided, they are exported too.
     
     Output structure:
         realityscan_export/
@@ -1402,18 +1402,20 @@ def export_for_realityscan(
         │   ├── cam00_yaw+090_pitch+000_1068.jpg
         │   ├── cam00_yaw+090_pitch+000_1068_mask.png  ← mask alongside image
         │   └── ...
-        ├── sparse/
+        ├── sparse/            (optional, only when colmap_dir is provided)
         │   ├── cameras.txt
         │   ├── images.txt
         │   └── points3D.txt
-        └── database.db  (optional)
+        └── database.db        (optional)
     
     Args:
-        colmap_dir: Path to COLMAP sparse reconstruction (sparse/0)
+        colmap_dir: Path to COLMAP sparse reconstruction (sparse/0), optional
         images_dir: Path to perspective images (flat folder)
         masks_dir: Path to YOLO+SAM masks
         output_dir: Export output directory
         database_path: Optional path to COLMAP database to include
+        flat_folder: If True, copy images and masks directly into output_dir
+                    (single-folder export). If False, use output_dir/images.
     
     Returns:
         True if successful
@@ -1450,18 +1452,20 @@ def export_for_realityscan(
     
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
-    images_out = output_path / "images"
+
+    images_out = output_path if flat_folder else (output_path / "images")
     sparse_out = output_path / "sparse"
     images_out.mkdir(exist_ok=True)
-    sparse_out.mkdir(exist_ok=True)
 
-    # Remove stale sparse files from previous exports (especially *.bin)
-    # to ensure RealityScan loads the freshly exported TXT model with
-    # corrected ../images/ paths.
-    for existing_file in sparse_out.glob("*"):
-        if existing_file.is_file():
-            existing_file.unlink()
+    if colmap_dir and Path(colmap_dir).exists():
+        sparse_out.mkdir(exist_ok=True)
+
+        # Remove stale sparse files from previous exports (especially *.bin)
+        # to ensure RealityScan loads the freshly exported TXT model with
+        # corrected ../images/ paths.
+        for existing_file in sparse_out.glob("*"):
+            if existing_file.is_file():
+                existing_file.unlink()
     
     logger.info("[Export] RealityScan: Exporting perspective images + masks")
     
@@ -1506,34 +1510,41 @@ def export_for_realityscan(
             
             logger.info(f"[Export] RealityScan: Copied {masks_copied} masks into images folder")
         
-        # 3. Copy COLMAP sparse reconstruction (TXT preferred)
-        colmap_source = Path(colmap_dir)
-
+        # 3. Optionally copy COLMAP sparse reconstruction (TXT preferred)
         copied_sparse = []
+        if colmap_dir and Path(colmap_dir).exists():
+            colmap_source = Path(colmap_dir)
 
-        # Core text model files expected by RealityScan
-        for colmap_file in ['cameras.txt', 'points3D.txt', 'frames.txt', 'rigs.txt', 'project.ini']:
-            src = colmap_source / colmap_file
-            if src.exists():
-                shutil.copy2(src, sparse_out / colmap_file)
-                copied_sparse.append(colmap_file)
-
-        # Rewrite images.txt with relative path to images/ folder
-        src_images_txt = colmap_source / 'images.txt'
-        dst_images_txt = sparse_out / 'images.txt'
-        if src_images_txt.exists():
-            rewritten_count = _rewrite_images_txt_for_realityscan(src_images_txt, dst_images_txt)
-            copied_sparse.append('images.txt')
-            logger.info(f"[Export] RealityScan: Rewrote {rewritten_count} image paths in images.txt -> ../images/")
-        else:
-            # Fallback to binary only if text not available
-            for colmap_file in ['cameras.bin', 'images.bin', 'points3D.bin', 'frames.bin', 'rigs.bin']:
+            # Core text model files expected by RealityScan
+            for colmap_file in ['cameras.txt', 'points3D.txt', 'frames.txt', 'rigs.txt', 'project.ini']:
                 src = colmap_source / colmap_file
                 if src.exists():
                     shutil.copy2(src, sparse_out / colmap_file)
                     copied_sparse.append(colmap_file)
-        
-        logger.info(f"[Export] RealityScan: Copied COLMAP sparse model files: {copied_sparse}")
+
+            # Rewrite images.txt with relative path to images/ folder
+            src_images_txt = colmap_source / 'images.txt'
+            dst_images_txt = sparse_out / 'images.txt'
+            if src_images_txt.exists():
+                rewritten_count = _rewrite_images_txt_for_realityscan(src_images_txt, dst_images_txt)
+                copied_sparse.append('images.txt')
+                logger.info(f"[Export] RealityScan: Rewrote {rewritten_count} image paths in images.txt -> ../images/")
+            else:
+                # Fallback to binary only if text not available
+                for colmap_file in ['cameras.bin', 'images.bin', 'points3D.bin', 'frames.bin', 'rigs.bin']:
+                    src = colmap_source / colmap_file
+                    if src.exists():
+                        shutil.copy2(src, sparse_out / colmap_file)
+                        copied_sparse.append(colmap_file)
+
+            logger.info(f"[Export] RealityScan: Copied COLMAP sparse model files: {copied_sparse}")
+        else:
+            logger.info("[Export] RealityScan: No COLMAP model provided (images + masks export only)")
+            if sparse_out.exists():
+                try:
+                    sparse_out.rmdir()
+                except Exception:
+                    pass
         
         # 4. Copy database if provided
         if database_path and Path(database_path).exists():

@@ -14,8 +14,12 @@ import json
 import shutil
 import subprocess
 import os
+import tempfile
 
 logger = logging.getLogger(__name__)
+
+# GPU probe cache: None = not tested, True = works, False = doesn't work
+_colmap_gpu_probe_result: Optional[bool] = None
 
 def _import_pycolmap():
     """Lazy import of pycolmap to avoid DLL crash at module-level."""
@@ -265,11 +269,8 @@ class RigColmapIntegrator:
             return str(custom)
         return None
 
-    def _run_cli(self, executable: str, args: List[str], progress_callback: Optional[Callable], step_name: str):
-        cmd = [executable] + args
-        logger.info("[RigSfM] Running CLI: %s", " ".join(cmd))
-        if progress_callback:
-            progress_callback(step_name)
+    def _get_cli_env(self, executable: str):
+        """Build environment and cwd for running COLMAP/GLOMAP CLI."""
         exe_path = Path(executable)
         run_cwd = str(exe_path.parent) if exe_path.exists() else None
         run_env = None
@@ -291,6 +292,88 @@ class RigColmapIntegrator:
                     unique_dirs.append(d)
 
             run_env["PATH"] = ";".join(unique_dirs + [run_env.get('PATH', '')])
+        return run_cwd, run_env
+
+    def _probe_colmap_gpu(self, colmap_bin: str) -> bool:
+        """Test if COLMAP GPU feature extraction actually works on this hardware.
+        
+        Some GPUs (e.g. GTX 1650, older cards) may not be supported by the
+        COLMAP CUDA kernels. RTX 30/40/50 series should work.
+        Result is cached so the probe only runs once per session.
+        """
+        global _colmap_gpu_probe_result
+        if _colmap_gpu_probe_result is not None:
+            return _colmap_gpu_probe_result
+
+        logger.info("[RigSfM] Probing COLMAP GPU support...")
+        try:
+            tmpdir = tempfile.mkdtemp(prefix="colmap_gpu_probe_")
+            db_path = os.path.join(tmpdir, "probe.db")
+            img_dir = os.path.join(tmpdir, "images")
+            os.makedirs(img_dir)
+
+            # Create a tiny test image
+            test_img = np.random.randint(50, 200, (200, 200, 3), dtype=np.uint8)
+            cv2.imwrite(os.path.join(img_dir, "probe.jpg"), test_img)
+
+            run_cwd, run_env = self._get_cli_env(colmap_bin)
+            result = subprocess.run(
+                [colmap_bin, "feature_extractor",
+                 "--database_path", db_path,
+                 "--image_path", img_dir,
+                 "--FeatureExtraction.use_gpu", "1"],
+                capture_output=True, text=True, timeout=30,
+                cwd=run_cwd, env=run_env
+            )
+
+            stderr = result.stderr or ""
+            # Check for CUDA kernel incompatibility
+            if "no kernel image is available" in stderr:
+                logger.warning(
+                    "[RigSfM] COLMAP GPU probe FAILED: CUDA kernels not compatible "
+                    "with this GPU. Falling back to CPU mode. "
+                    "(GPU feature extraction requires RTX 30/40/50 series or compatible)"
+                )
+                _colmap_gpu_probe_result = False
+            elif "FAILURE" in stderr or result.returncode != 0:
+                logger.warning("[RigSfM] COLMAP GPU probe FAILED (error). Using CPU mode.")
+                _colmap_gpu_probe_result = False
+            else:
+                logger.info("[RigSfM] COLMAP GPU probe SUCCESS - GPU acceleration available")
+                _colmap_gpu_probe_result = True
+
+            # Cleanup
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception as e:
+            logger.warning(f"[RigSfM] COLMAP GPU probe failed with exception: {e}. Using CPU mode.")
+            _colmap_gpu_probe_result = False
+
+        return _colmap_gpu_probe_result
+
+    def _get_effective_gpu_setting(self, colmap_bin: str) -> Tuple[str, str]:
+        """Return the effective GPU flag value and gpu_index for COLMAP CLI.
+        
+        If user requested GPU and it's available, returns ("1", gpu_index).
+        If GPU was requested but probe fails, falls back to CPU with a warning.
+        
+        Returns:
+            Tuple of (use_gpu_str, gpu_index_str)
+        """
+        if not self.settings.use_gpu:
+            return ("0", "-1")
+
+        if self._probe_colmap_gpu(colmap_bin):
+            gpu_index = str(getattr(self.settings, 'gpu_index', -1))
+            return ("1", gpu_index)
+        else:
+            return ("0", "-1")
+
+    def _run_cli(self, executable: str, args: List[str], progress_callback: Optional[Callable], step_name: str):
+        cmd = [executable] + args
+        logger.info("[RigSfM] Running CLI: %s", " ".join(cmd))
+        if progress_callback:
+            progress_callback(step_name)
+        run_cwd, run_env = self._get_cli_env(executable)
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=run_cwd, env=run_env)
         if result.returncode != 0:
             raise RuntimeError(
@@ -385,6 +468,7 @@ class RigColmapIntegrator:
             pycolmap.set_random_seed(0)
 
             if use_external_colmap:
+                use_gpu_str, gpu_idx_str = self._get_effective_gpu_setting(colmap_bin)
                 self._run_cli(
                     colmap_bin,
                     [
@@ -393,7 +477,8 @@ class RigColmapIntegrator:
                         "--image_path", str(perspectives_dir),
                         "--ImageReader.single_camera_per_folder", "1",
                         "--ImageReader.mask_path", str(perspectives_mask_dir),
-                        "--SiftExtraction.use_gpu", "1" if self.settings.use_gpu else "0",
+                        "--FeatureExtraction.use_gpu", use_gpu_str,
+                        "--FeatureExtraction.gpu_index", gpu_idx_str,
                     ],
                     progress_callback,
                     "Extracting features (COLMAP CLI)..."
@@ -424,7 +509,8 @@ class RigColmapIntegrator:
                         "--database_path", str(database_path),
                         "--SequentialMatching.overlap", "12",
                         "--SequentialMatching.loop_detection", "1",
-                        "--SiftMatching.use_gpu", "1" if self.settings.use_gpu else "0",
+                        "--FeatureMatching.use_gpu", use_gpu_str,
+                        "--FeatureMatching.gpu_index", gpu_idx_str,
                     ],
                     progress_callback,
                     "Matching features (COLMAP CLI)..."

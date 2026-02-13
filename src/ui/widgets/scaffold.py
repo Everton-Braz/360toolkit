@@ -108,7 +108,8 @@ class FormRow(QFrame):
         label = QLabel(label_text)
         label.setObjectName("formRowLabel")
         row.addWidget(label)
-        row.addWidget(control, 1)
+        row.addWidget(control, 0)
+        row.addStretch(1)
         layout.addLayout(row)
 
         if hint:

@@ -1129,7 +1129,10 @@ class MainWindow(QMainWindow):
 
         self.export_realityscan_check = QCheckBox("Export to RealityScan Format")
         self.export_realityscan_check.setChecked(False)
-        self.export_realityscan_check.setToolTip("images/ + sparse/ + optional database.db, with masks renamed to *_mask.png")
+        self.export_realityscan_check.setToolTip(
+            "Without COLMAP: exports images/ (+ optional *_mask.png). "
+            "With COLMAP: also exports sparse/ and optional database.db"
+        )
         card_export.addWidget(self.export_realityscan_check)
         
         self.export_include_masks_check = QCheckBox("Include Masks in Export")
@@ -1339,6 +1342,7 @@ class MainWindow(QMainWindow):
         """Lightweight inline validation checks for each stage."""
         input_path = self.input_file_edit.text().strip()
         output_path = self.output_dir_edit.text().strip()
+        input_obj = Path(input_path) if input_path else None
 
         if stage_index in (0, 1, 2, 3, 4, 5, 6):
             if not input_path:
@@ -1355,6 +1359,11 @@ class MainWindow(QMainWindow):
                 self.log_message("[WARN] Extraction validation: End time must be greater than start time.")
                 self._set_control_status("Invalid extraction time range", "warn")
                 return
+
+        if stage_index == 1 and input_obj is not None and input_obj.exists() and input_obj.is_dir():
+            self.log_message("[WARN] Extraction validation: Stage 1 expects a video file (.insv/.mp4), not a folder.")
+            self._set_control_status("Stage 1 requires a video file", "warn")
+            return
 
         if stage_index in (2, 3) and self.skip_transform_check.isChecked():
             self.log_message("[INFO] Split validation: Transform is skipped (direct masking mode enabled).")
@@ -1490,6 +1499,20 @@ class MainWindow(QMainWindow):
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.browse_input_file)
         file_menu.addAction(open_action)
+        open_output_action = QAction("Open &Output Folder", self)
+        open_output_action.setShortcut("Ctrl+Shift+O")
+        open_output_action.triggered.connect(self.open_output_folder)
+        file_menu.addAction(open_output_action)
+
+        file_menu.addSeparator()
+        export_simple_action = QAction("Export RealityScan (&Simple: Images + Masks)", self)
+        export_simple_action.triggered.connect(self.export_realityscan_simple)
+        file_menu.addAction(export_simple_action)
+
+        export_meta_action = QAction("Export RealityScan (&With COLMAP Metadata)", self)
+        export_meta_action.triggered.connect(self.export_realityscan_with_metadata)
+        file_menu.addAction(export_meta_action)
+
         file_menu.addSeparator()
         exit_action = QAction("E&xit", self)
         exit_action.setShortcut("Ctrl+Q")
@@ -1616,6 +1639,12 @@ class MainWindow(QMainWindow):
     # CONFIG GET/SET
     # ========================================================================
     def get_current_config(self) -> dict:
+        stage2_method = self.stage2_method_combo.currentData()
+        if stage2_method == 'cubemap':
+            stage2_format = self.cubemap_format_combo.currentData()
+        else:
+            stage2_format = self.stage2_format_combo.currentData()
+
         return {
             'input_file': self.input_file_edit.text(),
             'output_dir': self.output_dir_edit.text(),
@@ -1623,9 +1652,13 @@ class MainWindow(QMainWindow):
             'fps_interval': self.fps_spin.value(),
             'extraction_method': self.extraction_method_combo.currentData(),
             'sdk_quality': self.sdk_quality_combo.currentData(),
+            'sdk_resolution': self.sdk_resolution_combo.currentData(),
             'output_format': self.output_format_combo.currentData(),
             'stage2_enabled': self.stage2_enable.isChecked(),
             'transform_type': self.stage2_method_combo.currentData(),
+            'stage2_format': stage2_format,
+            'stage2_format_perspective': self.stage2_format_combo.currentData(),
+            'stage2_format_cubemap': self.cubemap_format_combo.currentData(),
             'output_width': self.stage2_width_spin.value(),
             'output_height': self.stage2_height_spin.value(),
             'cubemap_tile_width': self.cubemap_tile_width_spin.value(),
@@ -1680,12 +1713,43 @@ class MainWindow(QMainWindow):
                 methods = list(EXTRACTION_METHODS.keys())
                 if config['extraction_method'] in methods:
                     self.extraction_method_combo.setCurrentIndex(methods.index(config['extraction_method']))
+            if 'sdk_quality' in config:
+                idx = self.sdk_quality_combo.findData(config['sdk_quality'])
+                if idx >= 0:
+                    self.sdk_quality_combo.setCurrentIndex(idx)
+            if 'sdk_resolution' in config:
+                idx = self.sdk_resolution_combo.findData(config['sdk_resolution'])
+                if idx >= 0:
+                    self.sdk_resolution_combo.setCurrentIndex(idx)
+            if 'output_format' in config:
+                idx = self.output_format_combo.findData(config['output_format'])
+                if idx >= 0:
+                    self.output_format_combo.setCurrentIndex(idx)
             if 'stage2_enabled' in config:
                 self.stage2_enable.setChecked(config['stage2_enabled'])
+            if 'transform_type' in config:
+                idx = self.stage2_method_combo.findData(config['transform_type'])
+                if idx >= 0:
+                    self.stage2_method_combo.setCurrentIndex(idx)
             if 'output_width' in config:
                 self.stage2_width_spin.setValue(config['output_width'])
             if 'output_height' in config:
                 self.stage2_height_spin.setValue(config['output_height'])
+            if 'stage2_format' in config:
+                idx_p = self.stage2_format_combo.findData(config['stage2_format'])
+                if idx_p >= 0:
+                    self.stage2_format_combo.setCurrentIndex(idx_p)
+                idx_c = self.cubemap_format_combo.findData(config['stage2_format'])
+                if idx_c >= 0:
+                    self.cubemap_format_combo.setCurrentIndex(idx_c)
+            if 'stage2_format_perspective' in config:
+                idx = self.stage2_format_combo.findData(config['stage2_format_perspective'])
+                if idx >= 0:
+                    self.stage2_format_combo.setCurrentIndex(idx)
+            if 'stage2_format_cubemap' in config:
+                idx = self.cubemap_format_combo.findData(config['stage2_format_cubemap'])
+                if idx >= 0:
+                    self.cubemap_format_combo.setCurrentIndex(idx)
             if 'skip_transform' in config:
                 self.skip_transform_check.setChecked(config['skip_transform'])
             if 'stage3_enabled' in config:
@@ -1849,6 +1913,131 @@ class MainWindow(QMainWindow):
         dirname = QFileDialog.getExistingDirectory(self, "Select Output Directory")
         if dirname:
             self.output_dir_edit.setText(dirname)
+
+    def open_output_folder(self):
+        output_dir = self.output_dir_edit.text().strip()
+        if not output_dir:
+            QMessageBox.warning(self, "Output Required", "Please configure the output directory first.")
+            return
+
+        output_path = Path(output_dir)
+        if not output_path.exists():
+            QMessageBox.warning(self, "Not Found", f"Output folder does not exist:\n{output_path}")
+            return
+
+        try:
+            if os.name == 'nt':
+                os.startfile(str(output_path))
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', str(output_path)])
+            else:
+                subprocess.Popen(['xdg-open', str(output_path)])
+            self.log_message(f"Opened output folder: {output_path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Open Folder Failed", f"Could not open output folder:\n{e}")
+
+    def export_realityscan_simple(self):
+        """Export RealityScan package as a simple flat folder (images + masks only)."""
+        output_dir = self.output_dir_edit.text().strip()
+        if not output_dir:
+            QMessageBox.warning(self, "Output Required", "Please configure the output directory first.")
+            return
+
+        output_root = Path(output_dir)
+        if not output_root.exists():
+            QMessageBox.warning(self, "Not Found", f"Output folder does not exist:\n{output_root}")
+            return
+
+        from src.pipeline.batch_orchestrator import PipelineWorker
+
+        worker = PipelineWorker({
+            'output_dir': str(output_root),
+            'export_include_masks': self.export_include_masks_check.isChecked(),
+        })
+        result = worker._execute_realityscan_export_only()
+
+        if result.get('success'):
+            export_path = Path(result.get('realityscan_export', output_root / 'realityscan_export'))
+            self.log_message(f"[OK] RealityScan simple export complete: {export_path}")
+            self._set_control_status("RealityScan export complete", "ok")
+            QMessageBox.information(
+                self,
+                "RealityScan Export Complete",
+                f"Simple export created successfully:\n{export_path}\n\n"
+                "Contains images and masks in the same folder."
+            )
+        else:
+            error = result.get('error', 'Unknown error')
+            self.log_message(f"[FAIL] RealityScan simple export failed: {error}")
+            self._set_control_status("RealityScan export failed", "error")
+            QMessageBox.warning(self, "RealityScan Export Failed", f"Simple export failed:\n{error}")
+
+    def export_realityscan_with_metadata(self):
+        """Export RealityScan package with COLMAP metadata (sparse model), plus images/masks."""
+        output_dir = self.output_dir_edit.text().strip()
+        if not output_dir:
+            QMessageBox.warning(self, "Output Required", "Please configure the output directory first.")
+            return
+
+        output_root = Path(output_dir)
+        if not output_root.exists():
+            QMessageBox.warning(self, "Not Found", f"Output folder does not exist:\n{output_root}")
+            return
+
+        sparse_root = output_root / 'reconstruction' / 'sparse'
+        colmap_dir = None
+
+        candidates = [sparse_root / '0', sparse_root / '1', sparse_root]
+        for candidate in candidates:
+            if candidate.exists() and ((candidate / 'images.txt').exists() or (candidate / 'images.bin').exists()):
+                colmap_dir = candidate
+                break
+
+        if colmap_dir is None:
+            QMessageBox.warning(
+                self,
+                "COLMAP Metadata Not Found",
+                "No COLMAP sparse model was found in reconstruction output.\n"
+                "Run reconstruction first, or use 'Export RealityScan (Simple)'."
+            )
+            return
+
+        images_dir = output_root / 'reconstruction' / 'images'
+        if not images_dir.exists():
+            images_dir = output_root / 'perspective_views'
+        if not images_dir.exists():
+            QMessageBox.warning(self, "Images Not Found", "Could not find perspective images to export.")
+            return
+
+        masks_dir = output_root / 'masks'
+        export_masks_dir = str(masks_dir) if (self.export_include_masks_check.isChecked() and masks_dir.exists()) else None
+
+        from src.premium.pose_transfer_integration import export_for_realityscan
+
+        export_dir = output_root / 'realityscan_export_with_metadata'
+        database_path = sparse_root / 'database.db'
+        ok = export_for_realityscan(
+            colmap_dir=str(colmap_dir),
+            images_dir=str(images_dir),
+            masks_dir=export_masks_dir,
+            output_dir=str(export_dir),
+            database_path=str(database_path) if database_path.exists() else None,
+            flat_folder=True,
+        )
+
+        if ok:
+            self.log_message(f"[OK] RealityScan metadata export complete: {export_dir}")
+            self._set_control_status("RealityScan metadata export complete", "ok")
+            QMessageBox.information(
+                self,
+                "RealityScan Export Complete",
+                f"Metadata export created successfully:\n{export_dir}\n\n"
+                "Contains images+masks in one folder plus sparse metadata."
+            )
+        else:
+            self.log_message("[FAIL] RealityScan metadata export failed")
+            self._set_control_status("RealityScan metadata export failed", "error")
+            QMessageBox.warning(self, "RealityScan Export Failed", "Metadata export failed.")
     
     def browse_lichtfeld_path(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1878,6 +2067,14 @@ class MainWindow(QMainWindow):
         from src.extraction import FrameExtractor
         input_file = self.input_file_edit.text()
         if not input_file or not Path(input_file).exists():
+            return
+        if Path(input_file).is_dir():
+            self.file_metadata_label.setText(
+                "Folder input detected. Stage 1 analysis expects a video file (.insv/.mp4)."
+            )
+            self.file_metadata_label.setProperty("state", "warn")
+            self._refresh_widget_style(self.file_metadata_label)
+            self.log_message("Input is a folder. Skip video analysis and use Split/Mask stages.")
             return
         
         extractor = FrameExtractor()
@@ -1934,6 +2131,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not Found", f"Input file not found:\n{input_file}")
             self._set_control_status("Input file not found", "error")
             return
+        if self.stage1_enable.isChecked() and Path(input_file).is_dir():
+            QMessageBox.warning(
+                self,
+                "Invalid Input for Extraction",
+                "Stage 1 (Frame Extraction) expects a video file (.insv/.mp4), not a folder.\n"
+                "Either select a video file or disable Stage 1 and run Split/Mask on existing images."
+            )
+            self._set_control_status("Stage 1 requires a video file", "warn")
+            return
         
         stage2_method = self.stage2_method_combo.currentData()
         
@@ -1951,6 +2157,8 @@ class MainWindow(QMainWindow):
             'use_rig_sfm': self.stage4_enable.isChecked() and self.use_rig_sfm_check.isChecked(),
             'train_lighting': self.stage5_enable.isChecked() and self.train_lichtfeld_check.isChecked(),
             'lichtfeld_path': self.lichtfeld_path_edit.text() or None,
+            'export_realityscan': self.export_realityscan_check.isChecked(),
+            'export_include_masks': self.export_include_masks_check.isChecked(),
             'skip_intermediate_save': skip_intermediate,
             'fps': self.fps_spin.value(),
             'extraction_method': self.extraction_method_combo.currentData(),
@@ -2043,8 +2251,6 @@ class MainWindow(QMainWindow):
                 'glomap_path': self.glomap_path_edit.text().strip() or None,
                 'mapping_backend': self.mapping_backend_combo.currentData(),
                 'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
-                'export_realityscan': self.export_realityscan_check.isChecked(),
-                'export_include_masks': self.export_include_masks_check.isChecked(),
                 'export_sidecars': self.export_sidecar_check.isChecked(),
             })
         

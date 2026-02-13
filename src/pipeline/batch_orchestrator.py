@@ -407,6 +407,24 @@ class PipelineWorker(QThread):
                     results['stages_executed'] = stages_executed
                     self.finished.emit(results)
                     return
+            elif self.config.get('export_realityscan', False):
+                if self.is_cancelled:
+                    logger.info("Pipeline cancelled before RealityScan export")
+                    results['stages_executed'] = stages_executed
+                    self.finished.emit({'success': False, 'error': 'Cancelled by user'})
+                    return
+
+                logger.info("=== Starting RealityScan Export (No COLMAP) ===")
+                export_result = self._execute_realityscan_export_only()
+                results['realityscan_export'] = export_result
+                self.stage_complete.emit(4, export_result)
+
+                if not export_result.get('success'):
+                    self.error.emit(f"RealityScan export failed: {export_result.get('error')}")
+                    results['success'] = False
+                    results['stages_executed'] = stages_executed
+                    self.finished.emit(results)
+                    return
 
             # Training (Lichtfeld Studio)
             if self.config.get('train_lighting', False):
@@ -478,6 +496,8 @@ class PipelineWorker(QThread):
             if method.lower() == 'dual_fisheye':
                 logger.info("Dual-Fisheye Export selected - extracting raw fisheye frames")
                 method = 'opencv'
+            elif method.lower() == 'ffmpeg':
+                method = 'ffmpeg_stitched'
             
             # Use SDK extractor if method is 'sdk' or 'sdk_stitching' (PRIMARY METHOD)
             if method.lower() in ['sdk', 'sdk_stitching']:
@@ -486,7 +506,7 @@ class PipelineWorker(QThread):
                 if not self.sdk_extractor.is_available():
                     logger.warning("WARNING: Insta360 MediaSDK not available")
                     logger.warning("INFO: Auto-fallback to FFmpeg v360 stitching (SDK-quality)")
-                    method = 'ffmpeg'
+                    method = 'ffmpeg_stitched'
                 else:
                     logger.info("INFO: Insta360 MediaSDK detected - using SDK stitching")
                     
@@ -557,7 +577,7 @@ class PipelineWorker(QThread):
                         else:
                             # No frames produced - fallback to FFmpeg
                             logger.warning("INFO: No frames extracted by SDK timeout - Falling back to FFmpeg method")
-                            method = 'ffmpeg'
+                            method = 'ffmpeg_stitched'
                     
                     except Exception as sdk_error:
                         # Other SDK errors - check if any frames were created anyway
@@ -582,7 +602,7 @@ class PipelineWorker(QThread):
                             raise sdk_error
                         
                         logger.warning("INFO: Falling back to FFmpeg method")
-                        method = 'ffmpeg'
+                        method = 'ffmpeg_stitched'
             
             # Use standard FrameExtractor (FFmpeg or OpenCV)
             result = self.frame_extractor.extract_frames(
@@ -1770,6 +1790,57 @@ class PipelineWorker(QThread):
 
         except Exception as e:
             logger.error(f"Reconstruction error: {e}", exc_info=True)
+            return {'success': False, 'error': str(e)}
+
+    def _execute_realityscan_export_only(self) -> Dict:
+        """Export split/masked images for RealityScan without requiring COLMAP output."""
+        try:
+            from src.premium.pose_transfer_integration import export_for_realityscan
+
+            output_root = Path(self.config['output_dir'])
+            realityscan_dir = output_root / 'realityscan_export'
+
+            images_dir = output_root / 'perspective_views'
+            if not images_dir.exists():
+                discovered = self.discover_stage_input_folder(3, self.config['output_dir'])
+                if discovered:
+                    images_dir = discovered
+                else:
+                    return {
+                        'success': False,
+                        'error': 'RealityScan export requires split images. Run Stage 2 first or set stage3_input_dir.'
+                    }
+
+            export_masks_dir = None
+            if self.config.get('export_include_masks', True):
+                masks_dir = output_root / 'masks'
+                if masks_dir.exists():
+                    export_masks_dir = masks_dir
+
+            ok = export_for_realityscan(
+                colmap_dir=None,
+                images_dir=str(images_dir),
+                masks_dir=str(export_masks_dir) if export_masks_dir else None,
+                output_dir=str(realityscan_dir),
+                database_path=None,
+                flat_folder=True,
+            )
+
+            if not ok:
+                return {'success': False, 'error': 'RealityScan export-only failed'}
+
+            image_count = 0
+            if realityscan_dir.exists():
+                image_count = len([p for p in realityscan_dir.glob('*.*') if p.is_file()])
+
+            return {
+                'success': True,
+                'realityscan_export': str(realityscan_dir),
+                'images_exported': image_count,
+                'mode': 'images_masks_only'
+            }
+        except Exception as e:
+            logger.error(f"RealityScan export-only error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
 
     def _execute_stage5(self, stage4_result: Dict) -> Dict:
