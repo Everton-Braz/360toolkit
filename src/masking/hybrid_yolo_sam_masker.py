@@ -5,6 +5,7 @@ Best of both worlds: YOLO detection + SAM segmentation
 """
 
 import logging
+import gc
 import cv2
 import numpy as np
 from pathlib import Path
@@ -137,7 +138,7 @@ class HybridYOLOSAMMasker:
         # Load YOLO for detection
         logger.info(f"[Hybrid] Loading YOLO: {yolo_model}")
         self.yolo = YOLO(yolo_model)
-        self.yolo.to(self.device)
+        self._move_yolo_to_device(self.device)
         
         # Load SAM for segmentation
         logger.info(f"[Hybrid] Loading SAM: {sam_checkpoint}")
@@ -152,7 +153,7 @@ class HybridYOLOSAMMasker:
             model_type = 'vit_l'
         
         sam = sam_model_registry[model_type](checkpoint=str(sam_checkpoint_path))
-        self.sam_predictor = SamPredictor(sam.to(self.device))
+        self.sam_predictor = SamPredictor(self._move_sam_to_device(sam, self.device))
         
         # Category configuration
         self.enabled_categories = {
@@ -184,14 +185,16 @@ class HybridYOLOSAMMasker:
                 cc_str = "unknown"
             
             logger.info(f"[Hybrid] GPU: {device_name} ({cc_str})")
+            self._cuda_cleanup()
             
             # Test actual GPU kernel execution (catches SM compatibility issues like sm_120)
             try:
-                test_tensor = torch.zeros(1, device='cuda')
-                test_result = test_tensor + 1
-                del test_tensor, test_result
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
+                with torch.no_grad():
+                    test_tensor = torch.zeros(1, device='cuda')
+                    test_result = test_tensor + 1
+                    del test_tensor, test_result
+                    torch.cuda.synchronize()
+                self._cuda_cleanup()
                 logger.info("[Hybrid] [OK] GPU compatibility verified - CUDA operations successful")
                 return 'cuda'
             except RuntimeError as e:
@@ -199,14 +202,76 @@ class HybridYOLOSAMMasker:
                 if "no kernel image" in error_msg or "sm_" in error_msg or "cuda capability" in error_msg:
                     logger.warning(f"[Hybrid] GPU architecture incompatibility: {device_name} ({cc_str})")
                     logger.warning(f"[Hybrid] PyTorch lacks kernel for this GPU. Need PyTorch 2.7+ for Blackwell.")
+                    logger.warning("[Hybrid] => Falling back to CPU")
+                    self._cuda_cleanup()
+                    return 'cpu'
+                if "out of memory" in error_msg:
+                    logger.warning("[Hybrid] GPU probe hit OOM; clearing cache and retrying once")
+                    self._cuda_cleanup()
+                    try:
+                        with torch.no_grad():
+                            retry_tensor = torch.zeros(1, device='cuda')
+                            retry_result = retry_tensor + 1
+                            del retry_tensor, retry_result
+                            torch.cuda.synchronize()
+                        self._cuda_cleanup()
+                        logger.info("[Hybrid] [OK] GPU compatibility verified after OOM recovery")
+                        return 'cuda'
+                    except Exception as retry_error:
+                        logger.warning(f"[Hybrid] GPU retry after OOM failed: {retry_error}")
                 else:
                     logger.warning(f"[Hybrid] GPU test failed: {e}")
                 logger.warning("[Hybrid] => Falling back to CPU")
-                torch.cuda.empty_cache()
+                self._cuda_cleanup()
                 return 'cpu'
         except Exception as e:
             logger.warning(f"[Hybrid] CUDA detection error: {e}. Using CPU.")
             return 'cpu'
+
+    def _cuda_cleanup(self):
+        """Best-effort CUDA memory cleanup for transient OOM recovery."""
+        if 'torch' not in globals():
+            return
+        try:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _move_yolo_to_device(self, device: str):
+        """Move YOLO model to target device with OOM recovery."""
+        try:
+            self.yolo.to(device)
+        except RuntimeError as e:
+            if device == 'cuda' and 'out of memory' in str(e).lower():
+                logger.warning("[Hybrid] OOM while moving YOLO to CUDA, retrying after cleanup")
+                self._cuda_cleanup()
+                self.yolo.to(device)
+            else:
+                raise
+
+    def _move_sam_to_device(self, sam_model, device: str):
+        """Move SAM model to target device with OOM recovery and safe fallback."""
+        try:
+            return sam_model.to(device)
+        except RuntimeError as e:
+            if device == 'cuda' and 'out of memory' in str(e).lower():
+                logger.warning("[Hybrid] OOM while moving SAM to CUDA, retrying after cleanup")
+                self._cuda_cleanup()
+                try:
+                    return sam_model.to(device)
+                except RuntimeError as retry_error:
+                    logger.warning(f"[Hybrid] SAM CUDA retry failed: {retry_error}")
+                    logger.warning("[Hybrid] Falling back to CPU for SAM model")
+                    self.device = 'cpu'
+                    self.yolo.to('cpu')
+                    return sam_model.to('cpu')
+            raise
     
     def _fallback_to_cpu(self):
         """Switch YOLO and SAM models to CPU after a CUDA runtime error."""

@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import os
 import tempfile
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,17 @@ class RigColmapIntegrator:
         custom = getattr(self.settings, 'sphere_alignment_path', None)
         if custom:
             return str(custom)
+
+        # Prefer bundled COLMAP binary in project (Windows build used by this app)
+        try:
+            project_root = Path(__file__).resolve().parents[2]
+            bundled_name = "colmap.exe" if os.name == "nt" else "colmap"
+            bundled_colmap = project_root / "bin" / "colmap" / bundled_name
+            if bundled_colmap.exists():
+                return str(bundled_colmap)
+        except Exception:
+            pass
+
         return "colmap"
 
     def _resolve_glomap_binary(self) -> Optional[str]:
@@ -376,10 +388,31 @@ class RigColmapIntegrator:
         run_cwd, run_env = self._get_cli_env(executable)
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=run_cwd, env=run_env)
         if result.returncode != 0:
+            # Keep error payload readable in logs/UI for long COLMAP runs.
+            stdout_tail = (result.stdout or "")[-4000:]
+            stderr_tail = (result.stderr or "")[-8000:]
+            if self._is_windows_interrupted_code(result.returncode):
+                raise RuntimeError(
+                    f"{step_name} interrupted (code {result.returncode}, hex {result.returncode & 0xFFFFFFFF:#010x})."
+                )
             raise RuntimeError(
-                f"{step_name} failed (code {result.returncode})\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+                f"{step_name} failed (code {result.returncode}, hex {result.returncode & 0xFFFFFFFF:#010x})"
+                f"\nSTDOUT (tail):\n{stdout_tail}\nSTDERR (tail):\n{stderr_tail}"
             )
         return result
+
+    def _extract_return_code(self, text: str) -> Optional[int]:
+        match = re.search(r"code\s+(-?\d+)", text)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    def _is_windows_interrupted_code(self, code: int) -> bool:
+        # 0xC000013A (3221225786 / -1073741510): terminated by Ctrl+C/Break or external interruption.
+        return code in (3221225786, -1073741510)
 
     def _normalize_sparse_output(self, sparse_path: Path) -> Path:
         direct_model = sparse_path / "cameras.bin"
@@ -396,16 +429,31 @@ class RigColmapIntegrator:
         if nested.exists():
             return nested
 
-        candidates = [p for p in sparse_path.iterdir() if p.is_dir() and (p / "cameras.bin").exists()]
+        candidates = [path for path in sparse_path.iterdir() if path.is_dir() and (path / "cameras.bin").exists()]
         if candidates:
             return candidates[0]
 
         return sparse_path / "0"
 
+    def _looks_like_perspective_input(self, image_paths: List[Path], input_dir: Path) -> bool:
+        """Heuristic: Stage 2 outputs are already perspective views and should not be re-rendered."""
+        if input_dir.name.lower() in {"perspective_views", "stage2_perspectives"}:
+            return True
+        sample = image_paths[: min(10, len(image_paths))]
+        for image_path in sample:
+            stem = image_path.stem.lower()
+            if "_cam_" in stem or stem.startswith("cam"):
+                return True
+        return False
+
+    def _count_images_recursive(self, root: Path) -> int:
+        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+        return sum(1 for path in root.rglob("*") if path.is_file() and path.suffix.lower() in exts)
+
     def run_alignment(
         self,
         frames_dir: Path,
-        masks_dir: Optional[Path], # Unused for input masking in this flow, but kept for signature
+        masks_dir: Optional[Path],
         output_dir: Path,
         progress_callback: Optional[Callable] = None
     ) -> Dict:
@@ -426,95 +474,153 @@ class RigColmapIntegrator:
             database_path.unlink()
 
         # Gather inputs
-        pano_files = sorted(list(frames_dir.glob("*.jpg")) + list(frames_dir.glob("*.png")))
-        if not pano_files:
+        input_images = sorted(
+            list(frames_dir.glob("*.jpg")) +
+            list(frames_dir.glob("*.jpeg")) +
+            list(frames_dir.glob("*.png"))
+        )
+        if not input_images:
             return {'success': False, 'error': 'No input images found'}
-        
-        # Quick check first file for valid format
-        try:
-            test_img = Image.open(pano_files[0])
-            test_w, test_h = test_img.size
-            test_aspect = test_w / test_h
-            if abs(test_aspect - 2.0) > 0.1 and abs(test_aspect - (16/9)) > 0.1:
-                return {
-                    'success': False, 
-                    'error': f'Invalid frame format: {test_w}x{test_h} (aspect {test_aspect:.2f}:1). '\
-                             f'Rig SfM requires 2:1 equirectangular or 16:9 panoramic frames. '\
-                             f'Please re-extract frames using SDK with equirectangular output format.'\
-                }
-        except Exception as e:
-            return {'success': False, 'error': f'Could not read test frame: {e}'}
 
-        logger.info(f"Generating perspective views for {len(pano_files)} frames...")
-        if progress_callback:
-            progress_callback("Generating virtual perspective views...")
+        using_existing_perspectives = self._looks_like_perspective_input(input_images, frames_dir)
+        
+        # Validate only when we expect pano/equirectangular input
+        if not using_existing_perspectives:
+            try:
+                test_img = Image.open(input_images[0])
+                test_w, test_h = test_img.size
+                test_aspect = test_w / test_h
+                if abs(test_aspect - 2.0) > 0.1 and abs(test_aspect - (16/9)) > 0.1:
+                    return {
+                        'success': False,
+                        'error': f'Invalid frame format: {test_w}x{test_h} (aspect {test_aspect:.2f}:1). '
+                                 f'Expected equirectangular input (2:1 or 16:9 pano) for virtual rendering.'
+                    }
+            except Exception as e:
+                return {'success': False, 'error': f'Could not read test frame: {e}'}
 
         try:
             pycolmap = _import_pycolmap()
             mapping_backend = getattr(self.settings, 'mapping_backend', 'colmap')
-            use_external_colmap = bool(getattr(self.settings, 'sphere_alignment_path', None))
             colmap_bin = self._resolve_colmap_binary()
+            colmap_path_obj = Path(colmap_bin)
+            colmap_cli_available = colmap_path_obj.exists() or (shutil.which(colmap_bin) is not None)
+            use_external_colmap = mapping_backend == 'colmap' and colmap_cli_available
             glomap_bin = self._resolve_glomap_binary()
 
-            # 1. Render Perspectives
-            rig_config = self.render_perspective_images(
-                pano_files, 
-                perspectives_dir, 
-                perspectives_mask_dir, 
-                progress_callback
-            )
+            if use_external_colmap:
+                logger.info(f"[RigSfM] Using COLMAP CLI backend: {colmap_bin}")
+            else:
+                logger.info("[RigSfM] Using pycolmap backend")
+
+            # 1. Prepare perspectives input
+            rig_config = None
+            if using_existing_perspectives:
+                perspectives_dir = frames_dir
+                if masks_dir and masks_dir.exists() and self._count_images_recursive(masks_dir) > 0:
+                    perspectives_mask_dir = masks_dir
+                logger.info(f"Using existing perspective views ({self._count_images_recursive(perspectives_dir)} images): {perspectives_dir}")
+            else:
+                logger.info(f"Generating perspective views for {len(input_images)} frames...")
+                if progress_callback:
+                    progress_callback("Generating virtual perspective views...")
+                rig_config = self.render_perspective_images(
+                    input_images,
+                    perspectives_dir,
+                    perspectives_mask_dir,
+                    progress_callback
+                )
             
             # 2. Feature Extraction
             pycolmap.set_random_seed(0)
 
             if use_external_colmap:
                 use_gpu_str, gpu_idx_str = self._get_effective_gpu_setting(colmap_bin)
+                logger.info(f"[RigSfM] Feature extraction GPU flag: {use_gpu_str} (gpu_index={gpu_idx_str})")
+                feature_args = [
+                    "feature_extractor",
+                    "--database_path", str(database_path),
+                    "--image_path", str(perspectives_dir),
+                    "--FeatureExtraction.use_gpu", use_gpu_str,
+                    "--FeatureExtraction.gpu_index", gpu_idx_str,
+                ]
+                if using_existing_perspectives:
+                    feature_args += ["--ImageReader.single_camera", "1"]
+                else:
+                    feature_args += ["--ImageReader.single_camera_per_folder", "1"]
+                if perspectives_mask_dir.exists() and self._count_images_recursive(perspectives_mask_dir) > 0:
+                    feature_args += ["--ImageReader.mask_path", str(perspectives_mask_dir)]
+
                 self._run_cli(
                     colmap_bin,
-                    [
-                        "feature_extractor",
-                        "--database_path", str(database_path),
-                        "--image_path", str(perspectives_dir),
-                        "--ImageReader.single_camera_per_folder", "1",
-                        "--ImageReader.mask_path", str(perspectives_mask_dir),
-                        "--FeatureExtraction.use_gpu", use_gpu_str,
-                        "--FeatureExtraction.gpu_index", gpu_idx_str,
-                    ],
+                    feature_args,
                     progress_callback,
                     "Extracting features (COLMAP CLI)..."
                 )
             else:
                 if progress_callback:
                     progress_callback("Extracting features (pycolmap)...")
-
+                reader_options = {}
+                if perspectives_mask_dir.exists() and self._count_images_recursive(perspectives_mask_dir) > 0:
+                    reader_options["mask_path"] = str(perspectives_mask_dir)
                 pycolmap.extract_features(
                     str(database_path),
                     str(perspectives_dir),
-                    reader_options={"mask_path": str(perspectives_mask_dir)},
-                    camera_mode=pycolmap.CameraMode.PER_FOLDER
+                    reader_options=reader_options,
+                    camera_mode=pycolmap.CameraMode.SINGLE if using_existing_perspectives else pycolmap.CameraMode.PER_FOLDER
                 )
             
             # 3. Apply Rig Config
-            # pycolmap.Database has no constructor args - use open() static method
-            db = pycolmap.Database.open(str(database_path))
-            pycolmap.apply_rig_config([rig_config], db)
-            db.close()
+            if rig_config is not None:
+                db = pycolmap.Database.open(str(database_path))
+                pycolmap.apply_rig_config([rig_config], db)
+                db.close()
                 
             # 4. Matching
             if use_external_colmap:
-                self._run_cli(
-                    colmap_bin,
-                    [
+                logger.info(f"[RigSfM] Matching GPU flag: {use_gpu_str} (gpu_index={gpu_idx_str})")
+                matcher_args = [
+                    "sequential_matcher",
+                    "--database_path", str(database_path),
+                    "--SequentialMatching.overlap", "12",
+                    "--SequentialMatching.loop_detection", "1",
+                    "--FeatureMatching.use_gpu", use_gpu_str,
+                    "--FeatureMatching.gpu_index", gpu_idx_str,
+                ]
+                try:
+                    self._run_cli(
+                        colmap_bin,
+                        matcher_args,
+                        progress_callback,
+                        "Matching features (COLMAP CLI)..."
+                    )
+                except RuntimeError as match_error:
+                    match_error_text = str(match_error)
+                    match_code = self._extract_return_code(match_error_text)
+                    if match_code is not None and self._is_windows_interrupted_code(match_code):
+                        raise RuntimeError(
+                            "Matching was interrupted by user/system signal (0xC000013A). "
+                            "Re-run the stage without stopping the process."
+                        )
+
+                    logger.warning(
+                        "[RigSfM] Sequential matcher failed in loop-detection mode; retrying in stable mode "
+                        "(loop_detection=0, overlap=8)."
+                    )
+                    retry_args = [
                         "sequential_matcher",
                         "--database_path", str(database_path),
-                        "--SequentialMatching.overlap", "12",
-                        "--SequentialMatching.loop_detection", "1",
+                        "--SequentialMatching.overlap", "8",
+                        "--SequentialMatching.loop_detection", "0",
                         "--FeatureMatching.use_gpu", use_gpu_str,
                         "--FeatureMatching.gpu_index", gpu_idx_str,
-                    ],
-                    progress_callback,
-                    "Matching features (COLMAP CLI)..."
-                )
+                    ]
+                    self._run_cli(
+                        colmap_bin,
+                        retry_args,
+                        progress_callback,
+                        "Matching features (COLMAP CLI, retry stable mode)..."
+                    )
             else:
                 if progress_callback:
                     progress_callback("Matching features...")
@@ -544,7 +650,7 @@ class RigColmapIntegrator:
                 out_model_dir = self._normalize_sparse_output(sparse_path)
                 if not out_model_dir.exists() or not ((out_model_dir / "images.bin").exists() or (out_model_dir / "images.txt").exists()):
                     return {'success': False, 'error': 'GloMAP completed but no valid sparse model was created'}
-                num_aligned = len(list(perspectives_dir.rglob("*.png")))
+                num_aligned = self._count_images_recursive(perspectives_dir)
             elif use_external_colmap:
                 self._run_cli(
                     colmap_bin,
@@ -564,7 +670,7 @@ class RigColmapIntegrator:
                 out_model_dir = self._normalize_sparse_output(sparse_path)
                 if not out_model_dir.exists() or not ((out_model_dir / "images.bin").exists() or (out_model_dir / "images.txt").exists()):
                     return {'success': False, 'error': 'COLMAP mapper completed but no sparse model was created'}
-                num_aligned = len(list(perspectives_dir.rglob("*.png")))
+                num_aligned = self._count_images_recursive(perspectives_dir)
             else:
                 if progress_callback:
                     progress_callback("Running incremental mapping...")

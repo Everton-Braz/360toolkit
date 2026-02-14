@@ -1268,6 +1268,21 @@ class PipelineWorker(QThread):
     def _execute_stage3(self) -> Dict:
         """Execute AI Masking"""
         try:
+            if self.config.get('use_gpu', True):
+                try:
+                    import gc
+                    import torch
+                    if torch.cuda.is_available():
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        try:
+                            torch.cuda.ipc_collect()
+                        except Exception:
+                            pass
+                        logger.info("[Stage 3] Cleared CUDA cache before masker initialization")
+                except Exception:
+                    pass
+
             # Determine input directory based on mask_target setting
             mask_target = self.config.get('mask_target', 'split')
             skip_transform = self.config.get('skip_transform', False)
@@ -1609,33 +1624,42 @@ class PipelineWorker(QThread):
              # Lazy import
              from .colmap_stage import ColmapStage, ColmapSettings, ALIGNMENT_MODE_SPHERE_SFM, ALIGNMENT_MODE_RIG_SFM, ALIGNMENT_MODE_POSE_TRANSFER
              
-             # Determine input directory (usually from extraction)
-             if self.config.get('enable_stage1', True):
-                 input_dir = Path(self.config['output_dir']) / 'extracted_frames'
+             # Determine alignment mode from config
+             alignment_mode = self.config.get('alignment_mode', ALIGNMENT_MODE_RIG_SFM)
+
+             # Determine input directory based on reconstruction workflow
+             output_root = Path(self.config['output_dir'])
+             perspective_views_dir = output_root / 'perspective_views'
+             extracted_frames_dir = output_root / 'extracted_frames'
+
+             if alignment_mode == ALIGNMENT_MODE_RIG_SFM and perspective_views_dir.exists():
+                 # Perspective reconstruction should consume Stage 2 output directly
+                 input_dir = perspective_views_dir
+                 logger.info(f"[Reconstruction] Using Stage 2 perspective views: {input_dir}")
+             elif self.config.get('enable_stage1', True):
+                 input_dir = extracted_frames_dir
              else:
-                 # Auto-discovery or config
-                 discovered = self.discover_stage_input_folder(2, self.config['output_dir']) # Re-use split discovery (equirectangulars)
+                 # Auto-discovery fallback
+                 discovered = self.discover_stage_input_folder(2, self.config['output_dir'])
                  if discovered:
                      input_dir = discovered
                  else:
-                     return {'success': False, 'error': 'Reconstruction input (equirectangular frames) not found'}
+                     return {'success': False, 'error': 'Reconstruction input not found'}
              
              output_dir = Path(self.config['output_dir']) / 'reconstruction'
              
-             # Check if equirectangular masking was used
+             # Determine masks directory for reconstruction input type
              masks_dir = None
              mask_target = self.config.get('mask_target', 'split')
-             if mask_target == 'equirect' and self.config.get('stage3_enabled', False):
-                 # Use masks (applied to equirectangular frames)
+             if self.config.get('stage3_enabled', False):
                  potential_masks_dir = Path(self.config['output_dir']) / 'masks'
                  if potential_masks_dir.exists():
                      masks_dir = potential_masks_dir
-                     logger.info(f"[Reconstruction] Using equirectangular masks: {masks_dir}")
-                 else:
-                     logger.warning("[Reconstruction] Equirect masking enabled but no masks found. Proceeding without masks.")
-             
-             # Determine alignment mode from config
-             alignment_mode = self.config.get('alignment_mode', ALIGNMENT_MODE_RIG_SFM)
+                     if alignment_mode == ALIGNMENT_MODE_RIG_SFM:
+                         logger.info(f"[Reconstruction] Using perspective masks: {masks_dir}")
+                     elif mask_target == 'equirect':
+                         logger.info(f"[Reconstruction] Using equirectangular masks: {masks_dir}")
+
              logger.info(f"[Reconstruction] Using alignment mode: {alignment_mode}")
              
              # Settings
