@@ -80,6 +80,34 @@ def _test_torch_cuda():
                 del _sys.modules[key]
         torch = None
         logger_msg = f"PyTorch not available: {e}"
+    except RuntimeError as e:
+        # Special case: torch nightly build docstring conflict — torch IS already
+        # imported and functional; the error fires when __init__ tries to set
+        # docstrings for the second time.  Use the already-loaded module.
+        if 'already has a docstring' in str(e) and 'torch' in _sys.modules:
+            torch = _sys.modules['torch']
+            try:
+                from src.transforms.e2p_transform import TorchE2PTransform as _T
+                TorchE2PTransform = _T
+                HAS_TORCH_TRANSFORM = True
+            except Exception:
+                pass
+            if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                try:
+                    device_name = torch.cuda.get_device_name(0)
+                    cc = torch.cuda.get_device_capability(0)
+                    HAS_TORCH_CUDA = True
+                    logger_msg = f"PyTorch CUDA verified: {device_name} (sm_{cc[0]}{cc[1]})"
+                except Exception:
+                    logger_msg = "PyTorch CUDA partially available"
+            else:
+                logger_msg = "PyTorch available (docstring quirk), CUDA not detected"
+        else:
+            for key in list(_sys.modules.keys()):
+                if key == 'torch' or key.startswith('torch.'):
+                    del _sys.modules[key]
+            torch = None
+            logger_msg = f"PyTorch import error: {e}"
     except Exception as e:
         for key in list(_sys.modules.keys()):
             if key == 'torch' or key.startswith('torch.'):
@@ -94,6 +122,7 @@ from ..extraction.sdk_extractor import SDKExtractor
 from ..transforms import E2PTransform, E2CTransform
 from .metadata_handler import MetadataHandler
 from ..utils.resource_path import get_resource_path
+from ..utils.color_correction import apply_color_corrections
 from ..config.defaults import (
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
     DEFAULT_OUTPUT_WIDTH, DEFAULT_OUTPUT_HEIGHT
@@ -239,12 +268,13 @@ class PipelineWorker(QThread):
             return None
         
         elif stage == 3:
-            # Look for perspective_views folder (match common image extensions)
-            stage2_folder = output_path / 'perspective_views'
+            # Look for perspective_views first, then extracted_frames (equirect masking)
             image_patterns = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
-            if stage2_folder.exists() and any(stage2_folder.glob(p) for p in image_patterns):
-                logger.info(f"[OK] Auto-discovered perspective output: {stage2_folder}")
-                return stage2_folder
+            for candidate in ('perspective_views', 'extracted_frames'):
+                folder = output_path / candidate
+                if folder.exists() and any(folder.glob(p) for p in image_patterns):
+                    logger.info(f"[OK] Auto-discovered masking input: {folder}")
+                    return folder
             return None
         
         return None
@@ -536,6 +566,26 @@ class PipelineWorker(QThread):
                     resolution = resolution_map.get(resolution_key, (7680, 3840))  # Fallback to 8K
                     
                     try:
+                        # Prefer direct sdk_options dict from UI (via get_current_config).
+                        # Fall back to building from legacy individual prefixed keys if absent.
+                        sdk_options = self.config.get('sdk_options', None)
+                        logger.info(f"[SDK] sdk_options from config: {sdk_options}")
+                        if sdk_options is None:
+                            sdk_options = {}
+                            if self.config.get('sdk_direction_lock', False):
+                                sdk_options['enable_direction_lock'] = True
+                            # Color correction overrides (all default to 0 = neutral)
+                            _color_keys = [
+                                'exposure', 'highlights', 'shadows', 'contrast',
+                                'brightness', 'blackpoint', 'saturation', 'vibrance',
+                                'warmth', 'tint', 'definition',
+                            ]
+                            for _k in _color_keys:
+                                _val = self.config.get(f'sdk_{_k}', 0)
+                                if _val != 0:
+                                    sdk_options[_k] = int(_val)
+                            sdk_options = sdk_options if sdk_options else None
+
                         # Call new MediaSDK extractor with all parameters
                         frame_paths = self.sdk_extractor.extract_frames(
                             input_path=str(input_file),
@@ -546,10 +596,33 @@ class PipelineWorker(QThread):
                             output_format=output_format,
                             start_time=start_time,
                             end_time=end_time,
-                            progress_callback=lambda p: progress_callback(p, 100, "SDK stitching")
+                            progress_callback=lambda p: progress_callback(p, 100, "SDK stitching"),
+                            sdk_options=sdk_options
                         )
                         
                         logger.info(f"[OK] SDK extraction complete: {len(frame_paths)} frames")
+
+                        # ── Post-process: apply OpenCV colour corrections ──────────────────
+                        # Colour is applied ONLY via OpenCV (not SDK CLI) so the
+                        # output exactly matches the live preview.
+                        # Yaw is NOT applied here — the SDK with direction-lock
+                        # already orients the panorama correctly.
+                        if sdk_options:
+                            _color_opts = {k: sdk_options[k] for k in (
+                                'exposure','highlights','shadows','contrast','brightness',
+                                'blackpoint','saturation','vibrance','warmth','tint','definition'
+                            ) if sdk_options.get(k, 0) != 0}
+                            if _color_opts:
+                                logger.info(f"[Color] Post-processing {len(frame_paths)} frames with OpenCV corrections: {_color_opts}")
+                                for _fp in frame_paths:
+                                    try:
+                                        _img = cv2.imread(_fp)
+                                        if _img is not None:
+                                            _corrected = apply_color_corrections(_img, _color_opts)
+                                            cv2.imwrite(_fp, _corrected)
+                                    except Exception as _ce:
+                                        logger.warning(f"[Color] Failed to correct {_fp}: {_ce}")
+
                         return {
                             'success': True,
                             'frames': frame_paths,
@@ -759,11 +832,17 @@ class PipelineWorker(QThread):
                         input_height, input_width, output_height, output_width, num_cameras
                     )
                     
-                    # OVERRIDE: Use batch size 16 for optimal GPU utilization (tested)
-                    # Auto-detection gives 8, but testing shows 16 is 8% faster (12648 vs 11659 FPS)
-                    # Larger batches also amortize I/O overhead better
-                    batch_size = 16 if auto_batch_size <= 16 else auto_batch_size
-                    logger.info(f"Using batch size: {batch_size} frames (auto: {auto_batch_size}, optimized for I/O)")
+                    # Keep GPU batch size at or below auto-detected safe value.
+                    # For large 8K frames and many cameras, forcing larger batches can trigger OOM.
+                    user_batch_size = int(self.config.get('split_gpu_batch_size', 0) or 0)
+                    if user_batch_size > 0:
+                        batch_size = max(1, min(user_batch_size, auto_batch_size))
+                        logger.info(
+                            f"Using batch size: {batch_size} frames (auto: {auto_batch_size}, user requested: {user_batch_size})"
+                        )
+                    else:
+                        batch_size = max(1, auto_batch_size)
+                        logger.info(f"Using batch size: {batch_size} frames (auto-safe)")
                     
                     del sample_img  # Free memory
                     
@@ -976,7 +1055,14 @@ class PipelineWorker(QThread):
                         output_files = [] # Reset output files
                         try:
                             if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                                import gc
+                                gc.collect()
+                                torch.cuda.synchronize()
                                 torch.cuda.empty_cache()
+                                try:
+                                    torch.cuda.ipc_collect()
+                                except Exception:
+                                    pass
                         except:
                             pass
                     else:
@@ -985,7 +1071,7 @@ class PipelineWorker(QThread):
             # CPU Execution Block (Fallback or Default)
             if not use_gpu:
                 # CPU Path: Multiprocessing
-                logger.info("[Split CPU] ⚠️ Using CPU multiprocessing (GPU not available or failed)")
+                logger.info("[Split CPU] Using CPU multiprocessing (GPU not available or failed)")
                 # Limit workers to avoid OOM with 8K images. 
                 # 8K image ~100MB. 20 workers = 2GB. Safe.
                 max_workers = min(os.cpu_count(), 12) 
@@ -1621,6 +1707,75 @@ class PipelineWorker(QThread):
     def _execute_stage4(self) -> Dict:
         """Execute 3D Reconstruction (Panorama SfM or Perspective Reconstruction)"""
         try:
+             def _count_images_in_dir(path: Path) -> int:
+                 if not path or not path.exists() or not path.is_dir():
+                     return 0
+                 exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+                 return sum(1 for p in path.rglob('*') if p.is_file() and p.suffix.lower() in exts)
+
+             def _resolve_export_images_dir(preferred: Path, fallback: Path) -> Path:
+                 if preferred and preferred.exists() and _count_images_in_dir(preferred) > 0:
+                     return preferred
+                 return fallback
+
+             def _should_apply_lfs_rotation(images_dir: Path) -> bool:
+                 try:
+                     if not images_dir.exists():
+                         return False
+                     image_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+                     sample = next((p for p in images_dir.rglob('*') if p.is_file() and p.suffix.lower() in image_exts), None)
+                     if sample is None:
+                         return False
+                     image = cv2.imread(str(sample))
+                     if image is None:
+                         return False
+                     height, width = image.shape[:2]
+                     if height <= 0:
+                         return False
+                     aspect = width / float(height)
+                     return abs(aspect - 2.0) < 0.08
+                 except Exception:
+                     return False
+
+             def _ensure_colmap_text_model(model_dir: Path) -> bool:
+                 cameras_txt = model_dir / 'cameras.txt'
+                 images_txt = model_dir / 'images.txt'
+                 if cameras_txt.exists() and images_txt.exists():
+                     return True
+
+                 if not ((model_dir / 'cameras.bin').exists() and (model_dir / 'images.bin').exists()):
+                     return False
+
+                 colmap_bin = self.config.get('colmap_path') or self.config.get('sphere_alignment_path')
+                 if not colmap_bin:
+                     import shutil
+                     colmap_bin = shutil.which('colmap')
+
+                 if not colmap_bin:
+                     logger.warning("[Reconstruction] Could not find COLMAP binary to convert model BIN->TXT")
+                     return False
+
+                 try:
+                     logger.info(f"[Reconstruction] Converting COLMAP model to TXT: {model_dir}")
+                     conv = subprocess.run(
+                         [
+                             str(colmap_bin),
+                             'model_converter',
+                             '--input_path', str(model_dir),
+                             '--output_path', str(model_dir),
+                             '--output_type', 'TXT',
+                         ],
+                         capture_output=True,
+                         text=True,
+                     )
+                     if conv.returncode != 0:
+                         logger.warning(f"[Reconstruction] model_converter failed: {conv.stderr[-1200:]}")
+                         return False
+                     return cameras_txt.exists() and images_txt.exists()
+                 except Exception as conv_error:
+                     logger.warning(f"[Reconstruction] Failed to convert model BIN->TXT: {conv_error}")
+                     return False
+
              # Lazy import
              from .colmap_stage import ColmapStage, ColmapSettings, ALIGNMENT_MODE_SPHERE_SFM, ALIGNMENT_MODE_RIG_SFM, ALIGNMENT_MODE_POSE_TRANSFER
              
@@ -1665,9 +1820,17 @@ class PipelineWorker(QThread):
              # Settings
              settings = ColmapSettings(
                  alignment_mode=alignment_mode,
-                 sphere_alignment_path=Path(self.config['sphere_alignment_path']) if self.config.get('sphere_alignment_path') else None,
-                 glomap_path=Path(self.config['glomap_path']) if self.config.get('glomap_path') else None,
-                 mapping_backend=self.config.get('mapping_backend', 'colmap'),
+                 sphere_alignment_path=Path(self.config['spheresfm_path']) if self.config.get('spheresfm_path') else (
+                     Path(self.config['sphere_alignment_path']) if self.config.get('sphere_alignment_path') else None
+                 ),
+                 colmap_path=Path(self.config['colmap_path']) if self.config.get('colmap_path') else None,
+                 mapping_backend=self.config.get('mapping_backend', 'glomap'),
+                 use_lightglue_aliked=self.config.get('use_lightglue_aliked', True),
+                 camera_grouping=self.config.get('camera_grouping', 'per_folder'),
+                 prefer_colmap_learned=self.config.get('prefer_colmap_learned', False),
+                 require_learned_pipeline=self.config.get('require_learned_pipeline', False),
+                 enable_hloc_fallback=self.config.get('enable_hloc_fallback', True),
+                 reuse_colmap_database=self.config.get('reuse_colmap_database', True),
                  use_rig_sfm=(alignment_mode == ALIGNMENT_MODE_RIG_SFM),
                  use_gpu=self.config.get('use_gpu_colmap', self.config.get('use_gpu', True))
              )
@@ -1684,6 +1847,14 @@ class PipelineWorker(QThread):
                  progress_callback=progress_callback
              )
 
+             sparse_dir = Path(result['colmap_output']) if result.get('success') and result.get('colmap_output') else None
+             if sparse_dir and sparse_dir.exists() and (
+                 self.config.get('export_sidecars', False)
+                 or self.config.get('export_lichtfeld', True)
+                 or self.config.get('export_realityscan', False)
+             ):
+                 _ensure_colmap_text_model(sparse_dir)
+
              # Export to RealityScan if enabled
              if result.get('success') and self.config.get('export_realityscan', False):
                  try:
@@ -1695,10 +1866,9 @@ class PipelineWorker(QThread):
                      sparse_dir = Path(result['colmap_output'])
                      realityscan_dir = output_dir / 'realityscan_export'
 
-                     # Determine images directory
-                     images_dir = output_dir / 'images'
-                     if not images_dir.exists():
-                         images_dir = input_dir
+                     # Determine images directory (prefer actual reconstruction input/output with files)
+                     result_images_dir = Path(result['perspectives_dir']) if result.get('perspectives_dir') else (output_dir / 'images')
+                     images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
 
                      # Determine masks directory for export
                      export_masks_dir = None
@@ -1714,7 +1884,11 @@ class PipelineWorker(QThread):
                                  if split_masks.exists():
                                      export_masks_dir = split_masks
 
-                     database_path = output_dir / 'sparse' / 'database.db'
+                     database_path = output_dir / 'database.db'
+                     if not database_path.exists():
+                         alt_db = output_dir / 'sparse' / 'database.db'
+                         if alt_db.exists():
+                             database_path = alt_db
                      rs_success = export_for_realityscan(
                          colmap_dir=str(sparse_dir),
                          images_dir=str(images_dir),
@@ -1741,9 +1915,8 @@ class PipelineWorker(QThread):
                      from .export_formats import RealityScanExporter
 
                      sparse_dir = Path(result['colmap_output'])
-                     sidecar_images_dir = output_dir / 'images'
-                     if not sidecar_images_dir.exists():
-                         sidecar_images_dir = input_dir
+                     result_images_dir = Path(result['perspectives_dir']) if result.get('perspectives_dir') else (output_dir / 'images')
+                     sidecar_images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
 
                      exporter = RealityScanExporter(
                          colmap_dir=str(sparse_dir),
@@ -1774,10 +1947,9 @@ class PipelineWorker(QThread):
                      sparse_dir = Path(result['colmap_output'])
                      lichtfeld_dir = output_dir / 'lichtfeld_export'
                      
-                     # Determine images directory
-                     images_dir = output_dir / 'images'
-                     if not images_dir.exists():
-                         images_dir = input_dir  # Fallback to input frames
+                     # Determine images directory (prefer actual reconstruction input/output with files)
+                     result_images_dir = Path(result['perspectives_dir']) if result.get('perspectives_dir') else (output_dir / 'images')
+                     images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
                      
                      # Determine masks directory for export
                      export_masks_dir = None
@@ -1794,10 +1966,13 @@ class PipelineWorker(QThread):
                          colmap_dir=str(sparse_dir),
                          output_dir=str(lichtfeld_dir)
                      )
+
+                     apply_fix_rotation = bool(self.config.get('lichtfeld_fix_rotation', True))
+                     logger.info(f"[Reconstruction] LichtFeld rotation fix: {'ON' if apply_fix_rotation else 'OFF'}")
                      
                      export_success = exporter.export(
                          images_dir=str(images_dir),
-                         fix_rotation=True,
+                         fix_rotation=apply_fix_rotation,
                          masks_dir=str(export_masks_dir) if export_masks_dir else None
                      )
                      

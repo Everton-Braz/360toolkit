@@ -1137,24 +1137,22 @@ class PoseTransferIntegrator:
             else:
                 logger.warning("[Mode C] No SphereSfM priors or init pair available; mapping will initialize without pose priors")
         
-        mapping_backend = getattr(self.settings, 'mapping_backend', 'colmap')
-        if mapping_backend == 'glomap':
-            glomap_path = getattr(self.settings, 'glomap_path', None)
-            if not glomap_path:
-                raise RuntimeError("GloMAP backend selected but glomap_path is not configured")
+        mapping_backend = str(getattr(self.settings, 'mapping_backend', 'glomap')).strip().lower()
+        if mapping_backend in {'glomap', 'global', 'global_mapper', 'colmap_global'}:
+            colmap_path = getattr(self.settings, 'colmap_path', None) or getattr(self.settings, 'sphere_alignment_path', None) or "colmap"
 
             cmd = [
-                str(glomap_path),
-                "mapper",
+                str(colmap_path),
+                "global_mapper",
                 "--database_path", str(database_path),
                 "--image_path", str(perspective_images_dir),
                 "--output_path", str(output_sparse_dir.parent),
             ]
-            logger.info("[Mode C] Running GloMAP mapper: %s", " ".join(cmd))
+            logger.info("[Mode C] Running COLMAP global mapper: %s", " ".join(cmd))
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 raise RuntimeError(
-                    f"GloMAP mapper failed (code {result.returncode})\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+                    f"COLMAP global mapper failed (code {result.returncode})\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
                 )
 
             direct_files = ["cameras.bin", "images.bin", "points3D.bin", "cameras.txt", "images.txt", "points3D.txt"]
@@ -1165,9 +1163,9 @@ class PoseTransferIntegrator:
                     if src.exists():
                         shutil.copy2(src, output_sparse_dir / name)
             if not output_sparse_dir.exists() or not ((output_sparse_dir / "images.bin").exists() or (output_sparse_dir / "images.txt").exists()):
-                raise RuntimeError("GloMAP completed but sparse/0 model was not created")
+                raise RuntimeError("COLMAP global mapper completed but sparse/0 model was not created")
 
-            logger.info("[Mode C] Pose transfer complete via GloMAP backend")
+            logger.info("[Mode C] Pose transfer complete via COLMAP global mapper backend")
             return
 
         recs = pycolmap.incremental_mapping(
@@ -1424,9 +1422,37 @@ def export_for_realityscan(
 
     def _rewrite_images_txt_for_realityscan(src_images_txt: Path, dst_images_txt: Path) -> int:
         """
-        Rewrite COLMAP images.txt NAME field to point at ../images/<name> so
-        RealityScan can resolve files when loading from sparse/.
+        Rewrite COLMAP images.txt NAME field to be just the filename (no path prefix).
+        RealityScan expects plain filenames in images.txt — it locates images via
+        the images folder you specify during import.
         """
+        def _is_int_token(value: str) -> bool:
+            try:
+                int(value)
+                return True
+            except ValueError:
+                return False
+
+        def _is_float_token(value: str) -> bool:
+            try:
+                float(value)
+                return True
+            except ValueError:
+                return False
+
+        def _is_image_header(parts: List[str]) -> bool:
+            # COLMAP images.txt header format:
+            # IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
+            if len(parts) < 10:
+                return False
+            if not _is_int_token(parts[0]):
+                return False
+            if not all(_is_float_token(token) for token in parts[1:8]):
+                return False
+            if not _is_int_token(parts[8]):
+                return False
+            return True
+
         rewritten = 0
         out_lines = []
         with open(src_images_txt, 'r', encoding='utf-8') as f:
@@ -1437,10 +1463,11 @@ def export_for_realityscan(
                     continue
 
                 parts = stripped.split()
-                if len(parts) >= 10:
-                    image_name = parts[9]
-                    if not image_name.startswith('../images/'):
-                        parts[9] = f"../images/{image_name}"
+                if _is_image_header(parts):
+                    # Strip any path prefix — RealityScan wants plain filename only
+                    image_name = Path(parts[9]).name
+                    if parts[9] != image_name:
+                        parts[9] = image_name
                         rewritten += 1
                     out_lines.append(' '.join(parts) + '\n')
                 else:
@@ -1473,11 +1500,13 @@ def export_for_realityscan(
         # 1. Copy perspective images
         images_source = Path(images_dir)
         images_copied = 0
-        image_files = []
-        for pattern in ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff"):
-            image_files.extend(images_source.glob(pattern))
+        valid_exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff'}
+        image_files = sorted(
+            [p for p in images_source.rglob('*') if p.is_file() and p.suffix.lower() in valid_exts],
+            key=lambda p: str(p).lower()
+        )
 
-        for img_file in sorted(image_files):
+        for img_file in image_files:
             dst = images_out / img_file.name
             if not dst.exists():
                 shutil.copy2(img_file, dst)
@@ -1516,7 +1545,7 @@ def export_for_realityscan(
             colmap_source = Path(colmap_dir)
 
             # Core text model files expected by RealityScan
-            for colmap_file in ['cameras.txt', 'points3D.txt', 'frames.txt', 'rigs.txt', 'project.ini']:
+            for colmap_file in ['cameras.txt', 'points3D.txt']:
                 src = colmap_source / colmap_file
                 if src.exists():
                     shutil.copy2(src, sparse_out / colmap_file)
@@ -1528,14 +1557,9 @@ def export_for_realityscan(
             if src_images_txt.exists():
                 rewritten_count = _rewrite_images_txt_for_realityscan(src_images_txt, dst_images_txt)
                 copied_sparse.append('images.txt')
-                logger.info(f"[Export] RealityScan: Rewrote {rewritten_count} image paths in images.txt -> ../images/")
+                logger.info(f"[Export] RealityScan: Wrote images.txt ({rewritten_count} paths normalized to plain filename)")
             else:
-                # Fallback to binary only if text not available
-                for colmap_file in ['cameras.bin', 'images.bin', 'points3D.bin', 'frames.bin', 'rigs.bin']:
-                    src = colmap_source / colmap_file
-                    if src.exists():
-                        shutil.copy2(src, sparse_out / colmap_file)
-                        copied_sparse.append(colmap_file)
+                logger.warning("[Export] RealityScan: images.txt not found in COLMAP source; skipping COLMAP text export")
 
             logger.info(f"[Export] RealityScan: Copied COLMAP sparse model files: {copied_sparse}")
         else:
@@ -1548,7 +1572,13 @@ def export_for_realityscan(
         
         # 4. Copy database if provided
         if database_path and Path(database_path).exists():
-            shutil.copy2(database_path, output_path / "database.db")
+            db_target_root = output_path / "database.db"
+            shutil.copy2(database_path, db_target_root)
+            if sparse_out.exists():
+                try:
+                    shutil.copy2(database_path, sparse_out / "database.db")
+                except Exception:
+                    pass
             logger.info("[Export] RealityScan: Copied database.db")
         
         logger.info(f"[Export] RealityScan export complete: {images_copied} images, {masks_copied} masks")

@@ -105,13 +105,13 @@ def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] =
     """
     Resolve SphereSfM/COLMAP binary path.
 
-    Search order:
+    Search order (SphereSfM-first):
     1) Explicit override path
     2) settings.sphere_alignment_path (if present)
-    3) Environment variables (SPHERESFM_PATH, SPHERESFM_BIN, COLMAP_PATH)
+    3) Environment variables (SPHERESFM_PATH, SPHERESFM_BIN)
     4) Default bundled SphereSfM path
-    5) Common local installs
-    6) PATH lookup (colmap)
+    5) Common local SphereSfM installs
+    6) Generic COLMAP fallbacks (COLMAP_PATH, bundled colmap, PATH lookup)
     """
     candidates: List[Path] = []
 
@@ -125,25 +125,37 @@ def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] =
     settings_path = getattr(settings, "sphere_alignment_path", None) if settings is not None else None
     add_candidate(settings_path)
 
-    for env_name in ("SPHERESFM_PATH", "SPHERESFM_BIN", "COLMAP_PATH"):
+    for env_name in ("SPHERESFM_PATH", "SPHERESFM_BIN"):
         env_value = os.environ.get(env_name)
         if env_value:
             add_candidate(env_value)
 
-    add_candidate(DEFAULT_COLMAP_RELEASE_PATH)
     add_candidate(DEFAULT_SPHERESFM_PATH)
 
     home = Path.home()
-    common_paths = [
+    spheresfm_common_paths = [
+        home / "Documents" / "APLICATIVOS" / "360ToolKit" / "bin" / "SphereSfM" / "colmap.exe",
+        home / "Documents" / "APLICATIVOS" / "360toolkit" / "bin" / "SphereSfM" / "colmap.exe",
+        home / "Documents" / "SphereSfM" / "colmap.exe",
+    ]
+    for path in spheresfm_common_paths:
+        add_candidate(path)
+
+    # Generic fallback binaries (only if SphereSfM-specific candidates do not work)
+    colmap_env_value = os.environ.get("COLMAP_PATH")
+    if colmap_env_value:
+        add_candidate(colmap_env_value)
+
+    add_candidate(DEFAULT_COLMAP_RELEASE_PATH)
+
+    generic_colmap_paths = [
         home / "Documents" / "APLICATIVOS" / "360toolkit" / "bin" / "colmap" / "colmap.exe",
         home / "Documents" / "APLICATIVOS" / "360ToolKit" / "bin" / "colmap" / "colmap.exe",
-        home / "Documents" / "APLICATIVOS" / "360ToolKit" / "bin" / "SphereSfM" / "colmap.exe",
-        home / "Documents" / "SphereSfM" / "colmap.exe",
         home / "Documents" / "colmap-x64-windows-cuda" / "colmap.bat",
         home / "Documents" / "colmap-x64-windows-cuda" / "colmap.exe",
         Path("C:/colmap/colmap.exe"),
     ]
-    for path in common_paths:
+    for path in generic_colmap_paths:
         add_candidate(path)
 
     for command_name in ("colmap", "colmap.exe", "colmap.bat", "colmap.cmd"):
@@ -244,6 +256,22 @@ class SphereSfMIntegrator:
             logger.error(f"SphereSfM command failed: {result.stderr}")
         
         return result
+
+    def _cleanup_partial_outputs(self, output_dir: Path) -> None:
+        """Best-effort cleanup for failed Panorama SfM runs."""
+        cleanup_targets = [
+            output_dir / "sparse-cubic",
+            output_dir / "sparse",
+            output_dir / "database.db",
+        ]
+        for target in cleanup_targets:
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                elif target.exists():
+                    target.unlink()
+            except Exception as e:
+                logger.debug(f"Cleanup skipped for {target}: {e}")
     
     def run_alignment_mode_a(
         self,
@@ -278,14 +306,15 @@ class SphereSfMIntegrator:
             }
         
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        def fail_with_cleanup(error_message: str) -> Dict:
+            self._cleanup_partial_outputs(output_dir)
+            return {'success': False, 'error': error_message}
         
         # Setup paths
         database_path = output_dir / "database.db"
         sparse_path = output_dir / "sparse"
-        cubic_path = output_dir / "sparse-cubic"
-        
         sparse_path.mkdir(exist_ok=True)
-        cubic_path.mkdir(exist_ok=True)
         
         if database_path.exists():
             database_path.unlink()
@@ -293,7 +322,7 @@ class SphereSfMIntegrator:
         # Count input images
         image_files = list(frames_dir.glob("*.jpg")) + list(frames_dir.glob("*.png"))
         if not image_files:
-            return {'success': False, 'error': 'No input images found'}
+            return fail_with_cleanup('No input images found')
         
         # Detect image dimensions for camera params
         from PIL import Image
@@ -316,7 +345,7 @@ class SphereSfMIntegrator:
             ], progress_callback)
             
             if result.returncode != 0:
-                return {'success': False, 'error': f'Database creation failed: {result.stderr}'}
+                return fail_with_cleanup(f'Database creation failed: {result.stderr}')
             
             # Step 2: Feature extraction with SPHERE model
             if progress_callback:
@@ -354,7 +383,7 @@ class SphereSfMIntegrator:
             result = self._run_command(extractor_args, progress_callback)
             
             if result.returncode != 0:
-                return {'success': False, 'error': f'Feature extraction failed: {result.stderr}'}
+                return fail_with_cleanup(f'Feature extraction failed: {result.stderr}')
             
             # Step 3: Feature matching (sequential for video sequences)
             if progress_callback:
@@ -387,7 +416,7 @@ class SphereSfMIntegrator:
                 result = self._run_command(matching_args, progress_callback)
                 
                 if result.returncode != 0:
-                    return {'success': False, 'error': f'Feature matching failed: {result.stderr}'}
+                    return fail_with_cleanup(f'Feature matching failed: {result.stderr}')
             
             # Step 4: Incremental mapping with sphere camera
             if progress_callback:
@@ -434,12 +463,12 @@ class SphereSfMIntegrator:
             result = self._run_command(mapper_args, progress_callback)
             
             if result.returncode != 0:
-                return {'success': False, 'error': f'Mapper failed: {result.stderr}'}
+                return fail_with_cleanup(f'Mapper failed: {result.stderr}')
             
             # Check if reconstruction was created
             model_path = sparse_path / "0"
             if not model_path.exists():
-                return {'success': False, 'error': 'No reconstruction model created'}
+                return fail_with_cleanup('No reconstruction model created')
             
             # Convert binary model to text format for easier analysis
             cameras_bin = model_path / "cameras.bin"
@@ -454,23 +483,6 @@ class SphereSfMIntegrator:
                     ], progress_callback)
                 except Exception as e:
                     logger.debug(f"Model conversion to TXT failed: {e}")
-            
-            # Step 5: Convert to cubic (perspective) format using Python transform
-            # SphereSfM's sphere_cubic_reprojector has issues, use our E2C transform instead
-            if progress_callback:
-                progress_callback("Converting to perspective views...")
-            
-            try:
-                self._convert_sphere_to_cubemap_python(
-                    frames_dir=frames_dir,
-                    sparse_dir=model_path,
-                    output_dir=cubic_path,
-                    progress_callback=progress_callback
-                )
-                logger.info(f"Successfully converted to cubemap views: {cubic_path}")
-            except Exception as e:
-                logger.warning(f"Cubic conversion failed: {e}")
-                # Not fatal - spherical model is still valid
             
             # Count results
             images_file = model_path / "images.txt"
@@ -492,7 +504,7 @@ class SphereSfMIntegrator:
                 'success': True,
                 'mode': 'Panorama SfM (SphereSfM)',
                 'colmap_output': model_path,
-                'cubic_output': cubic_path if (cubic_path / "sparse").exists() else None,
+                'cubic_output': None,
                 'frames_dir': frames_dir,
                 'num_aligned': num_registered,
                 'num_points': num_points
@@ -502,158 +514,9 @@ class SphereSfMIntegrator:
             logger.error(f"SphereSfM Panorama Error: {e}")
             import traceback
             logger.error(traceback.format_exc())
+            self._cleanup_partial_outputs(output_dir)
             return {'success': False, 'error': str(e)}
     
-    def _convert_sphere_to_cubemap_python(
-        self,
-        frames_dir: Path,
-        sparse_dir: Path,
-        output_dir: Path,
-        progress_callback: Optional[Callable] = None
-    ):
-        """
-        Convert equirectangular images to cubemap format using E2C transform.
-        
-        Creates 6 perspective views (cubemap faces) for each equirectangular image.
-        Reuses proven perspective splitting transform.
-        """
-        import cv2
-        import numpy as np
-        from ..transforms.e2c_transform import E2CTransform
-        
-        # Create output directories
-        images_dir = output_dir / "images"
-        images_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize E2C transform for cubemap conversion
-        face_size = 2048  # Each cubemap face will be 2048x2048
-        overlap_percent = 5  # Small overlap for seamless edges
-        e2c = E2CTransform()
-        
-        # Get list of equirectangular images
-        eq_images = sorted(frames_dir.glob("*.jpg")) + sorted(frames_dir.glob("*.png"))
-        
-        if not eq_images:
-            raise ValueError(f"No images found in {frames_dir}")
-        
-        logger.info(f"Converting {len(eq_images)} equirectangular images to cubemap (6-face)...")
-        
-        total_ops = len(eq_images) * 6
-        completed = 0
-        
-        for eq_img_path in eq_images:
-            # Load equirectangular image
-            eq_img = cv2.imread(str(eq_img_path))
-            if eq_img is None:
-                logger.warning(f"Failed to load {eq_img_path}")
-                continue
-            
-            # Get image base name without extension
-            base_name = eq_img_path.stem
-            
-            # Convert to 6 cubemap faces using E2C transform
-            # Mode '6-face' generates: front, right, back, left, top, bottom
-            cubemap_faces = e2c.equirect_to_cubemap(
-                eq_img, 
-                face_size=face_size, 
-                overlap_percent=overlap_percent,
-                mode='6-face'
-            )
-            
-            # Save faces in standard order (matches split output)
-            face_order = ['front', 'right', 'back', 'left', 'top', 'bottom']
-            
-            for idx, face_name in enumerate(face_order):
-                face_img = cubemap_faces[face_name]
-                output_filename = f"{base_name}_perspective_{idx:08d}.jpg"
-                output_path = images_dir / output_filename
-                
-                cv2.imwrite(str(output_path), face_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                
-                completed += 1
-                if progress_callback and completed % 10 == 0:
-                    progress = int((completed / total_ops) * 100)
-                    progress_callback(f"Converting to cubemap: {progress}%")
-            
-            logger.debug(f"Converted {eq_img_path.name} to 6 cubemap faces")
-        
-        logger.info(f"Cubemap conversion complete: {completed} faces created")
-        
-        # Now run feature extraction and matching on the cubic images
-        # to create a PINHOLE-based reconstruction (OpenMVS compatible)
-        self._run_cubic_reconstruction(images_dir, output_dir, progress_callback)
-    
-    def _run_cubic_reconstruction(
-        self,
-        cubic_images_dir: Path,
-        output_dir: Path,
-        progress_callback: Optional[Callable] = None
-    ):
-        """
-        Run feature extraction and matching on cubemap images to create PINHOLE model.
-        This creates a reconstruction that OpenMVS can use for dense reconstruction.
-        """
-        database_path = output_dir / "database.db"
-        sparse_dir = output_dir / "sparse"
-        sparse_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Step 1: Create database
-        logger.info("Creating COLMAP database for cubic images...")
-        self._run_command([
-            "database_creator",
-            "--database_path", str(database_path)
-        ], progress_callback)
-        
-        # Step 2: Extract features (PINHOLE model for cubemap faces)
-        if progress_callback:
-            progress_callback("Extracting features from cubemap faces...")
-        
-        self._run_command([
-            "feature_extractor",
-            "--database_path", str(database_path),
-            "--image_path", str(cubic_images_dir),
-            "--ImageReader.camera_model", "PINHOLE",
-            "--ImageReader.single_camera", "0",  # Each face can have different camera
-            "--SiftExtraction.use_gpu", "0"  # CPU mode for compatibility
-        ], progress_callback)
-        
-        # Step 3: Match features
-        if progress_callback:
-            progress_callback("Matching features...")
-        
-        self._run_command([
-            "exhaustive_matcher",
-            "--database_path", str(database_path),
-            "--SiftMatching.use_gpu", "0"
-        ], progress_callback)
-        
-        # Step 4: Reconstruct (mapper)
-        if progress_callback:
-            progress_callback("Reconstructing from cubemap...")
-        
-        self._run_command([
-            "mapper",
-            "--database_path", str(database_path),
-            "--image_path", str(cubic_images_dir),
-            "--output_path", str(sparse_dir)
-        ], progress_callback)
-        
-        # Step 5: Convert to text format
-        model_dir = sparse_dir / "0"
-        if model_dir.exists():
-            try:
-                self._run_command([
-                    "model_converter",
-                    "--input_path", str(model_dir),
-                    "--output_path", str(model_dir),
-                    "--output_type", "TXT"
-                ], progress_callback)
-            except Exception as e:
-                logger.debug(f"Model conversion to TXT failed: {e}")
-        
-        logger.info(f"Cubic reconstruction complete: {sparse_dir}")
-
-
 class DualModeAlignmentIntegrator:
     """
     Dual-mode alignment integrator providing both Panorama SfM and Perspective Reconstruction.

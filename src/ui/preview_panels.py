@@ -1,4 +1,4 @@
-"""
+﻿"""
 Perspective Preview Panel Widget
 Real-time preview for perspective split with circular compass.
 """
@@ -10,10 +10,11 @@ from typing import Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QSlider, QSpinBox, QPushButton, QGroupBox, QComboBox
+    QSlider, QSpinBox, QPushButton, QGroupBox, QComboBox,
+    QSizePolicy, QFileDialog, QToolButton,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QRect
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QBrush
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QRect, QThread, QTimer
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QBrush, QFont
 
 from ..transforms import E2PTransform
 
@@ -552,3 +553,399 @@ class CubemapPreviewPanel(QWidget):
             cv2.putText(img, name.replace('_', ' ').upper(), (x1 + 5, y1 + 25),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Equirectangular preview panel for Frame Extraction stage
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _apply_color_corrections(img: np.ndarray, opts: dict) -> np.ndarray:
+    """
+    Apply Insta360-style color corrections to a BGR uint8 numpy image.
+    All parameters match the SDK range (-100..100 / 0..100 for definition).
+    Operations execute in float32 for accuracy then clip back to uint8.
+    """
+    if not opts:
+        return img
+
+    f = img.astype(np.float32) / 255.0
+
+    # ── Exposure: photographic stops [-100..100] ─────────────────────────────
+    exp = opts.get('exposure', 0)
+    if exp:
+        f *= 2.0 ** (exp / 100.0)
+
+    # ── Brightness: linear lift/cut ───────────────────────────────────────────
+    br = opts.get('brightness', 0)
+    if br:
+        f += br / 400.0
+
+    # ── Contrast: S-curve around mid-grey ─────────────────────────────────────
+    con = opts.get('contrast', 0)
+    if con:
+        f = (f - 0.5) * (1.0 + con / 100.0) + 0.5
+
+    # ── Highlights: compress/expand bright pixels ─────────────────────────────
+    hl = opts.get('highlights', 0)
+    if hl:
+        mask = np.clip((f - 0.5) * 2.0, 0.0, 1.0)
+        f += mask * (hl / 100.0) * 0.25
+
+    # ── Shadows: lift/cut dark pixels ────────────────────────────────────────
+    sh = opts.get('shadows', 0)
+    if sh:
+        mask = np.clip((0.5 - f) * 2.0, 0.0, 1.0)
+        f += mask * (sh / 100.0) * 0.25
+
+    # ── Black point ───────────────────────────────────────────────────────────
+    bp = opts.get('blackpoint', 0)
+    if bp:
+        f = np.where(f < 0.5, f + bp / 500.0, f)
+
+    f = np.clip(f, 0.0, 1.0)
+
+    # ── Saturation & Vibrance (HSV) ───────────────────────────────────────────
+    sat = opts.get('saturation', 0)
+    vib = opts.get('vibrance', 0)
+    if sat or vib:
+        u8 = (f * 255.0).astype(np.uint8)
+        hsv = cv2.cvtColor(u8, cv2.COLOR_BGR2HSV).astype(np.float32)
+        if sat:
+            hsv[..., 1] = np.clip(hsv[..., 1] * (1.0 + sat / 100.0), 0.0, 255.0)
+        if vib:
+            sat_norm = hsv[..., 1] / 255.0
+            factor = 1.0 + (vib / 100.0) * (1.0 - sat_norm) * 0.8
+            hsv[..., 1] = np.clip(hsv[..., 1] * factor, 0.0, 255.0)
+        f = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32) / 255.0
+
+    # ── Warmth: colour temperature shift ─────────────────────────────────────
+    # +100 = warm/orange, -100 = cool/blue
+    wm = opts.get('warmth', 0)
+    if wm:
+        delta = wm / 500.0
+        f[..., 0] = f[..., 0] - delta  # blue channel  (BGR index 0)
+        f[..., 2] = f[..., 2] + delta  # red channel   (BGR index 2)
+
+    # ── Tint: +100 = green, -100 = magenta ───────────────────────────────────
+    ti = opts.get('tint', 0)
+    if ti:
+        delta = ti / 500.0
+        f[..., 1] = f[..., 1] + delta          # green boost
+        f[..., 0] = f[..., 0] - delta * 0.4    # slight blue suppress for magenta
+        f[..., 2] = f[..., 2] - delta * 0.4    # slight red  suppress for magenta
+
+    result = np.clip(f * 255.0, 0, 255).astype(np.uint8)
+
+    # ── Definition (sharpness): 0..100 ────────────────────────────────────────
+    defi = opts.get('definition', 0)
+    if defi > 0:
+        blurred = cv2.GaussianBlur(result, (0, 0), 1.5)
+        amount  = defi / 100.0
+        result  = cv2.addWeighted(result, 1.0 + amount, blurred, -amount, 0)
+        result  = np.clip(result, 0, 255).astype(np.uint8)
+
+    return result
+
+
+class _SDKPreviewWorker(QThread):
+    """
+    Background thread: uses SDKExtractor to stitch 1 frame from an INSV file.
+    Uses 'draft' quality for speed — this is preview only.
+    """
+    frame_ready = pyqtSignal(str)   # absolute path to the extracted JPEG
+    failed      = pyqtSignal(str)   # human-readable error message
+
+    def __init__(self, sdk_extractor, input_path: str, parent=None):
+        super().__init__(parent)
+        self._extractor  = sdk_extractor
+        self._input_path = input_path
+
+    def run(self):
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="360tk_prev_")
+        try:
+            frames = self._extractor.extract_frames(
+                input_path   = self._input_path,
+                output_dir   = tmp,
+                fps          = 0.5,      # 0.5 fps → 1 frame in first 2 s
+                quality      = 'good',   # dynamicstitch + flowstate → same orientation as pipeline
+                output_format= 'jpg',
+                start_time   = 0.0,
+                end_time     = 2.0,
+            )
+            if frames and Path(frames[0]).exists():
+                self.frame_ready.emit(str(frames[0]))
+            else:
+                self.failed.emit("SDK returned no frames (check SDK path in Settings)")
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class _PanoRenderWorker(QThread):
+    """
+    Background thread: applies colour corrections to the equirectangular image
+    and horizontally shifts it by Yaw so the panorama view scrolls correctly.
+    Emits a BGR numpy array ready to display.
+    """
+    result_ready = pyqtSignal(object)   # np.ndarray BGR uint8
+
+    def __init__(self, orig_bgr: np.ndarray, yaw: float, color_opts: dict, parent=None):
+        super().__init__(parent)
+        self._orig       = orig_bgr
+        self._yaw        = float(yaw)
+        self._color_opts = dict(color_opts)
+
+    def run(self):
+        try:
+            src = self._orig
+            # Downscale for display speed (preview only)
+            pano_w = 1280
+            pano_h = pano_w // 2
+            if src.shape[1] != pano_w or src.shape[0] != pano_h:
+                src = cv2.resize(src, (pano_w, pano_h), interpolation=cv2.INTER_AREA)
+
+            # Apply colour corrections first
+            corrected = _apply_color_corrections(src, self._color_opts)
+
+            # Horizontal shift by Yaw: yaw=0 → no shift, yaw=-180 → left edge at center
+            # yaw range -180..180 maps to pixel shift 0..width
+            shift = int((self._yaw / 360.0) * pano_w)
+            shifted = np.roll(corrected, shift, axis=1)
+
+            self.result_ready.emit(shifted)
+        except Exception as exc:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning(f"Pano render failed: {exc}")
+
+
+
+class _EquirectCanvas(QWidget):
+    """Internal canvas: renders the current processed preview frame."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmap: Optional[QPixmap] = None
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(280, 160)
+
+    def set_pixmap(self, pixmap: Optional[QPixmap]):
+        self._pixmap = pixmap
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor(27, 31, 36))
+
+        if self._pixmap is None:
+            p.setPen(QColor(107, 114, 128))
+            f = p.font()
+            f.setPointSize(11)
+            p.setFont(f)
+            p.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                "360° PREVIEW\n\nLoad INSV file — stitched frame extracts automatically",
+            )
+            return
+
+        pix = self._pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        p.drawPixmap(
+            (self.width()  - pix.width())  // 2,
+            (self.height() - pix.height()) // 2,
+            pix,
+        )
+
+
+class EquirectPreviewWidget(QWidget):
+    """
+    Panoramic 360° preview for the Frame Extraction tab.
+
+    Shows the equirectangular image with:
+      - Colour corrections applied (matching the exported frames)
+      - Horizontal scroll driven by the Yaw slider (np.roll)
+
+    No perspective re-projection is performed here; the panorama is
+    always shown as a flat equirectangular strip.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._video_path: Optional[str]        = None
+        self._orig_bgr:   Optional[np.ndarray] = None   # raw stitched equirectangular
+        self._yaw:        float                = -180.0  # default: left edge (same as slider default)
+        self._color_opts: dict                 = {}
+        self._sdk         = None
+        self._sdk_worker: Optional[_SDKPreviewWorker]  = None
+        self._render_worker: Optional[_PanoRenderWorker] = None
+
+        # 120 ms debounce so slider drags don't flood the worker thread
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(120)
+        self._render_timer.timeout.connect(self._start_render)
+
+        self._build_ui()
+
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self._canvas = _EquirectCanvas(self)
+        root.addWidget(self._canvas, stretch=1)
+
+        # Action bar
+        bar_widget = QWidget()
+        bar_widget.setObjectName("previewBar")
+        bar = QHBoxLayout(bar_widget)
+        bar.setContentsMargins(8, 4, 8, 4)
+        bar.setSpacing(8)
+
+        self._status_lbl = QLabel("Load input file to enable preview")
+        self._status_lbl.setProperty("role", "muted")
+        bar.addWidget(self._status_lbl, stretch=1)
+
+        open_btn = QToolButton()
+        open_btn.setText("Open Image…")
+        open_btn.clicked.connect(self._open_image_dialog)
+        bar.addWidget(open_btn)
+
+        self._extract_btn = QPushButton("Extract Preview Frame")
+        self._extract_btn.setEnabled(False)
+        self._extract_btn.setFixedWidth(168)
+        self._extract_btn.clicked.connect(self._extract_preview)
+        bar.addWidget(self._extract_btn)
+
+        root.addWidget(bar_widget)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def set_view(self, yaw: float, pitch: float, roll: float, fov: float = 110.0):
+        """Called when Yaw/Pitch/Roll sliders change (MediaProcessingPanel.view_changed).
+        Only Yaw is used for the panorama — it scrolls the image horizontally."""
+        self._yaw = yaw
+        self._trigger_render()
+
+    def set_color_opts(self, opts: dict):
+        """Called when any colour slider changes (MediaProcessingPanel.values_changed)."""
+        self._color_opts = dict(opts) if opts else {}
+        self._trigger_render()
+
+    def set_video_path(self, path: str):
+        """Called when the input file path changes."""
+        self._video_path = path.strip() if path else ""
+        has_path = bool(self._video_path)
+        self._extract_btn.setEnabled(has_path)
+        if has_path:
+            self._status_lbl.setText("Ready — extracting preview frame…")
+            if self._video_path.lower().endswith(('.insv', '.mp4')):
+                self._extract_preview()
+        else:
+            self._status_lbl.setText("Load input file to enable preview")
+
+    def load_image_path(self, path: str):
+        """Load an equirectangular image file directly from disk."""
+        try:
+            img = cv2.imread(str(path))
+            if img is None:
+                self._status_lbl.setText("Failed to read image file")
+                return
+            self._store_orig(img)
+            self._status_lbl.setText(f"{Path(path).name}  ({img.shape[1]}×{img.shape[0]})")
+        except Exception as exc:
+            self._status_lbl.setText(f"Error loading image: {exc}")
+
+    def load_image_array(self, img_bgr: np.ndarray):
+        """Load directly from a numpy BGR array."""
+        self._store_orig(img_bgr)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _store_orig(self, img_bgr: np.ndarray):
+        self._orig_bgr = img_bgr.copy()
+        self._trigger_render()
+
+    def _trigger_render(self):
+        if self._orig_bgr is not None:
+            self._render_timer.start()
+
+    def _start_render(self):
+        if self._orig_bgr is None:
+            return
+        if self._render_worker and self._render_worker.isRunning():
+            self._render_worker.terminate()
+            self._render_worker.wait()
+        self._render_worker = _PanoRenderWorker(
+            self._orig_bgr, self._yaw, self._color_opts, parent=self
+        )
+        self._render_worker.result_ready.connect(self._on_render_done)
+        self._render_worker.start()
+
+    def _on_render_done(self, rendered_bgr: np.ndarray):
+        h, w = rendered_bgr.shape[:2]
+        rgb  = cv2.cvtColor(rendered_bgr, cv2.COLOR_BGR2RGB)
+        qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
+        self._canvas.set_pixmap(QPixmap.fromImage(qimg))
+
+    def _extract_preview(self):
+        path = self._video_path
+        if not path or not Path(path).exists():
+            self._status_lbl.setText("Input file not found")
+            return
+
+        if self._sdk is None:
+            try:
+                from ..extraction.sdk_extractor import SDKExtractor
+                self._sdk = SDKExtractor()
+            except Exception as exc:
+                self._status_lbl.setText(f"SDK init failed: {exc}")
+                return
+
+        if not self._sdk.is_available():
+            self._status_lbl.setText("SDK not available — configure SDK path in Settings")
+            return
+
+        if self._sdk_worker and self._sdk_worker.isRunning():
+            self._sdk_worker.terminate()
+            self._sdk_worker.wait()
+
+        self._status_lbl.setText("Stitching equirectangular preview…")
+        self._extract_btn.setEnabled(False)
+
+        self._sdk_worker = _SDKPreviewWorker(self._sdk, path, self)
+        self._sdk_worker.frame_ready.connect(self._on_sdk_frame_ready)
+        self._sdk_worker.failed.connect(self._on_sdk_failed)
+        self._sdk_worker.finished.connect(lambda: self._extract_btn.setEnabled(True))
+        self._sdk_worker.start()
+
+    def _on_sdk_frame_ready(self, img_path: str):
+        img = cv2.imread(img_path)
+        if img is None:
+            self._status_lbl.setText("Could not load stitched frame")
+            return
+        src = Path(self._video_path).name if self._video_path else ""
+        self._status_lbl.setText(
+            f"Panorama: {src}  ({img.shape[1]}×{img.shape[0]})  — drag Yaw slider to pan"
+        )
+        self._store_orig(img)
+
+    def _on_sdk_failed(self, err: str):
+        self._status_lbl.setText(f"SDK preview failed: {err}")
+        self._extract_btn.setEnabled(True)
+
+    def _open_image_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Equirectangular Image", "",
+            "Images (*.png *.jpg *.jpeg *.tif *.tiff)",
+        )
+        if path:
+            self.load_image_path(path)

@@ -50,14 +50,25 @@ class SettingsManager:
             if detected_ffmpeg:
                 self.settings['ffmpeg_path'] = str(detected_ffmpeg)
                 self.settings['ffmpeg_auto_detected'] = True
+
+        legacy_colmap = self.settings.get('colmap_path')
+        if legacy_colmap and not self.settings.get('colmap_gpu_path'):
+            self.settings['colmap_gpu_path'] = legacy_colmap
+
+        if not self.settings.get('spheresfm_path') or not self.is_colmap_valid(self.settings.get('spheresfm_path')):
+            logger.info("SphereSfM path not configured or invalid, running auto-detection...")
+            detected_spheresfm = self.auto_detect_spheresfm()
+            if detected_spheresfm:
+                self.settings['spheresfm_path'] = str(detected_spheresfm)
+                self.settings['spheresfm_auto_detected'] = True
+
+        if not self.settings.get('colmap_gpu_path') or not self.is_colmap_valid(self.settings.get('colmap_gpu_path')):
+            logger.info("COLMAP GPU path not configured or invalid, running auto-detection...")
+            detected_colmap = self.auto_detect_colmap()
+            if detected_colmap:
+                self.settings['colmap_gpu_path'] = str(detected_colmap)
+                self.settings['colmap_auto_detected'] = True
         
-        # Auto-detect GloMAP if not configured
-        if not self.settings.get('glomap_path') or not self.is_glomap_valid(self.settings.get('glomap_path')):
-            logger.info("GloMAP path not configured or invalid, running auto-detection...")
-            detected_glomap = self.auto_detect_glomap()
-            if detected_glomap:
-                self.settings['glomap_path'] = str(detected_glomap)
-                self.settings['glomap_auto_detected'] = True
     
     def _load_settings(self) -> Dict:
         """Load settings from JSON file"""
@@ -72,6 +83,9 @@ class SettingsManager:
         return {
             'sdk_path': None,
             'ffmpeg_path': None,
+            'spheresfm_path': None,
+            'colmap_gpu_path': None,
+            'colmap_path': None,
             'yolo_model_path': None,
             'auto_detect_on_startup': True,
             'theme': 'dark',
@@ -288,6 +302,228 @@ class SettingsManager:
         if ffmpeg_str:
             return Path(ffmpeg_str)
         return None
+
+    # === RECONSTRUCTION BINARY PATH MANAGEMENT ===
+
+    def auto_detect_spheresfm(self) -> Optional[Path]:
+        """
+        Auto-detect SphereSfM-compatible colmap binary.
+        """
+        logger.info("Searching for SphereSfM...")
+
+        app_dir = Path(__file__).parent.parent.parent
+        candidates = [
+            app_dir / "bin" / "SphereSfM" / "colmap.exe",
+            app_dir / "bin" / "SphereSfM" / "colmap.bat",
+            app_dir / "bin" / "SphereSfM" / "colmap.cmd",
+        ]
+
+        docs = Path.home() / "Documents"
+        candidates.extend([
+            docs / "APLICATIVOS" / "360toolkit" / "bin" / "SphereSfM" / "colmap.exe",
+            docs / "APLICATIVOS" / "360ToolKit" / "bin" / "SphereSfM" / "colmap.exe",
+        ])
+
+        for candidate in candidates:
+            if self.is_colmap_valid(candidate):
+                logger.info(f"[OK] SphereSfM found at {candidate}")
+                return candidate
+
+        logger.warning("[X] SphereSfM not found in standard locations")
+        return None
+
+    def auto_detect_colmap(self) -> Optional[Path]:
+        """
+        Auto-detect COLMAP GPU binary.
+
+        Search order:
+        1. Workspace bundled SphereSfM/COLMAP binaries
+        2. Common local installs
+        3. System PATH (colmap)
+
+        Returns:
+            Path to colmap executable if found, None otherwise
+        """
+        logger.info("Searching for COLMAP (GPU build)...")
+
+        app_dir = Path(__file__).parent.parent.parent
+        bundled_candidates = [
+            app_dir / "bin" / "colmap" / "colmap.exe",
+            app_dir / "bin" / "colmap" / "colmap.bat",
+            app_dir / "bin" / "colmap" / "colmap.cmd",
+        ]
+        for candidate in bundled_candidates:
+            if self.is_colmap_valid(candidate):
+                logger.info(f"[OK] COLMAP found at {candidate}")
+                return candidate
+
+        docs = Path.home() / "Documents"
+        common_candidates = [
+            docs / "APLICATIVOS" / "360toolkit" / "bin" / "colmap" / "colmap.exe",
+            docs / "APLICATIVOS" / "360ToolKit" / "bin" / "colmap" / "colmap.exe",
+            docs / "colmap-x64-windows-cuda" / "colmap.exe",
+            docs / "colmap-x64-windows-cuda" / "colmap.bat",
+            Path("C:/colmap/colmap.exe"),
+        ]
+        for candidate in common_candidates:
+            if self.is_colmap_valid(candidate):
+                logger.info(f"[OK] COLMAP found at {candidate}")
+                return candidate
+
+        for command in ("colmap", "colmap.exe", "colmap.bat", "colmap.cmd"):
+            in_path = shutil.which(command)
+            if in_path and self.is_colmap_valid(Path(in_path)):
+                logger.info(f"[OK] COLMAP found in PATH: {in_path}")
+                return Path(in_path)
+
+        logger.warning("[X] COLMAP GPU build not found in any standard location")
+        return None
+
+    def is_colmap_valid(self, colmap_path: Optional[Path]) -> bool:
+        """Validate COLMAP path by checking executable exists."""
+        if colmap_path is None:
+            return False
+
+        colmap_path = Path(colmap_path)
+        if colmap_path.is_dir():
+            for name in ("colmap.exe", "colmap.bat", "colmap.cmd"):
+                candidate = colmap_path / name
+                if candidate.exists() and candidate.is_file():
+                    return True
+            return False
+
+        return colmap_path.exists() and colmap_path.is_file()
+
+    def set_colmap_path(self, path: Optional[Path], auto_detected: bool = False) -> bool:
+        """Backward-compatible alias for COLMAP GPU path setter."""
+        return self.set_colmap_gpu_path(path, auto_detected=auto_detected)
+
+    def set_colmap_gpu_path(self, path: Optional[Path], auto_detected: bool = False) -> bool:
+        """Set COLMAP GPU path and save. Returns True if valid, False otherwise."""
+        if path is None:
+            self.settings['colmap_gpu_path'] = None
+            self.settings['colmap_path'] = None
+            self.settings['colmap_auto_detected'] = False
+            self.save_settings()
+            logger.info("COLMAP GPU path cleared")
+            return True
+
+        if not self.is_colmap_valid(path):
+            logger.warning(f"Invalid COLMAP path: {path}")
+            return False
+
+        path_obj = Path(path)
+        if not path_obj.is_absolute():
+            logger.warning(f"COLMAP path must be absolute (got: {path_obj})")
+            return False
+        if path_obj.is_dir():
+            for name in ("colmap.exe", "colmap.bat", "colmap.cmd"):
+                candidate = path_obj / name
+                if candidate.exists() and candidate.is_file():
+                    path_obj = candidate
+                    break
+
+        path_obj = path_obj.resolve()
+
+        self.settings['colmap_gpu_path'] = str(path_obj)
+        self.settings['colmap_path'] = str(path_obj)
+        self.settings['colmap_auto_detected'] = auto_detected
+        self.save_settings()
+        logger.info(f"COLMAP GPU path set to {path_obj}")
+        return True
+
+    def get_colmap_path(self) -> Optional[Path]:
+        """Backward-compatible alias for COLMAP GPU path getter."""
+        return self.get_colmap_gpu_path()
+
+    def get_colmap_gpu_path(self) -> Optional[Path]:
+        """Get current COLMAP GPU path."""
+        colmap_str = self.settings.get('colmap_gpu_path') or self.settings.get('colmap_path')
+        if colmap_str:
+            return Path(colmap_str)
+        return None
+
+    def set_spheresfm_path(self, path: Optional[Path], auto_detected: bool = False) -> bool:
+        """Set SphereSfM path and save. Returns True if valid, False otherwise."""
+        if path is None:
+            self.settings['spheresfm_path'] = None
+            self.settings['spheresfm_auto_detected'] = False
+            self.save_settings()
+            logger.info("SphereSfM path cleared")
+            return True
+
+        if not self.is_colmap_valid(path):
+            logger.warning(f"Invalid SphereSfM path: {path}")
+            return False
+
+        path_obj = Path(path)
+        if path_obj.is_dir():
+            for name in ("colmap.exe", "colmap.bat", "colmap.cmd"):
+                candidate = path_obj / name
+                if candidate.exists() and candidate.is_file():
+                    path_obj = candidate
+                    break
+
+        self.settings['spheresfm_path'] = str(path_obj)
+        self.settings['spheresfm_auto_detected'] = auto_detected
+        self.save_settings()
+        logger.info(f"SphereSfM path set to {path_obj}")
+        return True
+
+    def get_spheresfm_path(self) -> Optional[Path]:
+        """Get current SphereSfM path."""
+        spheresfm_str = self.settings.get('spheresfm_path')
+        if spheresfm_str:
+            return Path(spheresfm_str)
+        return None
+
+    def get_colmap_info(self, colmap_path: Optional[Path]) -> Dict:
+        """
+        Get detailed information about COLMAP installation.
+
+        Returns:
+            Dictionary with COLMAP info (version, path)
+        """
+        if colmap_path is None or not self.is_colmap_valid(colmap_path):
+            return {'valid': False, 'error': 'Invalid or missing COLMAP path'}
+
+        colmap_path = Path(colmap_path)
+        if colmap_path.is_dir():
+            for name in ("colmap.exe", "colmap.bat", "colmap.cmd"):
+                candidate = colmap_path / name
+                if candidate.exists() and candidate.is_file():
+                    colmap_path = candidate
+                    break
+
+        info = {
+            'valid': True,
+            'path': str(colmap_path),
+            'executable': colmap_path.name,
+        }
+
+        try:
+            import subprocess
+            version_cmds = [
+                [str(colmap_path), '--version'],
+                [str(colmap_path), 'version'],
+            ]
+            for cmd in version_cmds:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                output = (result.stdout or result.stderr).strip()
+                if result.returncode == 0 and output:
+                    info['version'] = output.splitlines()[0]
+                    break
+            if 'version' not in info:
+                info['version'] = 'Could not determine version'
+        except Exception as e:
+            info['version'] = f'Could not determine version: {e}'
+
+        return info
     
     # === YOLO MODEL PATH MANAGEMENT ===
     
@@ -382,141 +618,63 @@ class SettingsManager:
     
     def auto_detect_glomap(self) -> Optional[Path]:
         """
-        Auto-detect GloMAP installation.
-        
-        Search order:
-        1. Documents/APLICATIVOS/GloMAP/bin/glomap.exe
-        2. Documents/APLICATIVOS/GloMAP_GUI/glomap/build/bin/Release/glomap.exe
-        3. System PATH (shutil.which)
-        4. C:/Program Files/GloMAP/bin/glomap.exe
-        5. ../glomap/bin/ relative to app
-        
-        Returns:
-            Path to glomap.exe if found, None otherwise
-        """
-        logger.info("Searching for GloMAP...")
-        
-        # 1. Relative to app (workspace bundled binaries)
-        app_dir = Path(__file__).parent.parent.parent
-        relative_candidates = [
-            app_dir / "bin" / "glomap" / "bin" / "glomap.exe",
-            app_dir / "bin" / "glomap" / "glomap.exe",
-            app_dir / "glomap" / "bin" / "glomap.exe",
-        ]
-        for relative_glomap in relative_candidates:
-            if self.is_glomap_valid(relative_glomap):
-                logger.info(f"[OK] GloMAP found at {relative_glomap}")
-                return relative_glomap
+        Backward-compatible resolver for legacy GloMAP path.
 
-        # 2. User Documents folder - pre-built release
-        docs = Path.home() / "Documents"
-        glomap_paths = [
-            docs / "APLICATIVOS" / "GloMAP" / "bin" / "glomap.exe",
-            docs / "APLICATIVOS" / "GloMAP_GUI" / "glomap" / "build" / "bin" / "Release" / "glomap.exe",
-            docs / "APLICATIVOS" / "GloMAP_GUI" / "glomap" / "build" / "Release" / "glomap.exe",
-        ]
-        for path in glomap_paths:
-            if self.is_glomap_valid(path):
-                logger.info(f"[OK] GloMAP found at {path}")
-                return path
-        
-        # 3. System PATH
-        glomap_in_path = shutil.which('glomap')
-        if glomap_in_path:
-            glomap_path = Path(glomap_in_path)
-            if self.is_glomap_valid(glomap_path):
-                logger.info(f"[OK] GloMAP found in PATH: {glomap_path}")
-                return glomap_path
-        
-        # 4. Standard installation locations
-        standard_paths = [
-            Path("C:/Program Files/GloMAP/bin/glomap.exe"),
-            Path("C:/GloMAP/bin/glomap.exe"),
-            Path("C:/colmap/glomap.exe"),
-        ]
-        for path in standard_paths:
-            if self.is_glomap_valid(path):
-                logger.info(f"[OK] GloMAP found at {path}")
-                return path
-        
-        logger.warning("[X] GloMAP not found in any standard location")
-        return None
+        Modern COLMAP builds include `global_mapper`, so we now resolve
+        this value to the COLMAP executable path.
+        """
+        logger.info("Resolving legacy GloMAP path via COLMAP global_mapper support...")
+        return self.get_colmap_gpu_path() or self.auto_detect_colmap()
     
     def is_glomap_valid(self, glomap_path: Optional[Path]) -> bool:
-        """Validate GloMAP path by checking executable exists and is runnable"""
-        if glomap_path is None:
-            return False
-        
-        glomap_path = Path(glomap_path)
-        if glomap_path.is_dir():
-            # If directory provided, look for glomap.exe inside
-            glomap_path = glomap_path / "glomap.exe"
-        
-        return glomap_path.exists() and glomap_path.is_file()
+        """Legacy validator: accepts any valid COLMAP executable path."""
+        return self.is_colmap_valid(glomap_path)
     
     def set_glomap_path(self, path: Optional[Path], auto_detected: bool = False) -> bool:
-        """Set GloMAP path and save. Returns True if valid, False otherwise."""
+        """Legacy setter: persists path, expecting COLMAP executable."""
         if path is None:
             self.settings['glomap_path'] = None
             self.settings['glomap_auto_detected'] = False
             self.save_settings()
-            logger.info("GloMAP path cleared")
+            logger.info("Legacy GloMAP path cleared")
             return True
-        
-        if not self.is_glomap_valid(path):
-            logger.warning(f"Invalid GloMAP path: {path}")
+
+        if not self.is_colmap_valid(path):
+            logger.warning(f"Invalid legacy GloMAP/COLMAP path: {path}")
             return False
-        
-        self.settings['glomap_path'] = str(path)
+
+        self.settings['glomap_path'] = str(Path(path))
         self.settings['glomap_auto_detected'] = auto_detected
         self.save_settings()
-        logger.info(f"GloMAP path set to {path}")
+        logger.info(f"Legacy GloMAP path set to COLMAP executable {path}")
         return True
     
     def get_glomap_path(self) -> Optional[Path]:
-        """Get current GloMAP path"""
+        """Legacy getter: returns dedicated path if set, otherwise COLMAP path."""
         glomap_str = self.settings.get('glomap_path')
         if glomap_str:
             return Path(glomap_str)
-        return None
+        return self.get_colmap_gpu_path()
     
     def get_glomap_info(self, glomap_path: Optional[Path]) -> Dict:
         """
-        Get detailed information about GloMAP installation.
-        
+        Backward-compatible info helper for legacy GloMAP slot.
+
+        Since global mapper is integrated in COLMAP, this proxies COLMAP info.
+
         Returns:
             Dictionary with GloMAP info (version, CUDA support, etc.)
         """
-        if glomap_path is None or not self.is_glomap_valid(glomap_path):
-            return {'valid': False, 'error': 'Invalid or missing GloMAP path'}
-        
-        glomap_path = Path(glomap_path)
-        info = {
-            'valid': True,
-            'path': str(glomap_path),
-            'executable': glomap_path.name,
-            'cuda': False
-        }
-        
-        # Try to get version and CUDA status
-        try:
-            import subprocess
-            result = subprocess.run(
-                [str(glomap_path), '-h'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                output = result.stdout + result.stderr
-                if 'CUDA' in output:
-                    info['cuda'] = True
-                    info['version'] = 'GloMAP (with CUDA)'
-                else:
-                    info['version'] = 'GloMAP (CPU only)'
-        except Exception as e:
-            info['version'] = f'Could not determine version: {e}'
-        
+        if glomap_path is None:
+            glomap_path = self.get_glomap_path()
+
+        if glomap_path is None or not self.is_colmap_valid(glomap_path):
+            return {'valid': False, 'error': 'Invalid or missing COLMAP path for global mapper'}
+
+        info = self.get_colmap_info(glomap_path)
+        if info.get('valid'):
+            info['version'] = f"{info.get('version', 'COLMAP')} (global_mapper integrated)"
+            info['cuda'] = 'cuda' in info.get('version', '').lower() or 'gpu' in info.get('version', '').lower()
         return info
     
     # === GENERAL SETTINGS ===
@@ -673,8 +831,10 @@ class SettingsManager:
         self.settings = {
             'sdk_path': None,
             'ffmpeg_path': None,
+            'spheresfm_path': None,
+            'colmap_gpu_path': None,
+            'colmap_path': None,
             'yolo_model_path': None,
-            'glomap_path': None,
             'auto_detect_on_startup': True,
             'theme': 'dark',
             'output_format': 'PNG',
@@ -714,6 +874,27 @@ class SettingsManager:
             diagnostics.append(("FFmpeg", ffmpeg_valid, ffmpeg_status))
         else:
             diagnostics.append(("FFmpeg", False, "Not configured"))
+
+        # COLMAP
+        spheresfm_path = self.get_spheresfm_path()
+        if spheresfm_path:
+            spheresfm_valid = self.is_colmap_valid(spheresfm_path)
+            spheresfm_info = self.get_colmap_info(spheresfm_path)
+            spheresfm_version = spheresfm_info.get('version', 'Unknown') if spheresfm_valid else 'Unknown'
+            spheresfm_status = f"{spheresfm_path} [{spheresfm_version}]" if spheresfm_valid else f"{spheresfm_path} (INVALID)"
+            diagnostics.append(("SphereSfM", spheresfm_valid, spheresfm_status))
+        else:
+            diagnostics.append(("SphereSfM", False, "Not configured"))
+
+        colmap_path = self.get_colmap_gpu_path()
+        if colmap_path:
+            colmap_valid = self.is_colmap_valid(colmap_path)
+            colmap_info = self.get_colmap_info(colmap_path)
+            colmap_version = colmap_info.get('version', 'Unknown') if colmap_valid else 'Unknown'
+            colmap_status = f"{colmap_path} [{colmap_version}]" if colmap_valid else f"{colmap_path} (INVALID)"
+            diagnostics.append(("COLMAP GPU", colmap_valid, colmap_status))
+        else:
+            diagnostics.append(("COLMAP GPU", False, "Not configured"))
         
         # YOLO Model
         yolo_path = self.get_yolo_model_path()
@@ -723,17 +904,6 @@ class SettingsManager:
             diagnostics.append(("YOLO Model", yolo_valid, yolo_status))
         else:
             diagnostics.append(("YOLO Model", False, "Not configured (will use Ultralytics default)"))
-        
-        # GloMAP
-        glomap_path = self.get_glomap_path()
-        if glomap_path:
-            glomap_valid = self.is_glomap_valid(glomap_path)
-            glomap_info = self.get_glomap_info(glomap_path)
-            cuda_status = " (CUDA)" if glomap_info.get('cuda') else " (CPU)"
-            glomap_status = f"{glomap_path}{cuda_status}" if glomap_valid else f"{glomap_path} (INVALID)"
-            diagnostics.append(("GloMAP", glomap_valid, glomap_status))
-        else:
-            diagnostics.append(("GloMAP", False, "Not configured (will use COLMAP mapper fallback)"))
         
         return diagnostics
 

@@ -176,6 +176,91 @@ class SettingsDialog(QDialog):
         
         ffmpeg_group.setLayout(ffmpeg_layout)
         layout.addWidget(ffmpeg_group)
+
+        # Reconstruction binaries configuration
+        recon_group = QGroupBox("Reconstruction Binaries")
+        recon_layout = QVBoxLayout()
+
+        # SphereSfM path input
+        spheresfm_path_layout = QHBoxLayout()
+        self.spheresfm_path_edit = QLineEdit()
+        self.spheresfm_path_edit.setPlaceholderText("Path to SphereSfM colmap.exe")
+        spheresfm_path_layout.addWidget(self.spheresfm_path_edit, stretch=1)
+
+        self.spheresfm_browse_btn = QPushButton("Browse...")
+        self.spheresfm_browse_btn.clicked.connect(self.browse_spheresfm_path)
+        spheresfm_path_layout.addWidget(self.spheresfm_browse_btn)
+
+        self.spheresfm_clear_btn = QPushButton("Clear")
+        self.spheresfm_clear_btn.clicked.connect(lambda: self.spheresfm_path_edit.clear())
+        spheresfm_path_layout.addWidget(self.spheresfm_clear_btn)
+        recon_layout.addLayout(spheresfm_path_layout)
+
+        self.spheresfm_status_label = QLabel()
+        self.spheresfm_status_label.setWordWrap(True)
+        recon_layout.addWidget(self.spheresfm_status_label)
+
+        test_spheresfm_layout = QHBoxLayout()
+        test_spheresfm_layout.addStretch()
+        self.test_spheresfm_btn = QPushButton("Test SphereSfM")
+        self.test_spheresfm_btn.clicked.connect(self.test_spheresfm)
+        test_spheresfm_layout.addWidget(self.test_spheresfm_btn)
+        recon_layout.addLayout(test_spheresfm_layout)
+
+        # COLMAP GPU path input
+        colmap_path_layout = QHBoxLayout()
+        self.colmap_path_edit = QLineEdit()
+        self.colmap_path_edit.setPlaceholderText("Path to COLMAP GPU colmap.exe / colmap.bat")
+        colmap_path_layout.addWidget(self.colmap_path_edit, stretch=1)
+
+        self.colmap_browse_btn = QPushButton("Browse...")
+        self.colmap_browse_btn.clicked.connect(self.browse_colmap_path)
+        colmap_path_layout.addWidget(self.colmap_browse_btn)
+
+        self.colmap_clear_btn = QPushButton("Clear")
+        self.colmap_clear_btn.clicked.connect(lambda: self.colmap_path_edit.clear())
+        colmap_path_layout.addWidget(self.colmap_clear_btn)
+        recon_layout.addLayout(colmap_path_layout)
+
+        self.colmap_status_label = QLabel()
+        self.colmap_status_label.setWordWrap(True)
+        recon_layout.addWidget(self.colmap_status_label)
+
+        test_colmap_layout = QHBoxLayout()
+        test_colmap_layout.addStretch()
+        self.test_colmap_btn = QPushButton("Test COLMAP GPU")
+        self.test_colmap_btn.clicked.connect(self.test_colmap)
+        test_colmap_layout.addWidget(self.test_colmap_btn)
+        recon_layout.addLayout(test_colmap_layout)
+
+        # Global Mapper path input (legacy key; uses COLMAP executable)
+        glomap_path_layout = QHBoxLayout()
+        self.glomap_path_edit = QLineEdit()
+        self.glomap_path_edit.setPlaceholderText("Path to colmap.exe for global_mapper")
+        glomap_path_layout.addWidget(self.glomap_path_edit, stretch=1)
+
+        self.glomap_browse_btn = QPushButton("Browse...")
+        self.glomap_browse_btn.clicked.connect(self.browse_glomap_path)
+        glomap_path_layout.addWidget(self.glomap_browse_btn)
+
+        self.glomap_clear_btn = QPushButton("Clear")
+        self.glomap_clear_btn.clicked.connect(lambda: self.glomap_path_edit.clear())
+        glomap_path_layout.addWidget(self.glomap_clear_btn)
+        recon_layout.addLayout(glomap_path_layout)
+
+        self.glomap_status_label = QLabel()
+        self.glomap_status_label.setWordWrap(True)
+        recon_layout.addWidget(self.glomap_status_label)
+
+        test_glomap_layout = QHBoxLayout()
+        test_glomap_layout.addStretch()
+        self.test_glomap_btn = QPushButton("Test Global Mapper")
+        self.test_glomap_btn.clicked.connect(self.test_glomap)
+        test_glomap_layout.addWidget(self.test_glomap_btn)
+        recon_layout.addLayout(test_glomap_layout)
+
+        recon_group.setLayout(recon_layout)
+        layout.addWidget(recon_group)
         
         layout.addStretch()
         return widget
@@ -293,6 +378,24 @@ class SettingsDialog(QDialog):
         if ffmpeg_path:
             self.ffmpeg_path_edit.setText(str(ffmpeg_path))
         self.update_ffmpeg_status()
+
+        # SphereSfM path
+        spheresfm_path = self.settings.get_spheresfm_path()
+        if spheresfm_path:
+            self.spheresfm_path_edit.setText(str(spheresfm_path))
+        self.update_spheresfm_status()
+
+        # COLMAP GPU path
+        colmap_path = self.settings.get_colmap_gpu_path()
+        if colmap_path:
+            self.colmap_path_edit.setText(str(colmap_path))
+        self.update_colmap_status()
+
+        # Global mapper path mirrors COLMAP path
+        glomap_path = self.settings.get_colmap_gpu_path()
+        if glomap_path:
+            self.glomap_path_edit.setText(str(glomap_path))
+        self.update_glomap_status()
         
         # Performance options
         self.skip_intermediate_checkbox.setChecked(self.settings.get_skip_intermediate_save())
@@ -365,6 +468,77 @@ class SettingsDialog(QDialog):
         else:
             self.ffmpeg_status_label.setText("❌ Invalid FFmpeg path")
             self.ffmpeg_status_label.setStyleSheet("color: red;")
+
+    def update_colmap_status(self):
+        """Update COLMAP GPU status label"""
+        colmap_path_str = self.colmap_path_edit.text().strip()
+        if not colmap_path_str:
+            self.colmap_status_label.setText("⚠️ No COLMAP GPU path configured")
+            self.colmap_status_label.setStyleSheet("color: orange;")
+            return
+
+        colmap_path = Path(colmap_path_str)
+        if self.settings.is_colmap_valid(colmap_path):
+            info = self.settings.get_colmap_info(colmap_path)
+            status = f"✅ Valid COLMAP GPU found - {info.get('version', 'Version unknown')}"
+            self.colmap_status_label.setText(status)
+            self.colmap_status_label.setStyleSheet("color: green;")
+        else:
+            self.colmap_status_label.setText("❌ Invalid COLMAP GPU path")
+            self.colmap_status_label.setStyleSheet("color: red;")
+
+    def update_spheresfm_status(self):
+        """Update SphereSfM status label"""
+        spheresfm_path_str = self.spheresfm_path_edit.text().strip()
+        if not spheresfm_path_str:
+            self.spheresfm_status_label.setText("⚠️ No SphereSfM path configured")
+            self.spheresfm_status_label.setStyleSheet("color: orange;")
+            return
+
+        spheresfm_path = Path(spheresfm_path_str)
+        if self.settings.is_colmap_valid(spheresfm_path):
+            info = self.settings.get_colmap_info(spheresfm_path)
+            status = f"✅ Valid SphereSfM found - {info.get('version', 'Version unknown')}"
+            self.spheresfm_status_label.setText(status)
+            self.spheresfm_status_label.setStyleSheet("color: green;")
+        else:
+            self.spheresfm_status_label.setText("❌ Invalid SphereSfM path")
+            self.spheresfm_status_label.setStyleSheet("color: red;")
+
+    def browse_spheresfm_path(self):
+        """Open file browser for SphereSfM executable"""
+        current = self.spheresfm_path_edit.text().strip()
+        start_dir = str(Path(current).parent) if current and Path(current).exists() else ""
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select SphereSfM Executable",
+            start_dir,
+            "Executables (*.exe *.bat *.cmd);;All Files (*.*)"
+        )
+
+        if file_path:
+            self.spheresfm_path_edit.setText(file_path)
+            self.update_spheresfm_status()
+
+    def update_glomap_status(self):
+        """Update global mapper status label (resolved via COLMAP)."""
+        glomap_path_str = self.glomap_path_edit.text().strip()
+        if not glomap_path_str:
+            self.glomap_status_label.setText("⚠️ No global mapper path configured")
+            self.glomap_status_label.setStyleSheet("color: orange;")
+            return
+
+        glomap_path = Path(glomap_path_str)
+        if self.settings.is_colmap_valid(glomap_path):
+            info = self.settings.get_colmap_info(glomap_path)
+            cuda_text = "CUDA" if info.get('cuda') else "CPU"
+            status = f"✅ Global mapper ready - {info.get('version', 'Version unknown')} [{cuda_text}]"
+            self.glomap_status_label.setText(status)
+            self.glomap_status_label.setStyleSheet("color: green;")
+        else:
+            self.glomap_status_label.setText("❌ Invalid global mapper path")
+            self.glomap_status_label.setStyleSheet("color: red;")
     
     def browse_sdk_path(self):
         """Open folder browser for SDK path"""
@@ -397,9 +571,41 @@ class SettingsDialog(QDialog):
         if file_path:
             self.ffmpeg_path_edit.setText(file_path)
             self.update_ffmpeg_status()
+
+    def browse_colmap_path(self):
+        """Open file browser for COLMAP executable"""
+        current = self.colmap_path_edit.text().strip()
+        start_dir = str(Path(current).parent) if current and Path(current).exists() else ""
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select COLMAP Executable",
+            start_dir,
+            "Executables (*.exe *.bat *.cmd);;All Files (*.*)"
+        )
+
+        if file_path:
+            self.colmap_path_edit.setText(file_path)
+            self.update_colmap_status()
+
+    def browse_glomap_path(self):
+        """Open file browser for COLMAP executable used by global_mapper."""
+        current = self.glomap_path_edit.text().strip()
+        start_dir = str(Path(current).parent) if current and Path(current).exists() else ""
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select COLMAP Executable (global_mapper)",
+            start_dir,
+            "Executables (*.exe *.bat *.cmd);;All Files (*.*)"
+        )
+
+        if file_path:
+            self.glomap_path_edit.setText(file_path)
+            self.update_glomap_status()
     
     def detect_paths_now(self):
-        """Run auto-detection for both SDK and FFmpeg"""
+        """Run auto-detection for important dependencies."""
         self.detect_now_btn.setEnabled(False)
         self.detect_now_btn.setText("Detecting...")
         
@@ -414,23 +620,66 @@ class SettingsDialog(QDialog):
         if ffmpeg_path:
             self.ffmpeg_path_edit.setText(str(ffmpeg_path))
             self.update_ffmpeg_status()
+
+        # Detect SphereSfM
+        spheresfm_path = self.settings.auto_detect_spheresfm()
+        if spheresfm_path:
+            self.spheresfm_path_edit.setText(str(spheresfm_path))
+            self.update_spheresfm_status()
+
+        # Detect COLMAP GPU
+        colmap_path = self.settings.auto_detect_colmap()
+        if colmap_path:
+            self.colmap_path_edit.setText(str(colmap_path))
+            self.update_colmap_status()
+
+        # Global mapper uses the same COLMAP executable
+        glomap_path = colmap_path
+        if glomap_path:
+            self.glomap_path_edit.setText(str(glomap_path))
+            self.update_glomap_status()
         
         self.detect_now_btn.setEnabled(True)
         self.detect_now_btn.setText("Detect Now")
         
-        if sdk_path or ffmpeg_path:
+        if sdk_path or ffmpeg_path or spheresfm_path or colmap_path or glomap_path:
             QMessageBox.information(
                 self,
                 "Detection Complete",
                 f"Found:\n" +
                 (f"✓ SDK: {sdk_path}\n" if sdk_path else "✗ SDK not found\n") +
-                (f"✓ FFmpeg: {ffmpeg_path}" if ffmpeg_path else "✗ FFmpeg not found")
+                (f"✓ FFmpeg: {ffmpeg_path}\n" if ffmpeg_path else "✗ FFmpeg not found\n") +
+                (f"✓ SphereSfM: {spheresfm_path}\n" if spheresfm_path else "✗ SphereSfM not found\n") +
+                (f"✓ COLMAP GPU: {colmap_path}\n" if colmap_path else "✗ COLMAP GPU not found\n") +
+                (f"✓ Global Mapper (via COLMAP): {glomap_path}" if glomap_path else "✗ Global Mapper path not found")
             )
         else:
             QMessageBox.warning(
                 self,
                 "Detection Failed",
-                "Could not auto-detect SDK or FFmpeg.\nPlease browse manually."
+                "Could not auto-detect SDK/FFmpeg/SphereSfM/COLMAP GPU/global mapper path.\nPlease browse manually."
+            )
+
+    def test_spheresfm(self):
+        """Test SphereSfM configuration"""
+        spheresfm_path_str = self.spheresfm_path_edit.text().strip()
+        if not spheresfm_path_str:
+            QMessageBox.warning(self, "No Path", "Please enter SphereSfM path first")
+            return
+
+        spheresfm_path = Path(spheresfm_path_str)
+        info = self.settings.get_colmap_info(spheresfm_path)
+
+        if info['valid']:
+            msg = f"✅ SphereSfM is valid and ready to use!\n\n"
+            msg += f"Version: {info.get('version', 'Unknown')}\n"
+            msg += f"Path: {info.get('path', 'N/A')}\n"
+            QMessageBox.information(self, "SphereSfM Test - Success", msg)
+        else:
+            QMessageBox.critical(
+                self,
+                "SphereSfM Test - Failed",
+                f"❌ SphereSfM validation failed:\n{info.get('error', 'Unknown error')}"
             )
     
     def test_sdk(self):
@@ -482,6 +731,51 @@ class SettingsDialog(QDialog):
                 "FFmpeg Test - Failed",
                 f"❌ FFmpeg validation failed:\n{info.get('error', 'Unknown error')}"
             )
+
+    def test_colmap(self):
+        """Test COLMAP GPU configuration"""
+        colmap_path_str = self.colmap_path_edit.text().strip()
+        if not colmap_path_str:
+            QMessageBox.warning(self, "No Path", "Please enter COLMAP GPU path first")
+            return
+
+        colmap_path = Path(colmap_path_str)
+        info = self.settings.get_colmap_info(colmap_path)
+
+        if info['valid']:
+            msg = f"✅ COLMAP GPU is valid and ready to use!\n\n"
+            msg += f"Version: {info.get('version', 'Unknown')}\n"
+            msg += f"Path: {info.get('path', 'N/A')}\n"
+            QMessageBox.information(self, "COLMAP GPU Test - Success", msg)
+        else:
+            QMessageBox.critical(
+                self,
+                "COLMAP GPU Test - Failed",
+                f"❌ COLMAP GPU validation failed:\n{info.get('error', 'Unknown error')}"
+            )
+
+    def test_glomap(self):
+        """Test global mapper configuration (via COLMAP)."""
+        glomap_path_str = self.glomap_path_edit.text().strip()
+        if not glomap_path_str:
+            QMessageBox.warning(self, "No Path", "Please enter COLMAP/global mapper path first")
+            return
+
+        glomap_path = Path(glomap_path_str)
+        info = self.settings.get_colmap_info(glomap_path)
+
+        if info['valid']:
+            msg = f"✅ Global mapper is valid and ready to use!\n\n"
+            msg += f"Version: {info.get('version', 'Unknown')}\n"
+            msg += f"Path: {info.get('path', 'N/A')}\n"
+            msg += f"CUDA support: {'✓' if info.get('cuda') else '✗'}\n"
+            QMessageBox.information(self, "Global Mapper Test - Success", msg)
+        else:
+            QMessageBox.critical(
+                self,
+                "Global Mapper Test - Failed",
+                f"❌ Global mapper validation failed:\n{info.get('error', 'Unknown error')}"
+            )
     
     def refresh_system_info(self):
         """Refresh system information display"""
@@ -498,6 +792,49 @@ class SettingsDialog(QDialog):
             info_lines.append(f"Executable: {sdk_info.get('executable', 'N/A')}")
             info_lines.append(f"Models: {len(sdk_info.get('models', []))}")
             info_lines.append(f"Auto-detected: {'Yes' if self.settings.settings.get('sdk_auto_detected') else 'No'}")
+        else:
+            info_lines.append("Status: Not configured")
+
+        info_lines.append("")
+
+        # SphereSfM info
+        info_lines.append("=== SPHERESFM ===")
+        spheresfm_path = self.settings.get_spheresfm_path()
+        if spheresfm_path:
+            spheresfm_info = self.settings.get_colmap_info(spheresfm_path)
+            info_lines.append(f"Status: {'✓ Valid' if spheresfm_info['valid'] else '✗ Invalid'}")
+            info_lines.append(f"Version: {spheresfm_info.get('version', 'Unknown')}")
+            info_lines.append(f"Path: {spheresfm_info.get('path', 'N/A')}")
+            info_lines.append(f"Auto-detected: {'Yes' if self.settings.settings.get('spheresfm_auto_detected') else 'No'}")
+        else:
+            info_lines.append("Status: Not configured")
+
+        info_lines.append("")
+
+        # COLMAP GPU info
+        info_lines.append("=== COLMAP GPU ===")
+        colmap_path = self.settings.get_colmap_gpu_path()
+        if colmap_path:
+            colmap_info = self.settings.get_colmap_info(colmap_path)
+            info_lines.append(f"Status: {'✓ Valid' if colmap_info['valid'] else '✗ Invalid'}")
+            info_lines.append(f"Version: {colmap_info.get('version', 'Unknown')}")
+            info_lines.append(f"Path: {colmap_info.get('path', 'N/A')}")
+            info_lines.append(f"Auto-detected: {'Yes' if self.settings.settings.get('colmap_auto_detected') else 'No'}")
+        else:
+            info_lines.append("Status: Not configured")
+
+        info_lines.append("")
+
+        # Global mapper info (legacy GloMAP key)
+        info_lines.append("=== GLOBAL MAPPER (COLMAP) ===")
+        glomap_path = self.settings.get_colmap_gpu_path()
+        if glomap_path:
+            glomap_info = self.settings.get_colmap_info(glomap_path)
+            info_lines.append(f"Status: {'✓ Valid' if glomap_info['valid'] else '✗ Invalid'}")
+            info_lines.append(f"Version: {glomap_info.get('version', 'Unknown')}")
+            info_lines.append(f"Path: {glomap_info.get('path', 'N/A')}")
+            info_lines.append(f"CUDA support: {'✓ Available' if glomap_info.get('cuda') else '✗ Not available'}")
+            info_lines.append(f"Auto-detected: {'Yes' if self.settings.settings.get('colmap_auto_detected') else 'No'}")
         else:
             info_lines.append("Status: Not configured")
         
@@ -587,6 +924,36 @@ class SettingsDialog(QDialog):
                 return
         else:
             self.settings.set_ffmpeg_path(None)
+
+        # Save SphereSfM path
+        spheresfm_path_str = self.spheresfm_path_edit.text().strip()
+        if spheresfm_path_str:
+            spheresfm_path = Path(spheresfm_path_str)
+            if not self.settings.set_spheresfm_path(spheresfm_path, auto_detected=False):
+                QMessageBox.warning(
+                    self,
+                    "Invalid SphereSfM Path",
+                    "The SphereSfM path is invalid. Please check the path and try again."
+                )
+                return
+        else:
+            self.settings.set_spheresfm_path(None)
+
+        # Save COLMAP GPU path
+        colmap_path_str = self.colmap_path_edit.text().strip()
+        if colmap_path_str:
+            colmap_path = Path(colmap_path_str)
+            if not self.settings.set_colmap_gpu_path(colmap_path, auto_detected=False):
+                QMessageBox.warning(
+                    self,
+                    "Invalid COLMAP GPU Path",
+                    "The COLMAP GPU path is invalid. Please check the path and try again."
+                )
+                return
+        else:
+            self.settings.set_colmap_gpu_path(None)
+
+        # Global mapper path is no longer persisted separately; it follows COLMAP path.
         
         # Emit signal and close
         self.settings_changed.emit()

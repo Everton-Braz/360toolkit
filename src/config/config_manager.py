@@ -249,7 +249,7 @@ class ConfigManager:
             
             # 3D Reconstruction
             'stage4_enabled': True,
-            'alignment_tool': 'glomap',
+            'alignment_tool': 'colmap',
             'use_gpu_colmap': True,
             
             # Training/Export

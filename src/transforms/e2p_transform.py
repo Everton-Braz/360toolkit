@@ -318,16 +318,10 @@ class TorchE2PTransform:
         # grid_u = phi / pi.
         
         # Normalized V (Latitude): -1 (top) to 1 (bottom)
-        # theta ranges -pi/2 to pi/2.
-        # Original map_y goes 0 to H.
-        # map_y = (pi/2 + theta) * H / pi
-        # Normalized V = map_y / H * 2 - 1
-        # = (pi/2 + theta) / pi * 2 - 1
-        # = (0.5 + theta/pi) * 2 - 1
-        # = 1 + 2*theta/pi - 1
-        # = 2 * theta / pi
-        
-        grid_v = 2 * theta / math.pi
+        # Standard equirectangular: zenith(sky) at top (row=0 → grid_v=-1)
+        # theta ranges -pi/2 (nadir/ground) to +pi/2 (zenith/sky)
+        # We want: theta=+pi/2 → grid_v=-1 (top) and theta=-pi/2 → grid_v=+1 (bottom)
+        grid_v = -2 * theta / math.pi
         
         # Stack to (H, W, 2)
         grid = torch.stack((grid_u, grid_v), dim=-1)
@@ -468,8 +462,11 @@ class E2PTransform:
         # Longitude maps to x-coordinate
         map_x = (phi + math.pi) * equirect_width / (2 * math.pi)
         
-        # Latitude maps to y-coordinate (corrected orientation)
-        map_y = (math.pi/2 + theta) * equirect_height / math.pi
+        # Latitude maps to y-coordinate (standard: sky/zenith at top = row 0)
+        # theta=+π/2 (sky)   → map_y = 0        (top row)
+        # theta=0   (horizon)→ map_y = h/2      (middle)
+        # theta=-π/2 (nadir) → map_y = h        (bottom row)
+        map_y = (math.pi/2 - theta) * equirect_height / math.pi
         
         # Ensure coordinates are within bounds
         map_x = np.clip(map_x, 0, equirect_width - 1)

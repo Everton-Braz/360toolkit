@@ -6,6 +6,7 @@ Unified photogrammetry preprocessing pipeline.
 import sys
 import os
 import multiprocessing
+from pathlib import Path
 
 # CRITICAL: Must be called at the very start for PyInstaller on Windows
 # This prevents child processes from spawning new GUI windows
@@ -13,7 +14,37 @@ if __name__ == '__main__':
     multiprocessing.freeze_support()
 
 import logging
-from pathlib import Path
+
+
+def _bootstrap_windows_dlls() -> None:
+    if os.name != "nt":
+        return
+
+    candidate_dirs = [
+        Path(sys.prefix) / "Library" / "bin",
+        Path(sys.prefix) / "Lib" / "site-packages" / "torch" / "lib",
+        Path(sys.prefix) / "Lib" / "site-packages" / "onnxruntime" / "capi",
+    ]
+
+    existing_path = os.environ.get("PATH", "")
+    prepend: list[str] = []
+
+    for dll_dir in candidate_dirs:
+        if dll_dir.exists():
+            dir_str = str(dll_dir)
+            try:
+                if hasattr(os, "add_dll_directory"):
+                    os.add_dll_directory(dir_str)
+            except Exception:
+                pass
+            if dir_str not in existing_path:
+                prepend.append(dir_str)
+
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join(prepend + [existing_path])
+
+
+_bootstrap_windows_dlls()
 
 # Setup logging
 logging.basicConfig(

@@ -40,7 +40,9 @@ from src.ui.widgets import (
     StageSummaryStrip,
     StageActionFooter,
     FormRow,
+    MediaProcessingPanel,
 )
+from src.ui.preview_panels import EquirectPreviewWidget
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,11 @@ class MainWindow(QMainWindow):
         # Trigger initial visibility  
         self.on_extraction_method_changed(0)
         self._update_overview_stage_summary()
+        self.on_settings_changed()
+
+        # Connect input file path to Stage 1 equirectangular preview
+        if hasattr(self, 'stage1_eq_preview'):
+            self.input_file_edit.textChanged.connect(self.stage1_eq_preview.set_video_path)
         
         # Show maximized by default
         self.showMaximized()
@@ -495,12 +502,27 @@ class MainWindow(QMainWindow):
     # ========================================================================
     # PAGE 1: FRAME EXTRACTION
     # ========================================================================
-    def _create_stage1_page(self) -> QScrollArea:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(20, 16, 20, 16)
+    def _create_stage1_page(self) -> QWidget:
+        """
+        Frame Extraction page — horizontal splitter:
+          Left:  live 360° equirectangular preview (EquirectPreviewWidget)
+          Right: scrollable config panel (existing cards + Media Processing)
+        """
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(4)
+
+        # ── LEFT: Equirectangular preview ────────────────────────────────────
+        self.stage1_eq_preview = EquirectPreviewWidget()
+        self.stage1_eq_preview.setMinimumWidth(260)
+        splitter.addWidget(self.stage1_eq_preview)
+
+        # ── RIGHT: Scrollable config ─────────────────────────────────────────
+        right_page = QWidget()
+        layout = QVBoxLayout(right_page)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(16)
-        
+
         layout.addWidget(StageHeader(
             "Frame Extraction",
             "Extract equirectangular frames from Insta360 .INSV or .mp4 video files."
@@ -510,7 +532,7 @@ class MainWindow(QMainWindow):
             "Extraction",
             "Configure extraction range, method, and quality, then validate metadata before running."
         ))
-        
+
         # File Analysis card
         card_analysis = CardWidget("File Analysis")
         analyze_row = QHBoxLayout()
@@ -520,14 +542,14 @@ class MainWindow(QMainWindow):
         analyze_row.addWidget(analyze_btn)
         analyze_row.addStretch()
         card_analysis.addLayout(analyze_row)
-        
+
         self.file_metadata_label = QLabel("No file analyzed yet. Click 'Analyze Input File' to see metadata.")
         self.file_metadata_label.setObjectName("metadataLabel")
         self.file_metadata_label.setProperty("state", "idle")
         self.file_metadata_label.setWordWrap(True)
         card_analysis.addWidget(self.file_metadata_label)
         layout.addWidget(card_analysis)
-        
+
         # Time Range card
         card_time = CardWidget("Time Range")
         self.full_video_check = QCheckBox("Extract full video")
@@ -556,10 +578,10 @@ class MainWindow(QMainWindow):
         time_row.addStretch()
         card_time.addWidget(FormRow("Range (s):", time_range_widget, "Start and end in seconds"))
         layout.addWidget(card_time)
-        
+
         # Extraction Settings card
         card_extract = CardWidget("Extraction Settings")
-        
+
         # FPS
         self.fps_spin = QDoubleSpinBox()
         self.fps_spin.setRange(0.1, 30.0)
@@ -567,7 +589,7 @@ class MainWindow(QMainWindow):
         self.fps_spin.setSingleStep(0.1)
         self.fps_spin.setFixedWidth(100)
         card_extract.addWidget(FormRow("Frame Rate (FPS):", self.fps_spin, "Range: 0.1 to 30.0"))
-        
+
         # Method
         self.extraction_method_combo = QComboBox()
         for key, value in EXTRACTION_METHODS.items():
@@ -575,7 +597,7 @@ class MainWindow(QMainWindow):
         self.extraction_method_combo.setMinimumWidth(300)
         self.extraction_method_combo.currentIndexChanged.connect(self.on_extraction_method_changed)
         card_extract.addWidget(FormRow("Extraction Method:", self.extraction_method_combo))
-        
+
         # SDK Quality (hidden by default)
         self.sdk_quality_widget = QWidget()
         sdk_q_layout = QHBoxLayout(self.sdk_quality_widget)
@@ -593,7 +615,7 @@ class MainWindow(QMainWindow):
         sdk_q_layout.addStretch()
         self.sdk_quality_widget.setVisible(False)
         card_extract.addWidget(self.sdk_quality_widget)
-        
+
         # SDK Resolution (hidden by default)
         self.sdk_res_widget = QWidget()
         sdk_r_layout = QHBoxLayout(self.sdk_res_widget)
@@ -611,23 +633,55 @@ class MainWindow(QMainWindow):
         sdk_r_layout.addStretch()
         self.sdk_res_widget.setVisible(False)
         card_extract.addWidget(self.sdk_res_widget)
-        
+
         # Output Format
         self.output_format_combo = QComboBox()
         self.output_format_combo.addItem("PNG (Lossless)", "png")
         self.output_format_combo.addItem("JPEG (Compressed)", "jpeg")
         self.output_format_combo.setFixedWidth(200)
         card_extract.addWidget(FormRow("Output Format:", self.output_format_combo))
-        
+
         layout.addWidget(card_extract)
 
+        # ── Media Processing card (SDK only) ─────────────────────────────────
+        self.stage1_media_card = CardWidget("Media Processing")
+        self.stage1_media_panel = MediaProcessingPanel()
+        self.stage1_media_card.addWidget(self.stage1_media_panel)
+        self.stage1_media_card.setVisible(False)   # shown only when SDK is selected
+        layout.addWidget(self.stage1_media_card)
+
+        # Footer
         stage1_footer = StageActionFooter("Run Extraction")
         stage1_footer.primary_button.clicked.connect(self.run_stage_1_only)
         stage1_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(1))
         layout.addWidget(stage1_footer)
 
         layout.addStretch()
-        return self._scroll_wrap(page)
+
+        # Wrap right side in a QScrollArea
+        right_scroll = QScrollArea()
+        right_scroll.setWidget(right_page)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setMinimumWidth(360)
+        splitter.addWidget(right_scroll)
+
+        # Set initial sizes: preview gets ~60 %, config gets ~40 %
+        splitter.setSizes([600, 400])
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
+        # ── Connect signals ───────────────────────────────────────────────────
+        # Preview updates when view orientation sliders change
+        self.stage1_media_panel.view_changed.connect(
+            lambda y, p, r: self.stage1_eq_preview.set_view(y, p, r)
+        )
+        # Preview updates when any color/option slider changes
+        self.stage1_media_panel.values_changed.connect(
+            self.stage1_eq_preview.set_color_opts
+        )
+
+        return splitter
     
     # ========================================================================
     # PAGE 2: PERSPECTIVE SPLIT
@@ -1019,12 +1073,12 @@ class MainWindow(QMainWindow):
         self.mode_rig_sfm_radio = QRadioButton("Perspective Reconstruction (Recommended)")
         self.mode_rig_sfm_radio.setChecked(True)
         self.mode_rig_sfm_radio.setToolTip(
-            "Split equirect → perspectives, then COLMAP GPU / GLOMAP SfM\n"
+            "Split equirect → perspectives, then COLMAP GPU SfM\n"
             "Works for RealityScan, Metashape, COLMAP, Lichtfeld Studio, any 3DGS trainer"
         )
         self.alignment_mode_group.addButton(self.mode_rig_sfm_radio, 0)
         card_method.addWidget(self.mode_rig_sfm_radio)
-        desc_b = QLabel("  COLMAP GPU / GLOMAP on perspective images | Universal output")
+        desc_b = QLabel("  COLMAP GPU on perspective images | Universal output")
         desc_b.setProperty("role", "indentedMuted")
         card_method.addWidget(desc_b)
         
@@ -1083,41 +1137,37 @@ class MainWindow(QMainWindow):
         card_perf.addWidget(self.use_gpu_colmap_check)
 
         self.mapping_backend_combo = QComboBox()
-        self.mapping_backend_combo.addItem("COLMAP Incremental (default)", "colmap")
-        self.mapping_backend_combo.addItem("GloMAP Global Mapper", "glomap")
+        self.mapping_backend_combo.addItem("COLMAP Incremental", "colmap")
+        self.mapping_backend_combo.addItem("COLMAP Global Mapper (integrated GLOMAP)", "glomap")
+        self.mapping_backend_combo.setCurrentIndex(1)
         card_perf.addWidget(FormRow("Mapping Backend:", self.mapping_backend_combo))
 
-        self.colmap_path_edit = QLineEdit()
-        self.colmap_path_edit.setPlaceholderText("Optional: path to external colmap.exe (GPU build)")
-        colmap_path_row = QHBoxLayout()
-        colmap_path_row.setContentsMargins(0, 0, 0, 0)
-        colmap_path_row.setSpacing(8)
-        colmap_path_row.addWidget(self.colmap_path_edit, 1)
-        colmap_browse = QPushButton("Browse...")
-        colmap_browse.setFixedWidth(80)
-        colmap_browse.clicked.connect(self.browse_colmap_path)
-        colmap_path_row.addWidget(colmap_browse)
-        colmap_path_widget = QWidget()
-        colmap_path_widget.setLayout(colmap_path_row)
-        card_perf.addWidget(FormRow("COLMAP Binary:", colmap_path_widget))
+        self.enable_hloc_fallback_check = QCheckBox("Enable HLOC fallback (ALIKED + LightGlue)")
+        self.enable_hloc_fallback_check.setChecked(True)
+        card_perf.addWidget(self.enable_hloc_fallback_check)
 
-        self.glomap_path_edit = QLineEdit()
-        self.glomap_path_edit.setPlaceholderText("Optional: path to glomap.exe")
-        glomap_path_row = QHBoxLayout()
-        glomap_path_row.setContentsMargins(0, 0, 0, 0)
-        glomap_path_row.setSpacing(8)
-        glomap_path_row.addWidget(self.glomap_path_edit, 1)
-        glomap_browse = QPushButton("Browse...")
-        glomap_browse.setFixedWidth(80)
-        glomap_browse.clicked.connect(self.browse_glomap_path)
-        glomap_path_row.addWidget(glomap_browse)
-        glomap_path_widget = QWidget()
-        glomap_path_widget.setLayout(glomap_path_row)
-        card_perf.addWidget(FormRow("GloMAP Binary:", glomap_path_widget))
+        self.prefer_colmap_learned_check = QCheckBox("Prefer COLMAP learned extractor (ALIKED)")
+        self.prefer_colmap_learned_check.setChecked(False)
+        self.prefer_colmap_learned_check.setToolTip(
+            "If enabled, try COLMAP ALIKED first. If disabled, large jobs may prefer HLOC learned fallback automatically."
+        )
+        card_perf.addWidget(self.prefer_colmap_learned_check)
 
-        default_glomap = self.settings.get_glomap_path() or self.settings.auto_detect_glomap()
-        if default_glomap:
-            self.glomap_path_edit.setText(str(default_glomap))
+        self.require_learned_pipeline_check = QCheckBox("All-or-fail: require learned pipeline")
+        self.require_learned_pipeline_check.setChecked(False)
+        self.require_learned_pipeline_check.setToolTip(
+            "If enabled, reconstruction fails unless ALIKED+LightGlue (or HLOC fallback) is actually used."
+        )
+        card_perf.addWidget(self.require_learned_pipeline_check)
+
+        self.recon_paths_label = QLabel("")
+        self.recon_paths_label.setWordWrap(True)
+        card_perf.addWidget(FormRow("Dependency Paths:", self.recon_paths_label))
+
+        open_settings_btn = QPushButton("Manage in Settings")
+        open_settings_btn.setFixedWidth(160)
+        open_settings_btn.clicked.connect(self.open_settings)
+        card_perf.addWidget(open_settings_btn)
         layout.addWidget(card_perf)
         
         # Export card
@@ -1587,6 +1637,8 @@ class MainWindow(QMainWindow):
     def detect_paths(self):
         sdk = self.settings.auto_detect_sdk()
         ffmpeg = self.settings.auto_detect_ffmpeg()
+        spheresfm = self.settings.auto_detect_spheresfm()
+        colmap = self.settings.auto_detect_colmap()
         msg = "Path Detection Results:\n\n"
         if sdk:
             self.settings.set_sdk_path(sdk, auto_detected=True)
@@ -1598,6 +1650,16 @@ class MainWindow(QMainWindow):
             msg += f"[OK] FFmpeg: {ffmpeg}\n"
         else:
             msg += "[X] FFmpeg not found\n"
+        if spheresfm:
+            self.settings.set_spheresfm_path(spheresfm, auto_detected=True)
+            msg += f"[OK] SphereSfM: {spheresfm}\n"
+        else:
+            msg += "[X] SphereSfM not found\n"
+        if colmap:
+            self.settings.set_colmap_gpu_path(colmap, auto_detected=True)
+            msg += f"[OK] COLMAP GPU: {colmap}\n"
+        else:
+            msg += "[X] COLMAP GPU not found\n"
         QMessageBox.information(self, "Path Detection", msg)
         self.on_settings_changed()
     
@@ -1605,12 +1667,36 @@ class MainWindow(QMainWindow):
         self.apply_theme()
         sdk_path = self.settings.get_sdk_path()
         ffmpeg_path = self.settings.get_ffmpeg_path()
+        spheresfm_path = self.settings.get_spheresfm_path()
+        colmap_path = self.settings.get_colmap_gpu_path()
+        colmap_version = "Unknown"
+        if colmap_path:
+            try:
+                colmap_info = self.settings.get_colmap_info(colmap_path)
+                colmap_version = colmap_info.get('version', 'Unknown')
+                logger.info(f"[Diagnostics] COLMAP executable: {colmap_info.get('path', colmap_path)}")
+                logger.info(f"[Diagnostics] COLMAP version: {colmap_version}")
+            except Exception as colmap_info_error:
+                logger.warning(f"[Diagnostics] Failed to query COLMAP version: {colmap_info_error}")
         parts = []
         if sdk_path:
             parts.append(f"SDK: {sdk_path.name}")
         if ffmpeg_path:
             parts.append(f"FFmpeg: {ffmpeg_path.name}")
-        self.statusBar().showMessage(" | ".join(parts) if parts else "SDK/FFmpeg not configured")
+        if spheresfm_path:
+            parts.append(f"SphereSfM: {spheresfm_path.name}")
+        if colmap_path:
+            parts.append(f"COLMAP GPU: {colmap_path.name}")
+        self.statusBar().showMessage(" | ".join(parts) if parts else "Dependencies not configured")
+
+        if hasattr(self, 'recon_paths_label'):
+            spheresfm_text = str(spheresfm_path) if spheresfm_path else "Not configured"
+            colmap_text = str(colmap_path) if colmap_path else "Not configured"
+            self.recon_paths_label.setText(
+                f"SphereSfM: {spheresfm_text}\n"
+                f"COLMAP GPU: {colmap_text}\n"
+                f"COLMAP Version: {colmap_version}"
+            )
     
     def show_about(self):
         QMessageBox.about(self, f"About {APP_NAME}",
@@ -1680,8 +1766,15 @@ class MainWindow(QMainWindow):
             'alignment_mode': self._get_alignment_mode(),
             'use_gpu_colmap': self.use_gpu_colmap_check.isChecked(),
             'colmap_quality': self.colmap_quality_combo.currentIndex(),
-            'sphere_alignment_path': self.colmap_path_edit.text().strip() or None,
-            'glomap_path': self.glomap_path_edit.text().strip() or None,
+            'use_lightglue_aliked': True,
+            'prefer_colmap_learned': self.prefer_colmap_learned_check.isChecked(),
+            'enable_hloc_fallback': self.enable_hloc_fallback_check.isChecked(),
+            'require_learned_pipeline': self.require_learned_pipeline_check.isChecked(),
+            'reuse_colmap_database': True,
+            'lichtfeld_fix_rotation': True,
+            'spheresfm_path': str(self.settings.get_spheresfm_path()) if self.settings.get_spheresfm_path() else None,
+            'colmap_path': str(self.settings.get_colmap_gpu_path()) if self.settings.get_colmap_gpu_path() else None,
+            'sphere_alignment_path': str(self.settings.get_spheresfm_path()) if self.settings.get_spheresfm_path() else None,
             'mapping_backend': self.mapping_backend_combo.currentData(),
             'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
             'export_realityscan': self.export_realityscan_check.isChecked(),
@@ -1690,6 +1783,8 @@ class MainWindow(QMainWindow):
             'stage5_enabled': self.stage5_enable.isChecked(),
             'train_lighting': self.train_lichtfeld_check.isChecked(),
             'lichtfeld_path': self.lichtfeld_path_edit.text(),
+            # SDK Media Processing options (colour sliders, stabilization toggles)
+            'sdk_options': self.stage1_media_panel.get_sdk_options() if hasattr(self, 'stage1_media_panel') else {},
         }
     
     def _get_alignment_mode(self) -> str:
@@ -1721,6 +1816,8 @@ class MainWindow(QMainWindow):
                 idx = self.sdk_resolution_combo.findData(config['sdk_resolution'])
                 if idx >= 0:
                     self.sdk_resolution_combo.setCurrentIndex(idx)
+            if 'sdk_options' in config and hasattr(self, 'stage1_media_panel'):
+                self.stage1_media_panel.set_values(config.get('sdk_options') or {})
             if 'output_format' in config:
                 idx = self.output_format_combo.findData(config['output_format'])
                 if idx >= 0:
@@ -1786,13 +1883,35 @@ class MainWindow(QMainWindow):
             if 'colmap_quality' in config:
                 self.colmap_quality_combo.setCurrentIndex(config['colmap_quality'])
             if 'sphere_alignment_path' in config and config['sphere_alignment_path']:
-                self.colmap_path_edit.setText(config['sphere_alignment_path'])
+                try:
+                    self.settings.set_spheresfm_path(Path(config['sphere_alignment_path']), auto_detected=False)
+                except Exception:
+                    pass
+            if 'spheresfm_path' in config and config['spheresfm_path']:
+                try:
+                    self.settings.set_spheresfm_path(Path(config['spheresfm_path']), auto_detected=False)
+                except Exception:
+                    pass
+            if 'colmap_path' in config and config['colmap_path']:
+                try:
+                    self.settings.set_colmap_gpu_path(Path(config['colmap_path']), auto_detected=False)
+                except Exception:
+                    pass
             if 'glomap_path' in config and config['glomap_path']:
-                self.glomap_path_edit.setText(config['glomap_path'])
+                try:
+                    self.settings.set_colmap_gpu_path(Path(config['glomap_path']), auto_detected=False)
+                except Exception:
+                    pass
             if 'mapping_backend' in config:
                 backend_idx = self.mapping_backend_combo.findData(config['mapping_backend'])
                 if backend_idx >= 0:
                     self.mapping_backend_combo.setCurrentIndex(backend_idx)
+            if 'enable_hloc_fallback' in config:
+                self.enable_hloc_fallback_check.setChecked(config['enable_hloc_fallback'])
+            if 'prefer_colmap_learned' in config:
+                self.prefer_colmap_learned_check.setChecked(config['prefer_colmap_learned'])
+            if 'require_learned_pipeline' in config:
+                self.require_learned_pipeline_check.setChecked(config['require_learned_pipeline'])
             if 'export_lichtfeld' in config:
                 self.export_lichtfeld_check.setChecked(config['export_lichtfeld'])
             if 'export_realityscan' in config:
@@ -1807,6 +1926,8 @@ class MainWindow(QMainWindow):
                 self.train_lichtfeld_check.setChecked(config['train_lighting'])
             if 'lichtfeld_path' in config:
                 self.lichtfeld_path_edit.setText(config['lichtfeld_path'])
+
+            self.on_settings_changed()
             
             QMessageBox.information(self, "Config Loaded", "Configuration applied successfully.")
         except Exception as e:
@@ -1821,6 +1942,8 @@ class MainWindow(QMainWindow):
         is_sdk = method in ['sdk', 'sdk_stitching']
         self.sdk_quality_widget.setVisible(is_sdk)
         self.sdk_res_widget.setVisible(is_sdk)
+        if hasattr(self, 'stage1_media_card'):
+            self.stage1_media_card.setVisible(is_sdk)
     
     def on_skip_transform_toggled(self, checked: bool):
         if hasattr(self, 'stage2_output_group'):
@@ -1864,7 +1987,7 @@ class MainWindow(QMainWindow):
     
     def _on_alignment_mode_changed(self, checked: bool = True):
         if self.mode_rig_sfm_radio.isChecked():
-            info = "Perspective Reconstruction: COLMAP GPU / GLOMAP on perspective images"
+            info = "Perspective Reconstruction: COLMAP GPU on perspective images"
         elif self.mode_sphere_sfm_radio.isChecked():
             info = "Panorama SfM: SphereSfM on equirectangular images"
         else:
@@ -2048,20 +2171,20 @@ class MainWindow(QMainWindow):
             self.lichtfeld_path_edit.setText(path)
 
     def browse_colmap_path(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select COLMAP Binary", "C:\\Program Files",
-            "Executables (*.exe *.bat);;All (*.*)"
+        QMessageBox.information(
+            self,
+            "Dependency Paths",
+            "Configure COLMAP path in Settings > Paths & Detection."
         )
-        if path:
-            self.colmap_path_edit.setText(path)
+        self.open_settings()
 
     def browse_glomap_path(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select GloMAP Binary", "C:\\Program Files",
-            "Executables (*.exe *.bat);;All (*.*)"
+        QMessageBox.information(
+            self,
+            "Dependency Paths",
+            "Configure GloMAP path in Settings > Paths & Detection."
         )
-        if path:
-            self.glomap_path_edit.setText(path)
+        self.open_settings()
     
     def analyze_video_file(self):
         from src.extraction import FrameExtractor
@@ -2169,6 +2292,7 @@ class MainWindow(QMainWindow):
             'output_format': self.output_format_combo.currentData(),
             'transform_type': stage2_method,
             'camera_config': {'cameras': self._generate_camera_positions()},
+            'sdk_options': self.stage1_media_panel.get_sdk_options() if hasattr(self, 'stage1_media_panel') else {},
         }
         
         # Split method-specific params
@@ -2247,8 +2371,15 @@ class MainWindow(QMainWindow):
                 'alignment_mode': self._get_alignment_mode(),
                 'use_gpu_colmap': self.use_gpu_colmap_check.isChecked(),
                 'colmap_quality': self.colmap_quality_combo.currentIndex(),
-                'sphere_alignment_path': self.colmap_path_edit.text().strip() or None,
-                'glomap_path': self.glomap_path_edit.text().strip() or None,
+                'use_lightglue_aliked': True,
+                'prefer_colmap_learned': self.prefer_colmap_learned_check.isChecked(),
+                'enable_hloc_fallback': self.enable_hloc_fallback_check.isChecked(),
+                'require_learned_pipeline': self.require_learned_pipeline_check.isChecked(),
+                'reuse_colmap_database': True,
+                'lichtfeld_fix_rotation': True,
+                'spheresfm_path': str(self.settings.get_spheresfm_path()) if self.settings.get_spheresfm_path() else None,
+                'colmap_path': str(self.settings.get_colmap_gpu_path()) if self.settings.get_colmap_gpu_path() else None,
+                'sphere_alignment_path': str(self.settings.get_spheresfm_path()) if self.settings.get_spheresfm_path() else None,
                 'mapping_backend': self.mapping_backend_combo.currentData(),
                 'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
                 'export_sidecars': self.export_sidecar_check.isChecked(),
@@ -2265,6 +2396,12 @@ class MainWindow(QMainWindow):
         self.log_message("Starting pipeline...")
         self._set_control_status("Starting pipeline", "running")
         
+        # Inject any stage-specific overrides set before this call
+        # (e.g. run_stage_3_only sets _pending_stage3_input before calling us)
+        if hasattr(self, '_pending_stage3_input') and self._pending_stage3_input:
+            self.pipeline_config['stage3_input_dir'] = self._pending_stage3_input
+            del self._pending_stage3_input
+
         self.orchestrator.run_pipeline(
             config=self.pipeline_config,
             progress_callback=self.on_progress,
@@ -2347,29 +2484,33 @@ class MainWindow(QMainWindow):
         if not output_dir:
             QMessageBox.warning(self, "Missing", "Configure output directory first")
             return
-        
+
         from src.pipeline.batch_orchestrator import PipelineWorker
         worker = PipelineWorker({})
         folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
         if not folder:
-            folder_str = QFileDialog.getExistingDirectory(self, "Select Split Output", str(Path(output_dir)))
+            folder_str = QFileDialog.getExistingDirectory(
+                self, "Select images to mask", str(Path(output_dir))
+            )
             if not folder_str:
                 return
             folder = Path(folder_str)
-        
+
         images = []
         for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
             images.extend(folder.glob(ext))
         if not images:
-            QMessageBox.warning(self, "No Images", f"No images in: {folder}")
+            QMessageBox.warning(self, "No Images", f"No images found in:\n{folder}")
             return
-        
-        self.log_message(f"Found {len(images)} perspective images")
+
+        self.log_message(f"Found {len(images)} images to mask in: {folder.name}")
+        # Store the resolved folder so start_pipeline() can inject it after
+        # rebuilding pipeline_config (it overwrites the whole dict from scratch).
+        self._pending_stage3_input = str(folder)
         self._auto_advance_enabled = True
         s1, s2 = self.stage1_enable.isChecked(), self.stage2_enable.isChecked()
         self.stage1_enable.setChecked(False)
         self.stage2_enable.setChecked(False)
-        self.pipeline_config['stage3_input_dir'] = str(folder)
         self.start_pipeline()
         self.stage1_enable.setChecked(s1)
         self.stage2_enable.setChecked(s2)

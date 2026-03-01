@@ -13,6 +13,7 @@ The module automatically selects the appropriate backend:
 """
 
 import logging
+import importlib.util
 
 logger = logging.getLogger(__name__)
 
@@ -21,35 +22,10 @@ _TORCH_AVAILABLE = False
 _ONNX_AVAILABLE = False
 _SAM_AVAILABLE = False
 
-try:
-    import torch
-    try:
-        import torch.distributed as _dist
-        if not hasattr(_dist, 'ProcessGroup'):
-            _dist.ProcessGroup = object
-    except Exception:
-        pass
-    _TORCH_AVAILABLE = True
-except Exception:
-    pass
-
-try:
-    import onnxruntime
-    _ONNX_AVAILABLE = True
-except ImportError:
-    pass
-
-try:
-    from segment_anything import sam_model_registry
-    _SAM_AVAILABLE = True
-except ImportError:
-    pass
-
-try:
-    from ultralytics import YOLO
-    _YOLO_AVAILABLE = True
-except ImportError:
-    _YOLO_AVAILABLE = False
+_TORCH_AVAILABLE = importlib.util.find_spec('torch') is not None
+_ONNX_AVAILABLE = importlib.util.find_spec('onnxruntime') is not None
+_SAM_AVAILABLE = importlib.util.find_spec('segment_anything') is not None
+_YOLO_AVAILABLE = importlib.util.find_spec('ultralytics') is not None
 
 # Hybrid masker availability (requires both SAM and YOLO)
 _HYBRID_AVAILABLE = _SAM_AVAILABLE and _YOLO_AVAILABLE
@@ -134,13 +110,14 @@ def get_masker(model_path=None, confidence_threshold=0.5, use_gpu=True, prefer_o
 def __getattr__(name):
     if name == 'MultiCategoryMasker':
         if _TORCH_AVAILABLE:
-            from .multi_category_masker import MultiCategoryMasker
-            return MultiCategoryMasker
-        else:
-            # Fallback to ONNX if PyTorch not available
-            from .onnx_masker import ONNXMasker
-            logger.warning("PyTorch not available, returning ONNXMasker instead of MultiCategoryMasker")
-            return ONNXMasker
+            try:
+                from .multi_category_masker import MultiCategoryMasker
+                return MultiCategoryMasker
+            except Exception as exc:
+                logger.warning("PyTorch masker import failed (%s). Falling back to ONNXMasker.", exc)
+        # Fallback to ONNX if PyTorch is unavailable or import failed
+        from .onnx_masker import ONNXMasker
+        return ONNXMasker
     
     if name == 'ONNXMasker':
         from .onnx_masker import ONNXMasker
@@ -148,10 +125,12 @@ def __getattr__(name):
     
     if name == 'SAMMasker':
         if _SAM_AVAILABLE:
-            from .sam_masker import SAMMasker
-            return SAMMasker
-        else:
-            raise ImportError("SAM not available. Install with: pip install segment-anything")
+            try:
+                from .sam_masker import SAMMasker
+                return SAMMasker
+            except Exception as exc:
+                raise ImportError(f"SAM backend failed to load: {exc}") from exc
+        raise ImportError("SAM not available. Install with: pip install segment-anything")
     
     if name == 'HybridYOLOSAMMasker':
         if _HYBRID_AVAILABLE:

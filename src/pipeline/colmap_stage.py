@@ -4,7 +4,7 @@ Provides ColmapSettings dataclass and pipeline integration.
 
 Supports two reconstruction workflows:
 - Panorama SfM: Direct spherical feature matching on equirectangular images (SphereSfM)
-- Perspective Reconstruction: Split to perspectives, then COLMAP GPU / GLOMAP standard SfM
+- Perspective Reconstruction: Split to perspectives, then COLMAP GPU SfM (incremental or global_mapper)
 """
 
 from dataclasses import dataclass, field
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Reconstruction workflows
 ALIGNMENT_MODE_PANORAMA_SFM = 'panorama_sfm'                 # SphereSfM on equirectangular images
-ALIGNMENT_MODE_PERSPECTIVE = 'perspective_reconstruction'     # COLMAP GPU / GLOMAP on perspective images
+ALIGNMENT_MODE_PERSPECTIVE = 'perspective_reconstruction'     # COLMAP GPU on perspective images
 
 # Legacy aliases (backward compatibility with saved configs)
 ALIGNMENT_MODE_SPHERE_SFM = ALIGNMENT_MODE_PANORAMA_SFM      # old "Mode A"
@@ -33,14 +33,20 @@ class ColmapSettings:
     
     # Paths
     sphere_alignment_path: Optional[Path] = None
-    glomap_path: Optional[Path] = None
-    mapping_backend: str = 'colmap'  # 'colmap' | 'glomap'
+    colmap_path: Optional[Path] = None
+    mapping_backend: str = 'glomap'  # 'colmap' | 'glomap' (legacy key; uses COLMAP global_mapper)
     
     # Quality settings
     quality: str = 'medium'  # 'fast', 'medium', 'high'
     
     # Matching settings
     matching_method: str = 'sequential'  # 'sequential', 'exhaustive', 'vocab_tree'
+    use_lightglue_aliked: bool = True
+    camera_grouping: str = 'per_folder'  # 'single' | 'per_folder' | 'per_image'
+    prefer_colmap_learned: bool = False
+    require_learned_pipeline: bool = False
+    enable_hloc_fallback: bool = True
+    reuse_colmap_database: bool = True
     
     # Pipeline steps
     extract_features: bool = True
@@ -65,10 +71,16 @@ class ColmapSettings:
         return {
             'alignment_mode': self.alignment_mode,
             'sphere_alignment_path': str(self.sphere_alignment_path) if self.sphere_alignment_path else None,
-            'glomap_path': str(self.glomap_path) if self.glomap_path else None,
+            'colmap_path': str(self.colmap_path) if self.colmap_path else None,
             'mapping_backend': self.mapping_backend,
             'quality': self.quality,
             'matching_method': self.matching_method,
+            'use_lightglue_aliked': self.use_lightglue_aliked,
+            'camera_grouping': self.camera_grouping,
+            'prefer_colmap_learned': self.prefer_colmap_learned,
+            'require_learned_pipeline': self.require_learned_pipeline,
+            'enable_hloc_fallback': self.enable_hloc_fallback,
+            'reuse_colmap_database': self.reuse_colmap_database,
             'extract_features': self.extract_features,
             'match_features': self.match_features,
             'build_reconstruction': self.build_reconstruction,
@@ -86,8 +98,8 @@ class ColmapSettings:
         """Create settings from dictionary."""
         if data.get('sphere_alignment_path'):
             data['sphere_alignment_path'] = Path(data['sphere_alignment_path'])
-        if data.get('glomap_path'):
-            data['glomap_path'] = Path(data['glomap_path'])
+        if data.get('colmap_path'):
+            data['colmap_path'] = Path(data['colmap_path'])
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
@@ -97,7 +109,7 @@ class ColmapStage:
     
     Supports two workflows:
     - Panorama SfM (panorama_sfm): Direct spherical feature matching using SphereSfM (equirect output)
-    - Perspective Reconstruction (perspective_reconstruction): COLMAP GPU / GLOMAP on perspective images
+    - Perspective Reconstruction (perspective_reconstruction): COLMAP GPU on perspective images
     """
     
     def __init__(self, settings: ColmapSettings):
@@ -129,7 +141,7 @@ class ColmapStage:
                     # Perspective Reconstruction: Rig-based SfM (default)
                     from src.premium.rig_colmap_integration import RigColmapIntegrator
                     self._integrator = RigColmapIntegrator(self.settings)
-                    logger.info("Using Perspective Reconstruction: COLMAP/GLOMAP (perspective images)")
+                    logger.info("Using Perspective Reconstruction: COLMAP (perspective images)")
             except (ImportError, NameError) as e:
                 logger.warning(f"Reconstruction integration not available: {e}")
                 self._integrator = None
@@ -218,8 +230,14 @@ def get_default_colmap_settings(alignment_mode: str = ALIGNMENT_MODE_PERSPECTIVE
     alignment_mode = ColmapStage._normalize_mode(alignment_mode)
     return ColmapSettings(
         alignment_mode=alignment_mode,
+        mapping_backend='glomap',
         quality='medium',
         matching_method='sequential',
+        camera_grouping='per_folder',
+        prefer_colmap_learned=False,
+        require_learned_pipeline=False,
+        enable_hloc_fallback=True,
+        reuse_colmap_database=True,
         extract_features=True,
         match_features=True,
         build_reconstruction=True,

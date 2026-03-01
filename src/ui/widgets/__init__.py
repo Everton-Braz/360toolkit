@@ -6,6 +6,7 @@ from .scaffold import (
 	FormRow,
 	StagePageScaffold,
 )
+from .media_processing_panel import MediaProcessingPanel
 
 __all__ = [
 	"StageHeader",
@@ -14,4 +15,5 @@ __all__ = [
 	"StageActionFooter",
 	"FormRow",
 	"StagePageScaffold",
+	"MediaProcessingPanel",
 ]

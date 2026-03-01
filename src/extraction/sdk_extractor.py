@@ -1,10 +1,10 @@
 r"""
-Insta360 MediaSDK 3.0.5 Integration Module
+Insta360 MediaSDK 3.1.x Integration Module
 
 PRIMARY EXTRACTION METHOD - Uses official Insta360 MediaSDK for highest quality stitching.
 
 SDK Documentation: https://github.com/Insta360Develop/Desktop-MediaSDK-Cpp
-SDK Location: C:\Users\User\Documents\Windows_CameraSDK-2.0.2-build1+MediaSDK-3.0.5-build1
+SDK Location: C:\Users\Everton-PC\Documents\Windows_CameraSDK-2.1.1_MediaSDK-3.1.0\MediaSDK-3.1.0.0-20250904-win64\MediaSDK
 
 Hardware Requirements:
 - GPU with CUDA or Vulkan support (REQUIRED for v3.x)
@@ -22,11 +22,25 @@ Key MediaSDK APIs:
 - SetExportFrameSequence(frame_indices): Extract specific frames by index
 - SetStitchType(STITCH_TYPE): dynamicstitch (recommended), aistitch, optflow, template
 - EnableStitchFusion(True): Chromatic calibration for seamless blending (CRITICAL)
-- EnableFlowState(True): FlowState stabilization
-- EnableColorPlus(True, model_path): AI color enhancement
+- EnableFlowState(True): FlowState stabilization (REQUIRED for DirectionLock)
+- EnableDirectionLock(True): Locks horizon/direction like Insta360 app (requires FlowState)
+- EnableColorPlus(True, strength): AI color enhancement (strength 0.0-1.0, default 0.3)
 - SetAiStitchModelFile(model_path): ai_stitcher_model_v1.ins or v2.ins (v2 is better)
 - SetOutputSize(width, height): Output resolution (must be 2:1 ratio)
 - StartStitch(): Begin stitching process
+
+Color Correction APIs (all map to CLI flags, range noted):
+- SetExposure(int):    -exposure   [-100, 100]
+- SetHighlights(int): -highlights [-100, 100]
+- SetShadows(int):    -shadows    [-100, 100]
+- SetContrast(int):   -contrast   [-100, 100]
+- SetBrightness(int): -brightness [-100, 100]
+- SetBlackpoint(int): -blackpoint [-100, 100]
+- SetSaturation(int): -saturation [-100, 100]
+- SetVibrance(int):   -vibrance   [-100, 100]
+- SetWarmth(int):     -warmth     [-100, 100]
+- SetTint(int):       -tint       [-100, 100]
+- SetDefinition(int): -definition [0, 100]
 
 Frame Extraction Workflow:
 1. SetInputPath([video_file_1, video_file_2])  # Dual-track or single-track
@@ -110,42 +124,69 @@ STITCH_TYPES = {
 # Quality presets
 # TESTED: 'dynamicstitch' and 'aistitch' with v2 model produce PERFECT results
 # The SDK CLI accepts: template, optflow, dynamicstitch, aistitch
+# Default color correction values (neutral — no correction applied unless overridden)
+_COLOR_DEFAULTS = {
+    'exposure':    0,   # [-100, 100]
+    'highlights':  0,   # [-100, 100]
+    'shadows':     0,   # [-100, 100]
+    'contrast':    0,   # [-100, 100]
+    'brightness':  0,   # [-100, 100]
+    'blackpoint':  0,   # [-100, 100]
+    'saturation':  0,   # [-100, 100]
+    'vibrance':    0,   # [-100, 100]
+    'warmth':      0,   # [-100, 100]
+    'tint':        0,   # [-100, 100]
+    'definition':  0,   # [0, 100]
+}
+
 QUALITY_PRESETS = {
     'best': {
         'stitch_type': 'dynamicstitch', # Dynamic Stitching - PERFECT results, recommended!
         'use_ai_model_v2': True,        # Use v2 model for best AI processing
         'enable_stitchfusion': True,    # Chromatic calibration (CRITICAL for seamless blending)
-        'enable_flowstate': True,       # Stabilization
+        'enable_flowstate': True,       # Stabilization (also required by direction_lock)
+        'enable_direction_lock': False, # Lock horizon/direction (requires flowstate=True)
         'enable_colorplus': True,       # AI color enhancement
+        'colorplus_strength': 0.3,      # Color Plus strength (0.0-1.0, SDK default 0.3)
         'enable_denoise': True,         # AI denoising (reduces noise in sky/flat areas)
         'enable_defringe': True,        # Purple fringe removal
+        **_COLOR_DEFAULTS,              # Color correction (all neutral by default)
     },
     'good': {
         'stitch_type': 'dynamicstitch', # Dynamic Stitching - PERFECT results
         'use_ai_model_v2': False,       # Use v1 model (faster)
         'enable_stitchfusion': True,    # Keep chromatic calibration
         'enable_flowstate': True,       # Stabilization
+        'enable_direction_lock': False, # Lock horizon/direction (requires flowstate=True)
         'enable_colorplus': False,
+        'colorplus_strength': 0.3,
         'enable_denoise': False,
         'enable_defringe': False,
+        **_COLOR_DEFAULTS,
     },
     'balanced': {
         'stitch_type': 'optflow',       # Optical Flow - good quality, moderate speed
         'use_ai_model_v2': False,
         'enable_stitchfusion': True,    # Chromatic calibration
         'enable_flowstate': True,       # Stabilization
+        'enable_direction_lock': False,
         'enable_colorplus': False,
+        'colorplus_strength': 0.3,
         'enable_denoise': False,
         'enable_defringe': False,
+        **_COLOR_DEFAULTS,
     },
     'draft': {
         'stitch_type': 'template',      # Template - fastest, lowest quality
         'use_ai_model_v2': False,
         'enable_stitchfusion': False,
         'enable_flowstate': False,
+        'enable_direction_lock': False, # NOTE: direction_lock requires flowstate; disabled in draft
         'enable_colorplus': False,
+        'colorplus_strength': 0.3,
         'enable_denoise': False,
         'enable_defringe': False,
+        **_COLOR_DEFAULTS,
     }
 }
 
@@ -378,22 +419,40 @@ class SDKExtractor:
         output_format: str = 'jpg',
         start_time: float = 0.0,
         end_time: Optional[float] = None,
-        progress_callback: Optional[Callable[[int], None]] = None
+        progress_callback: Optional[Callable[[int], None]] = None,
+        sdk_options: Optional[Dict] = None
     ) -> List[str]:
         """
         Extract frames using MediaSDK with stitching.
-        
+
         Args:
             input_path: Path to .insv video file
             output_dir: Output directory for frames
             fps: Extraction rate (frames per second)
-            quality: 'best', 'good', or 'draft'
+            quality: 'best', 'good', 'balanced', or 'draft'
             resolution: (width, height) for output (None = original)
             output_format: 'jpg' or 'png'
             start_time: Start time in seconds (default: 0.0)
             end_time: End time in seconds (None = full video)
             progress_callback: Callback(progress_percent)
-        
+            sdk_options: Optional dict to override individual preset values.
+                Supported keys:
+                  enable_direction_lock (bool) - lock horizon/direction
+                      (requires enable_flowstate=True; enabled automatically)
+                  enable_colorplus (bool)       - AI color enhancement
+                  colorplus_strength (float)    - Color Plus AI strength [0.0-1.0]
+                  exposure (int)      [-100, 100]
+                  highlights (int)    [-100, 100]
+                  shadows (int)       [-100, 100]
+                  contrast (int)      [-100, 100]
+                  brightness (int)    [-100, 100]
+                  blackpoint (int)    [-100, 100]
+                  saturation (int)    [-100, 100]
+                  vibrance (int)      [-100, 100]
+                  warmth (int)        [-100, 100]
+                  tint (int)          [-100, 100]
+                  definition (int)    [0, 100]
+
         Returns:
             List of extracted frame paths
         """
@@ -442,7 +501,8 @@ class SDKExtractor:
             frame_indices=frame_indices,
             quality=quality,
             resolution=resolution,
-            output_format=output_format
+            output_format=output_format,
+            sdk_options=sdk_options
         )
         
         logger.info(f"Running MediaSDK extraction...")
@@ -823,7 +883,8 @@ class SDKExtractor:
         frame_indices: List[int],
         quality: str,
         resolution: Optional[Tuple[int, int]],
-        output_format: str
+        output_format: str,
+        sdk_options: Optional[Dict] = None
     ) -> List[str]:
         """Build MediaSDK command line arguments."""
         cmd = [str(self.demo_exe)]
@@ -851,9 +912,14 @@ class SDKExtractor:
         frame_seq = "-".join(str(i) for i in frame_indices)
         cmd.extend(["-export_frame_index", frame_seq])  # Singular, not plural!
         
-        # Quality preset
-        preset = QUALITY_PRESETS.get(quality, QUALITY_PRESETS['best'])
-        
+        # Quality preset (copy so we don't mutate the global dict)
+        preset = dict(QUALITY_PRESETS.get(quality, QUALITY_PRESETS['best']))
+
+        # Apply any caller-supplied overrides (sdk_options)
+        if sdk_options:
+            preset.update(sdk_options)
+            logger.info(f"[SDK] Applied sdk_options overrides: {list(sdk_options.keys())}")
+
         # Determine stitch type
         stitch_type_key = preset['stitch_type']
         
@@ -883,13 +949,24 @@ class SDKExtractor:
         if preset.get('enable_stitchfusion', False):
             cmd.append("-enable_stitchfusion")
         
-        # Stabilization (EnableFlowState)
-        if preset.get('enable_flowstate', False):
+        # ---- Stabilization (EnableFlowState) ----
+        # Direction Lock REQUIRES FlowState to be active; force it on if needed.
+        want_direction_lock = preset.get('enable_direction_lock', False)
+        enable_flowstate = preset.get('enable_flowstate', False) or want_direction_lock
+        if enable_flowstate:
             cmd.append("-enable_flowstate")
-        
+            logger.info("[SDK] FlowState stabilization ENABLED")
+
+        # Direction Lock (EnableDirectionLock) - locks horizon like Insta360 app
+        # SDK requirement: flowstate must be enabled first (enforced above)
+        if want_direction_lock:
+            cmd.append("-enable_directionlock")
+            logger.info("[SDK] Direction Lock ENABLED (horizon stabilized)")
+
         # Color Plus (EnableColorPlus) - SDK 3.1.x auto-finds model
         if preset.get('enable_colorplus', False):
             cmd.append("-enable_colorplus")
+            logger.info(f"[SDK] Color Plus ENABLED (strength={preset.get('colorplus_strength', 0.3):.2f})")
         
         # Denoise (EnableSequenceDenoise) - SDK 3.1.x auto-finds model
         if preset.get('enable_denoise', False):
@@ -898,6 +975,19 @@ class SDKExtractor:
         # Defringe (EnableDefringe) - SDK 3.1.x auto-finds model
         if preset.get('enable_defringe', False):
             cmd.append("-enable_defringe")
+
+        # ---- Color Correction (all values passed only when non-zero) ----
+        # NOTE: Color correction flags (exposure, highlights, shadows, etc.)
+        # are intentionally NOT passed to the SDK CLI.
+        # All colour adjustments are applied via OpenCV post-processing in
+        # batch_orchestrator.py so the output exactly matches the live preview.
+        _color_keys = [
+            'exposure','highlights','shadows','contrast','brightness',
+            'blackpoint','saturation','vibrance','warmth','tint','definition',
+        ]
+        _active = {k: preset.get(k, 0) for k in _color_keys if preset.get(k, 0) != 0}
+        if _active:
+            logger.info(f"[SDK] Color values will be applied via OpenCV post-process: {_active}")
         
         # Output resolution (SetOutputSize - must be 2:1 ratio)
         if resolution:

@@ -74,3 +74,14 @@ bin/
 *.pt
 *.pth
 sam_vit_b_01ec64.pth
+
+# Temporary COLMAP databases
+tmp_*.db
+tmp_*.db-shm
+tmp_*.db-wal
+
+# Downloads folder
+downloads/
+
+# User settings (machine-specific)
+src/config/user_settings.json

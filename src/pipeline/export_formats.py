@@ -45,6 +45,13 @@ class LichtfeldExporter:
             True if successful
         """
         try:
+            if not self.exporter.images:
+                logger.error("Lichtfeld export aborted: no COLMAP images parsed (images.txt missing or empty)")
+                return False
+            if not self.exporter.cameras:
+                logger.error("Lichtfeld export aborted: no COLMAP cameras parsed (cameras.txt missing or empty)")
+                return False
+
             # Prepare output structure
             images_out_dir = self.output_dir / "images"
             images_out_dir.mkdir(exist_ok=True)
@@ -124,6 +131,11 @@ class LichtfeldExporter:
                 "camera_model": self._get_camera_model_string(first_camera['model']),
                 "frames": frames
             }
+            if frames:
+                first_frame = frames[0]
+                for key in ("w", "h", "fl_x", "fl_y", "cx", "cy"):
+                    if key in first_frame:
+                        transforms_data[key] = first_frame[key]
             if ply_path:
                 transforms_data["ply_file_path"] = ply_path
                 
@@ -173,6 +185,10 @@ class LichtfeldExporter:
         y_rot_180 = np.array([[-1, 0, 0, 0], [0, 1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]], dtype=np.float64)
         c2w = y_rot_180 @ c2w
         
+        # Rotate 180 degrees around X axis to fix upside-down scene (without mirroring)
+        rot_x_180 = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]], dtype=np.float64)
+        c2w = rot_x_180 @ c2w
+        
         return c2w
 
     def _qvec2rotmat(self, qvec):
@@ -194,35 +210,45 @@ class LichtfeldExporter:
         frame["w"] = width
         frame["h"] = height
         
-        # Mapping logic from colmap_converter.py
-        if model == "SPHERE" or model == "EQUIRECTANGULAR":
-            frame["fl_x"] = params[0] if params else width / np.pi
+        model_upper = (model or "").upper()
+
+        if model_upper in {"SPHERE", "EQUIRECTANGULAR"}:
+            frame["fl_x"] = params[0] if len(params) > 0 else width / np.pi
             frame["fl_y"] = frame["fl_x"]
             frame["cx"] = params[1] if len(params) > 1 else width / 2.0
             frame["cy"] = params[2] if len(params) > 2 else height / 2.0
+            return
+
+        if model_upper == "PINHOLE" and len(params) >= 4:
+            fx, fy, cx, cy = params[0], params[1], params[2], params[3]
+        elif model_upper == "SIMPLE_PINHOLE" and len(params) >= 3:
+            fx = fy = params[0]
+            cx, cy = params[1], params[2]
+        elif model_upper in {"SIMPLE_RADIAL", "RADIAL"} and len(params) >= 3:
+            fx = fy = params[0]
+            cx, cy = params[1], params[2]
+        elif model_upper in {"OPENCV", "FULL_OPENCV", "OPENCV_FISHEYE", "FOV", "THIN_PRISM_FISHEYE"} and len(params) >= 4:
+            fx, fy, cx, cy = params[0], params[1], params[2], params[3]
+        elif len(params) >= 3:
+            fx = fy = params[0]
+            cx, cy = params[1], params[2]
         else:
-            # Assuming PINHOLE-like or OPENCV
-            # PARAMS for PINHOLE: f, cx, cy
-            # PARAMS for OPENCV: fx, fy, cx, cy, k1, k2, p1, p2
-            # PARAMS for SIMPLE_RADIAL: f, cx, cy, k
-            if len(params) >= 3:
-                frame["fl_x"] = params[0]
-                frame["fl_y"] = params[1] if len(params) > 3 else params[0] # Approximate for simple models
-                frame["cx"] = params[2] if len(params) > 2 else width / 2.0
-                frame["cy"] = params[3] if len(params) > 3 else height / 2.0
-            else:
-                 # Fallback
-                 frame["fl_x"] = params[0] if params else width
-                 frame["fl_y"] = params[0] if params else width
-                 frame["cx"] = width / 2.0
-                 frame["cy"] = height / 2.0
+            fx = fy = max(width, height) * 0.9
+            cx, cy = width / 2.0, height / 2.0
+
+        frame["fl_x"] = float(fx)
+        frame["fl_y"] = float(fy)
+        frame["cx"] = float(cx)
+        frame["cy"] = float(cy)
 
     def _get_camera_model_string(self, model: str) -> str:
         """Map COLMAP model to Lichtfeld string."""
-        if model == "SPHERE": return "EQUIRECTANGULAR"
-        if model in ["SIMPLE_PINHOLE", "PINHOLE"]: return "PINHOLE"
-        if "FISHEYE" in model: return "OPENCV_FISHEYE"
-        return "OPENCV"
+        model_upper = (model or "").upper()
+        if model_upper in {"SPHERE", "EQUIRECTANGULAR"}:
+            return "EQUIRECTANGULAR"
+        if "FISHEYE" in model_upper:
+            return "OPENCV_FISHEYE"
+        return "PINHOLE"
 
     def _export_point_cloud(self, fix_rotation: bool) -> Optional[str]:
         """Export point cloud to PLY."""
@@ -248,13 +274,9 @@ class LichtfeldExporter:
              rot_x_90 = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float64)
              points_np = points_np @ rot_x_90.T # Right multiply for row vectors
              
-        # 3. Y-axis inversion? Code says "applied_transform[:3, :3] = rot_x_90 @ applied_transform[:3, :3]"
-        # The logic in colmap_converter.py:
-        # applied_transform = np.eye(4)[:3, :]
-        # applied_transform = applied_transform[np.array([2, 0, 1]), :]
-        # if fix_rotation: rot_x_90... applied_transform...
-        # points = einsum(T, points) + t
-        # Basically transforms the coordinate system (basis vectors)
+        # 3. Rotate 180 degrees around X axis to fix upside-down scene (without mirroring)
+        rot_x_180 = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=np.float64)
+        points_np = points_np @ rot_x_180.T
         
         ply_file = self.output_dir / "pointcloud.ply"
         

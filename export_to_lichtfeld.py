@@ -5,7 +5,7 @@ Export SphereSFM Reconstruction to LichtFeld Studio Format
 Converts COLMAP sparse reconstruction to LichtFeld Studio format for 3DGS training.
 
 Usage:
-    python export_to_lichtfeld.py <colmap_sparse_dir> <images_dir> <output_dir>
+    python export_to_lichtfeld.py <colmap_sparse_dir> <images_dir> <output_dir> [masks_dir]
     
 Example:
     python export_to_lichtfeld.py 
@@ -86,7 +86,13 @@ def verify_colmap_model(sparse_dir: Path):
     return True
 
 
-def export_lichtfeld(sparse_dir: Path, images_dir: Path, output_dir: Path, fix_rotation: bool = True):
+def export_lichtfeld(
+    sparse_dir: Path,
+    images_dir: Path,
+    output_dir: Path,
+    fix_rotation: bool = True,
+    masks_dir: Path | None = None,
+):
     """Export COLMAP reconstruction to LichtFeld Studio format."""
     
     print_section("Exporting to LichtFeld Studio Format")
@@ -98,6 +104,10 @@ def export_lichtfeld(sparse_dir: Path, images_dir: Path, output_dir: Path, fix_r
     print(f"  Directory: {output_dir}")
     print(f"Settings:")
     print(f"  Fix Rotation: {fix_rotation} (recommended for 360 images)")
+    if masks_dir:
+        print(f"  Masks: {masks_dir}")
+    else:
+        print(f"  Masks: disabled")
     
     # Verify inputs
     print_section("Verifying Inputs")
@@ -108,6 +118,10 @@ def export_lichtfeld(sparse_dir: Path, images_dir: Path, output_dir: Path, fix_r
     
     if not images_dir.exists():
         print(f"✗ ERROR: Images directory not found: {images_dir}")
+        return False
+
+    if masks_dir and not masks_dir.exists():
+        print(f"✗ ERROR: Masks directory not found: {masks_dir}")
         return False
     
     # Check COLMAP model
@@ -145,7 +159,8 @@ def export_lichtfeld(sparse_dir: Path, images_dir: Path, output_dir: Path, fix_r
         print(f"Exporting transforms.json and point cloud...")
         success = exporter.export(
             images_dir=str(images_dir),
-            fix_rotation=fix_rotation
+            fix_rotation=fix_rotation,
+            masks_dir=str(masks_dir) if masks_dir else None,
         )
         
         elapsed = time.perf_counter() - start_time
@@ -185,6 +200,13 @@ def export_lichtfeld(sparse_dir: Path, images_dir: Path, output_dir: Path, fix_r
                 print(f"  ✓ images/ ({len(copied_images)} files)")
             else:
                 print(f"  ✗ Missing: images/")
+
+            masks_out = output_dir / "masks"
+            if masks_out.exists():
+                copied_masks = list(masks_out.glob("*.png"))
+                print(f"  ✓ masks/ ({len(copied_masks)} files, format=image.jpg.png)")
+            elif masks_dir:
+                print(f"  ⚠ Missing: masks/")
             
             print(f"\nLichtFeld Studio Usage:")
             print(f"  1. Open LichtFeld Studio")
@@ -219,15 +241,19 @@ def main():
     default_output = Path(r"C:\Users\Everton-PC\Documents\ARQUIVOS_TESTE\lichtfeld_export")
     
     # Parse arguments
-    if len(sys.argv) == 4:
+    if len(sys.argv) in (4, 5):
         sparse_dir = Path(sys.argv[1])
         images_dir = Path(sys.argv[2])
         output_dir = Path(sys.argv[3])
+        masks_dir = Path(sys.argv[4]) if len(sys.argv) == 5 else None
     else:
         # Use defaults
         sparse_dir = default_sparse
         images_dir = default_images
         output_dir = default_output
+        masks_dir = images_dir.parent / "masks"
+        if not masks_dir.exists():
+            masks_dir = None
         
         print_section("LichtFeld Studio Export Tool")
         print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -238,7 +264,7 @@ def main():
         print()
         
         if len(sys.argv) > 1:
-            print("Usage: python export_to_lichtfeld.py <sparse_dir> <images_dir> <output_dir>")
+            print("Usage: python export_to_lichtfeld.py <sparse_dir> <images_dir> <output_dir> [masks_dir]")
             print()
         
         response = input("Continue with these paths? (y/n): ")
@@ -250,7 +276,19 @@ def main():
     # Run export
     total_start = time.perf_counter()
     
-    success = export_lichtfeld(sparse_dir, images_dir, output_dir, fix_rotation=True)
+    if masks_dir is None:
+        auto_masks = images_dir.parent / "masks"
+        if auto_masks.exists():
+            masks_dir = auto_masks
+            print(f"Auto-detected masks directory: {masks_dir}")
+
+    success = export_lichtfeld(
+        sparse_dir,
+        images_dir,
+        output_dir,
+        fix_rotation=True,
+        masks_dir=masks_dir,
+    )
     
     total_elapsed = time.perf_counter() - total_start
     
