@@ -4,10 +4,6 @@
 
 **Unified photogrammetry preprocessing pipeline**: Extract frames from Insta360 cameras → Split to perspective views → Generate AI masks
 
-## 📥 Download
-
-**[⬇️ Download 360toolkit v1.1.0 (Windows)](https://drive.google.com/file/d/1jIp3KkJQMqk_SDgJG5MM9jtnQN3jm51t/view?usp=sharing)** - Portable executable, no installation required (~5 GB)
-
 ---
 
 **360toolkit** is a desktop application that combines frame extraction from Insta360 cameras with perspective splitting and AI masking for professional photogrammetry workflows.
