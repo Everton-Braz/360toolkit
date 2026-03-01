@@ -83,6 +83,9 @@
 ## 📦 Installation
 
 ### Option 1: Portable Executable (Recommended)
+Pre-Built Binary (Gumroad)
+⬇️ Get 360toolkit v1.1.0 (Windows) - $25
+evertonbraz.gumroad.com/l/360toolkit
 
 **No installation required!** Download `360ToolkitGS-ONNX.zip` and extract. Works on any Windows 10/11 machine.
 
