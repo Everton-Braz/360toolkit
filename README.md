@@ -84,7 +84,9 @@
 
 ### Option 1: Portable Executable (Recommended)
 
-**No installation required!** Download `360ToolkitGS-ONNX.zip` and extract. Works on any Windows 10/11 machine.
+**No installation required!** Purchase and download `360ToolkitGS-ONNX.zip` from **[Gumroad](https://evertonbraz.gumroad.com/l/360toolkit)** and extract. Works on any Windows 10/11 machine.
+
+> 🛒 **Download here**: [evertonbraz.gumroad.com/l/360toolkit](https://evertonbraz.gumroad.com/l/360toolkit)
 
 ```powershell
 # Extract and run
