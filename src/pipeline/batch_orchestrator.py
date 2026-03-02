@@ -228,20 +228,6 @@ class PipelineWorker(QThread):
         self.metadata_handler = MetadataHandler()
         self.masker = None  # Initialize only if masking enabled
         
-        # Temp folder for extraction when skip_intermediate_save is enabled
-        self._temp_stage1_dir = None
-    
-    def _cleanup_temp_stage1(self):
-        """Clean up temp extraction folder after splitting completes (if skip_intermediate_save was used)"""
-        if self._temp_stage1_dir and Path(self._temp_stage1_dir).exists():
-            import shutil
-            try:
-                shutil.rmtree(self._temp_stage1_dir)
-                logger.info(f"[CLEANUP] Deleted temp extraction folder: {self._temp_stage1_dir}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up temp folder: {e}")
-            self._temp_stage1_dir = None
-    
     def discover_stage_input_folder(self, stage: int, output_dir: str) -> Optional[Path]:
         """
         Smart folder discovery for individual stage processing.
@@ -372,9 +358,6 @@ class PipelineWorker(QThread):
                 stages_executed.append(2)
                 self.stage_complete.emit(2, stage2_result)
 
-                # Clean up temp extraction folder if skip_intermediate_save was enabled
-                self._cleanup_temp_stage1()
-
                 # Clean up GPU memory after splitting to free VRAM for masking
                 if HAS_TORCH_CUDA:
                     try:
@@ -496,19 +479,7 @@ class PipelineWorker(QThread):
         try:
             input_file = self.config['input_file']
             
-            # Check if we should skip saving intermediate files
-            skip_intermediate = self.config.get('skip_intermediate_save', False)
-            
-            if skip_intermediate:
-                # Use a temp folder that will be cleaned up after splitting
-                import tempfile
-                temp_dir = tempfile.mkdtemp(prefix='360toolkit_stage1_')
-                output_dir = Path(temp_dir)
-                self._temp_stage1_dir = temp_dir  # Store for cleanup
-                logger.info(f"[FAST] Using temp folder for extraction: {temp_dir}")
-            else:
-                output_dir = Path(self.config['output_dir']) / 'extracted_frames'
-                self._temp_stage1_dir = None
+            output_dir = Path(self.config['output_dir']) / 'extracted_frames'
             
             fps = self.config.get('fps', DEFAULT_FPS)
             method = self.config.get('extraction_method', 'opencv')

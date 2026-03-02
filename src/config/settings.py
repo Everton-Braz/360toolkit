@@ -701,10 +701,6 @@ class SettingsManager:
         self.settings['auto_detect_on_startup'] = enabled
         self.save_settings()
     
-    def get_skip_intermediate_save(self) -> bool:
-        """Get skip intermediate save setting (extracted frames saved to temp folder)"""
-        return self.settings.get('skip_intermediate_save', False)
-
     def get_theme(self) -> str:
         """Get UI theme: dark, light, or system."""
         return self.settings.get('theme', 'dark')
@@ -716,11 +712,6 @@ class SettingsManager:
         if value not in valid:
             value = 'dark'
         self.settings['theme'] = value
-        self.save_settings()
-    
-    def set_skip_intermediate_save(self, enabled: bool):
-        """Set skip intermediate save setting"""
-        self.settings['skip_intermediate_save'] = enabled
         self.save_settings()
     
     def get_last_input_directory(self) -> Optional[Path]:

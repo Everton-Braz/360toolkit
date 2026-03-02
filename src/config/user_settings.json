@@ -1,7 +1,7 @@
 {
-    "sdk_path": "C:\\Users\\Everton-PC\\Documents\\Windows_CameraSDK-2.1.1_MediaSDK-3.1.0\\MediaSDK-3.1.0.0-20250904-win64",
+    "sdk_path": "C:\\Users\\User\\Documents\\Windows_CameraSDK-2.0.2-build1+MediaSDK-3.0.5-build1\\MediaSDK-3.0.5-20250619-win64",
     "sdk_auto_detected": false,
-    "ffmpeg_path": "C:\\Users\\Everton-PC\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.EXE",
+    "ffmpeg_path": "C:\\Program Files (x86)\\ffmpeg\\bin\\ffmpeg.EXE",
     "ffmpeg_auto_detected": false,
     "auto_detect_on_startup": true,
     "last_input_directory": null,
@@ -11,10 +11,9 @@
     "glomap_path": "C:\\Users\\User\\miniconda3\\Library\\bin\\glomap.EXE",
     "glomap_auto_detected": true,
     "theme": "dark",
-    "spheresfm_path": "C:\\Users\\Everton-PC\\Documents\\APLICATIVOS\\360toolkit\\bin\\SphereSfM\\colmap.exe",
+    "spheresfm_path": "C:\\Users\\User\\Documents\\APLICATIVOS\\360ToolKit\\bin\\SphereSfM\\colmap.exe",
     "spheresfm_auto_detected": false,
-    "colmap_gpu_path": "C:\\Users\\Everton-PC\\Documents\\APLICATIVOS\\360toolkit\\bin\\colmap\\colmap.exe",
+    "colmap_gpu_path": "C:\\Users\\User\\Documents\\APLICATIVOS\\360ToolKit\\bin\\colmap\\colmap.exe",
     "colmap_auto_detected": false,
-    "colmap_path": "C:\\Users\\Everton-PC\\Documents\\APLICATIVOS\\360toolkit\\bin\\colmap\\colmap.exe",
-    "skip_intermediate_save": false
+    "colmap_path": "C:\\Users\\User\\Documents\\APLICATIVOS\\360ToolKit\\bin\\colmap\\colmap.exe"
 }

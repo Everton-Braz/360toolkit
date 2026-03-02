@@ -272,22 +272,6 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
         
-        # Performance options
-        perf_group = QGroupBox("Performance Options")
-        perf_layout = QVBoxLayout()
-        
-        self.skip_intermediate_checkbox = QCheckBox("Skip saving extracted frames (faster)")
-        self.skip_intermediate_checkbox.setToolTip(
-            "When enabled, equirectangular frames are saved to a temp folder\n"
-            "and automatically deleted after perspective splitting completes.\n"
-            "This saves disk space and can be faster on SSDs.\n\n"
-            "Disable this if you want to keep the equirectangular frames."
-        )
-        perf_layout.addWidget(self.skip_intermediate_checkbox)
-        
-        perf_group.setLayout(perf_layout)
-        layout.addWidget(perf_group)
-
         appearance_group = QGroupBox("Appearance")
         appearance_layout = QFormLayout()
         self.theme_combo = QComboBox()
@@ -397,9 +381,6 @@ class SettingsDialog(QDialog):
             self.glomap_path_edit.setText(str(glomap_path))
         self.update_glomap_status()
         
-        # Performance options
-        self.skip_intermediate_checkbox.setChecked(self.settings.get_skip_intermediate_save())
-
         theme = self.settings.get_theme()
         theme_index = self.theme_combo.findData(theme)
         if theme_index >= 0:
@@ -893,8 +874,6 @@ class SettingsDialog(QDialog):
         # Save auto-detection preference
         self.settings.set_auto_detect_on_startup(self.auto_detect_checkbox.isChecked())
         
-        # Save performance options
-        self.settings.set_skip_intermediate_save(self.skip_intermediate_checkbox.isChecked())
         self.settings.set_theme(self.theme_combo.currentData())
         
         # Save SDK path

@@ -2266,10 +2266,6 @@ class MainWindow(QMainWindow):
         
         stage2_method = self.stage2_method_combo.currentData()
         
-        from src.config.settings import get_settings
-        settings = get_settings()
-        skip_intermediate = settings.get_skip_intermediate_save()
-        
         self.pipeline_config = {
             'input_file': input_file,
             'output_dir': output_dir,
@@ -2282,7 +2278,6 @@ class MainWindow(QMainWindow):
             'lichtfeld_path': self.lichtfeld_path_edit.text() or None,
             'export_realityscan': self.export_realityscan_check.isChecked(),
             'export_include_masks': self.export_include_masks_check.isChecked(),
-            'skip_intermediate_save': skip_intermediate,
             'fps': self.fps_spin.value(),
             'extraction_method': self.extraction_method_combo.currentData(),
             'start_time': 0.0 if self.full_video_check.isChecked() else self.start_time_spin.value(),

@@ -48,11 +48,6 @@ DEFAULT_OUTPUT_FORMAT = 'png'
 # File handling
 DELETE_INTERMEDIATE_FILES = False
 
-# Intermediate frame handling
-# When True, equirectangular frames are saved to a temp folder and cleaned up after splitting
-# When False, equirectangular frames are saved to output_dir/extracted_frames (default)
-SKIP_INTERMEDIATE_SAVE = False
-
 # ============================================================================
 # PERSPECTIVE SPLITTING DEFAULTS
 # ============================================================================
