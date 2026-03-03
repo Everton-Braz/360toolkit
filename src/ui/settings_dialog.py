@@ -228,36 +228,10 @@ class SettingsDialog(QDialog):
 
         test_colmap_layout = QHBoxLayout()
         test_colmap_layout.addStretch()
-        self.test_colmap_btn = QPushButton("Test COLMAP GPU")
+        self.test_colmap_btn = QPushButton("Test COLMAP")
         self.test_colmap_btn.clicked.connect(self.test_colmap)
         test_colmap_layout.addWidget(self.test_colmap_btn)
         recon_layout.addLayout(test_colmap_layout)
-
-        # Global Mapper path input (legacy key; uses COLMAP executable)
-        glomap_path_layout = QHBoxLayout()
-        self.glomap_path_edit = QLineEdit()
-        self.glomap_path_edit.setPlaceholderText("Path to colmap.exe for global_mapper")
-        glomap_path_layout.addWidget(self.glomap_path_edit, stretch=1)
-
-        self.glomap_browse_btn = QPushButton("Browse...")
-        self.glomap_browse_btn.clicked.connect(self.browse_glomap_path)
-        glomap_path_layout.addWidget(self.glomap_browse_btn)
-
-        self.glomap_clear_btn = QPushButton("Clear")
-        self.glomap_clear_btn.clicked.connect(lambda: self.glomap_path_edit.clear())
-        glomap_path_layout.addWidget(self.glomap_clear_btn)
-        recon_layout.addLayout(glomap_path_layout)
-
-        self.glomap_status_label = QLabel()
-        self.glomap_status_label.setWordWrap(True)
-        recon_layout.addWidget(self.glomap_status_label)
-
-        test_glomap_layout = QHBoxLayout()
-        test_glomap_layout.addStretch()
-        self.test_glomap_btn = QPushButton("Test Global Mapper")
-        self.test_glomap_btn.clicked.connect(self.test_glomap)
-        test_glomap_layout.addWidget(self.test_glomap_btn)
-        recon_layout.addLayout(test_glomap_layout)
 
         recon_group.setLayout(recon_layout)
         layout.addWidget(recon_group)
@@ -374,12 +348,6 @@ class SettingsDialog(QDialog):
         if colmap_path:
             self.colmap_path_edit.setText(str(colmap_path))
         self.update_colmap_status()
-
-        # Global mapper path mirrors COLMAP path
-        glomap_path = self.settings.get_colmap_gpu_path()
-        if glomap_path:
-            self.glomap_path_edit.setText(str(glomap_path))
-        self.update_glomap_status()
         
         theme = self.settings.get_theme()
         theme_index = self.theme_combo.findData(theme)
@@ -614,16 +582,10 @@ class SettingsDialog(QDialog):
             self.colmap_path_edit.setText(str(colmap_path))
             self.update_colmap_status()
 
-        # Global mapper uses the same COLMAP executable
-        glomap_path = colmap_path
-        if glomap_path:
-            self.glomap_path_edit.setText(str(glomap_path))
-            self.update_glomap_status()
-        
         self.detect_now_btn.setEnabled(True)
         self.detect_now_btn.setText("Detect Now")
         
-        if sdk_path or ffmpeg_path or spheresfm_path or colmap_path or glomap_path:
+        if sdk_path or ffmpeg_path or spheresfm_path or colmap_path:
             QMessageBox.information(
                 self,
                 "Detection Complete",
@@ -631,14 +593,13 @@ class SettingsDialog(QDialog):
                 (f"✓ SDK: {sdk_path}\n" if sdk_path else "✗ SDK not found\n") +
                 (f"✓ FFmpeg: {ffmpeg_path}\n" if ffmpeg_path else "✗ FFmpeg not found\n") +
                 (f"✓ SphereSfM: {spheresfm_path}\n" if spheresfm_path else "✗ SphereSfM not found\n") +
-                (f"✓ COLMAP GPU: {colmap_path}\n" if colmap_path else "✗ COLMAP GPU not found\n") +
-                (f"✓ Global Mapper (via COLMAP): {glomap_path}" if glomap_path else "✗ Global Mapper path not found")
+                (f"✓ COLMAP: {colmap_path}" if colmap_path else "✗ COLMAP not found")
             )
         else:
             QMessageBox.warning(
                 self,
                 "Detection Failed",
-                "Could not auto-detect SDK/FFmpeg/SphereSfM/COLMAP GPU/global mapper path.\nPlease browse manually."
+                "Could not auto-detect SDK/FFmpeg/SphereSfM/COLMAP.\nPlease browse manually."
             )
 
     def test_spheresfm(self):

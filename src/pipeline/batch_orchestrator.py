@@ -594,6 +594,11 @@ class PipelineWorker(QThread):
                                     except Exception as _ce:
                                         logger.warning(f"[Color] Failed to correct {_fp}: {_ce}")
 
+                        # ── Post-process: apply frame rotation if set in preview ──────
+                        _frame_rotation = self.config.get('frame_rotation', 0)
+                        if _frame_rotation:
+                            self._apply_frame_rotation(frame_paths, _frame_rotation)
+
                         return {
                             'success': True,
                             'frames': frame_paths,
@@ -658,13 +663,58 @@ class PipelineWorker(QThread):
                 end_time=end_time,
                 progress_callback=progress_callback
             )
-            
+
+            # Apply frame rotation (fisheye preview rotation → extracted files)
+            _frame_rotation = self.config.get('frame_rotation', 0)
+            if _frame_rotation and result.get('success'):
+                _all_files = result.get('output_files', result.get('frames', []))
+                if not _all_files:
+                    # Fallback: scan output_dir for image files
+                    _img_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+                    _all_files = [str(p) for p in output_dir.rglob('*')
+                                  if p.is_file() and p.suffix.lower() in _img_exts]
+                self._apply_frame_rotation(_all_files, _frame_rotation)
+
             return result
         
         except Exception as e:
             logger.error(f"Extraction error: {e}")
             return {'success': False, 'error': str(e)}
     
+    def _apply_frame_rotation(self, frame_paths: list, rotation: int) -> None:
+        """
+        Rotate extracted image files in-place.
+
+        Args:
+            frame_paths: List of absolute file paths to rotate.
+            rotation:    Degrees clockwise — must be 90, 180, or 270 (0 = no-op).
+        """
+        if not rotation or rotation % 90 != 0:
+            return
+
+        cv_codes = {
+            90:  cv2.ROTATE_90_CLOCKWISE,
+            180: cv2.ROTATE_180,
+            270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+        }
+        code = cv_codes.get(rotation % 360)
+        if code is None:
+            return
+
+        rotated = 0
+        for fp in frame_paths:
+            try:
+                img = cv2.imread(str(fp))
+                if img is None:
+                    continue
+                img = cv2.rotate(img, code)
+                cv2.imwrite(str(fp), img)
+                rotated += 1
+            except Exception as _e:
+                logger.warning(f"[Rotation] Could not rotate {fp}: {_e}")
+
+        logger.info(f"[Rotation] Rotated {rotated}/{len(frame_paths)} frames by {rotation}° CW")
+
     def _execute_stage2(self) -> Dict:
         """Execute Perspective Splitting"""
         try:
@@ -1758,6 +1808,36 @@ class PipelineWorker(QThread):
              perspective_views_dir = output_root / 'perspective_views'
              extracted_frames_dir = output_root / 'extracted_frames'
 
+             # --- Flatten lens subfolders if present (legacy or fisheye extraction) ---
+             # If extracted_frames has lens_1/lens_2 subdirs but no direct images,
+             # move files to extracted_frames root with _lens1/_lens2 suffixes.
+             if extracted_frames_dir.exists():
+                 _img_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+                 _direct_images = [p for p in extracted_frames_dir.iterdir()
+                                   if p.is_file() and p.suffix.lower() in _img_exts]
+                 _lens_dirs = {
+                     d.name: d for d in extracted_frames_dir.iterdir()
+                     if d.is_dir() and d.name in ('lens_1', 'lens_2', 'lens1', 'lens2')
+                 }
+                 if not _direct_images and _lens_dirs:
+                     logger.info("[Reconstruction] Flattening lens subfolders into extracted_frames root...")
+                     _suffix_map = {'lens_1': 'lens1', 'lens_2': 'lens2', 'lens1': 'lens1', 'lens2': 'lens2'}
+                     for _lens_dir in _lens_dirs.values():
+                         _lens_sfx = _suffix_map.get(_lens_dir.name, _lens_dir.name)
+                         for _src in sorted(_lens_dir.glob('*')):
+                             if _src.is_file() and _src.suffix.lower() in _img_exts:
+                                 _dst = extracted_frames_dir / f"{_src.stem}_{_lens_sfx}{_src.suffix}"
+                                 import shutil as _shutil
+                                 _shutil.move(str(_src), str(_dst))
+                         # Remove empty lens subdir
+                         try:
+                             _lens_dir.rmdir()
+                         except OSError:
+                             pass
+                     _moved = [p for p in extracted_frames_dir.iterdir()
+                               if p.is_file() and p.suffix.lower() in _img_exts]
+                     logger.info(f"[Reconstruction] Flattened {len(_moved)} images into extracted_frames root")
+
              if alignment_mode == ALIGNMENT_MODE_RIG_SFM and perspective_views_dir.exists():
                  # Perspective reconstruction should consume Stage 2 output directly
                  input_dir = perspective_views_dir
@@ -1788,6 +1868,18 @@ class PipelineWorker(QThread):
 
              logger.info(f"[Reconstruction] Using alignment mode: {alignment_mode}")
              
+             # Read SphereSfM UI params dict (populated by main_window.get_current_config)
+             _sfm_p = self.config.get('spheresfm_params', {})
+             # Normalise matching method label → key used by sphere_sfm_integration
+             _sfm_match_map = {
+                 'Exhaustive': 'exhaustive', 'exhaustive': 'exhaustive',
+                 'Sequential': 'sequential', 'sequential': 'sequential',
+                 'Vocab Tree': 'vocab_tree', 'vocab_tree': 'vocab_tree',
+             }
+             _sfm_match = _sfm_match_map.get(
+                 _sfm_p.get('matching_method', 'Sequential'), 'sequential'
+             )
+
              # Settings
              settings = ColmapSettings(
                  alignment_mode=alignment_mode,
@@ -1803,7 +1895,16 @@ class PipelineWorker(QThread):
                  enable_hloc_fallback=self.config.get('enable_hloc_fallback', True),
                  reuse_colmap_database=self.config.get('reuse_colmap_database', True),
                  use_rig_sfm=(alignment_mode == ALIGNMENT_MODE_RIG_SFM),
-                 use_gpu=self.config.get('use_gpu_colmap', self.config.get('use_gpu', True))
+                 use_gpu=self.config.get('use_gpu_colmap', self.config.get('use_gpu', True)),
+                 # SphereSfM-specific params from UI
+                 spheresfm_camera_model=_sfm_p.get('camera_model', 'SPHERE'),
+                 spheresfm_use_gpu=self.config.get('use_gpu_spheresfm', False),
+                 spheresfm_matching_method=_sfm_match,
+                 spheresfm_max_image_size=int(_sfm_p.get('max_image_size', 3200)),
+                 spheresfm_max_num_features=int(_sfm_p.get('max_num_features', 8192)),
+                 spheresfm_sequential_overlap=int(_sfm_p.get('sequential_overlap', 10)),
+                 spheresfm_min_num_matches=int(_sfm_p.get('min_num_matches', 15)),
+                 spheresfm_extra_args=str(_sfm_p.get('extra_args', '')),
              )
              
              stage = ColmapStage(settings)

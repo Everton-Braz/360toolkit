@@ -62,6 +62,17 @@ class ColmapSettings:
     use_gpu: bool = True
     gpu_index: int = 0
     
+    # SphereSfM-specific parameters (used by sphere_sfm_integration.py)
+    spheresfm_camera_model: str = 'SPHERE'          # SPHERE | SIMPLE_SPHERE | FULL_OPENCV | OPENCV_FISHEYE
+    spheresfm_feature_extractor: str = 'SIFT'        # SIFT | ALIKED
+    spheresfm_use_gpu: bool = False                  # False = CPU (bundled binary has CUDA mismatch)
+    spheresfm_matching_method: str = 'sequential'    # sequential | exhaustive | vocab_tree
+    spheresfm_max_image_size: int = 3200
+    spheresfm_max_num_features: int = 8192
+    spheresfm_sequential_overlap: int = 10
+    spheresfm_min_num_matches: int = 15
+    spheresfm_extra_args: str = ''
+
     # Legacy compatibility
     sphere_camera_model: bool = True  # Use SPHERE camera model (Panorama SfM)
     use_rig_sfm: bool = True  # Legacy field — kept for config compat
@@ -91,6 +102,16 @@ class ColmapSettings:
             'gpu_index': self.gpu_index,
             'sphere_camera_model': self.sphere_camera_model,
             'use_rig_sfm': self.use_rig_sfm,
+            # SphereSfM-specific params
+            'spheresfm_camera_model': self.spheresfm_camera_model,
+            'spheresfm_feature_extractor': self.spheresfm_feature_extractor,
+            'spheresfm_use_gpu': self.spheresfm_use_gpu,
+            'spheresfm_matching_method': self.spheresfm_matching_method,
+            'spheresfm_max_image_size': self.spheresfm_max_image_size,
+            'spheresfm_max_num_features': self.spheresfm_max_num_features,
+            'spheresfm_sequential_overlap': self.spheresfm_sequential_overlap,
+            'spheresfm_min_num_matches': self.spheresfm_min_num_matches,
+            'spheresfm_extra_args': self.spheresfm_extra_args,
         }
     
     @classmethod

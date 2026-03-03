@@ -245,17 +245,38 @@ class SphereSfMIntegrator:
         
         result = subprocess.run(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
+            errors='replace',  # Avoid UnicodeDecodeError on binary output
             env=env,
             cwd=spheresfm_dir,  # Run from SphereSfM directory
             stdin=subprocess.DEVNULL
         )
         
         if result.returncode != 0:
-            logger.error(f"SphereSfM command failed: {result.stderr}")
+            # Log both stdout and stderr — COLMAP variants sometimes print errors to stdout
+            out = (result.stdout or '').strip()[-2000:]
+            err = (result.stderr or '').strip()[-2000:]
+            logger.error(f"SphereSfM '{args[0]}' failed (exit {result.returncode})")
+            if err:
+                logger.error(f"  stderr: {err}")
+            if out:
+                logger.error(f"  stdout: {out}")
         
         return result
+
+    @staticmethod
+    def _format_cmd_error(result: subprocess.CompletedProcess) -> str:
+        """Return a compact error string from a failed CompletedProcess."""
+        parts = []
+        err = (result.stderr or '').strip()[-1500:]
+        out = (result.stdout or '').strip()[-1500:]
+        if err:
+            parts.append(err)
+        if out and out != err:
+            parts.append(out)
+        return '\n'.join(parts) if parts else f'(exit {result.returncode} — no output)'
 
     def _cleanup_partial_outputs(self, output_dir: Path) -> None:
         """Best-effort cleanup for failed Panorama SfM runs."""
@@ -319,20 +340,37 @@ class SphereSfMIntegrator:
         if database_path.exists():
             database_path.unlink()
         
-        # Count input images
-        image_files = list(frames_dir.glob("*.jpg")) + list(frames_dir.glob("*.png"))
+        # Count input images (search recursively to handle lens subfolders if not yet flattened)
+        image_files = sorted(
+            p for ext in ('*.jpg', '*.jpeg', '*.png', '*.tif', '*.tiff')
+            for p in frames_dir.rglob(ext)
+        )
         if not image_files:
             return fail_with_cleanup('No input images found')
         
-        # Detect image dimensions for camera params
+        # Detect image dimensions (used for SPHERE model camera params)
         from PIL import Image
         test_img = Image.open(image_files[0])
         width, height = test_img.size
         
-        # SPHERE camera params: "1, width, height" (f=1, cx=width/2, cy=height/2)
-        camera_params = f"1,{width},{height}"
-        
-        logger.info(f"SphereSfM Panorama: {len(image_files)} images at {width}x{height}")
+        # Read SphereSfM params from settings (populated by batch_orchestrator from UI)
+        camera_model = getattr(self.settings, 'spheresfm_camera_model', 'SPHERE')
+        use_gpu = getattr(self.settings, 'spheresfm_use_gpu', False)
+        matching_method = getattr(self.settings, 'spheresfm_matching_method', 'sequential')
+        max_image_size = getattr(self.settings, 'spheresfm_max_image_size', 3200)
+        max_num_features = getattr(self.settings, 'spheresfm_max_num_features', 8192)
+        sequential_overlap = getattr(self.settings, 'spheresfm_sequential_overlap', 10)
+        min_num_matches = getattr(self.settings, 'spheresfm_min_num_matches', 15)
+        extra_args = getattr(self.settings, 'spheresfm_extra_args', '')
+        gpu_flag = "1" if use_gpu else "0"
+
+        # SPHERE model uses fixed focal length (f=1), others use standard COLMAP calibration
+        is_sphere_model = camera_model in ('SPHERE', 'SIMPLE_SPHERE')
+
+        logger.info(
+            f"SphereSfM Panorama: {len(image_files)} images at {width}x{height}, "
+            f"camera={camera_model}, match={matching_method}, gpu={use_gpu}"
+        )
         
         try:
             # Step 1: Create database
@@ -345,125 +383,140 @@ class SphereSfMIntegrator:
             ], progress_callback)
             
             if result.returncode != 0:
-                return fail_with_cleanup(f'Database creation failed: {result.stderr}')
+                return fail_with_cleanup(f'Database creation failed: {self._format_cmd_error(result)}')
             
-            # Step 2: Feature extraction with SPHERE model
+            # Step 2: Feature extraction
             if progress_callback:
-                progress_callback("Extracting features (spherical)...")
+                progress_callback(f"Extracting features ({camera_model})...")
             
-            # NOTE: GUI uses camera_params="" (empty) to auto-detect
-            # SPHERE model: f=1, cx=width/2, cy=height/2 (auto-calculated)
             extractor_args = [
                 "feature_extractor",
                 "--database_path", str(database_path),
                 "--image_path", str(frames_dir),
-                "--ImageReader.camera_model", "SPHERE",
-                "--ImageReader.single_camera", "1"
-                # camera_params left empty for auto-detection (matches GUI)
+                "--ImageReader.camera_model", camera_model,
+                "--ImageReader.single_camera", "1",
+                # Note: camera_params left empty → COLMAP auto-detects for all models
             ]
-            
+
+            # For SPHERE / SIMPLE_SPHERE: pass known f=1 intrinsics to avoid auto-cal failure
+            if is_sphere_model:
+                extractor_args.extend(["--ImageReader.camera_params", f"1,{width},{height}"])
+
             # Add mask if available
             if masks_dir and masks_dir.exists():
                 mask_file = masks_dir / "camera_mask.png"
                 if mask_file.exists():
                     extractor_args.extend(["--ImageReader.camera_mask_path", str(mask_file)])
             
-            # GPU acceleration disabled - SphereSfM binary has CUDA kernel mismatch
-            # Force CPU mode (proven to work in GUI tests)
-            # Settings from successful GUI run:
             extractor_args.extend([
-                "--SiftExtraction.use_gpu", "0",
-                "--SiftExtraction.max_image_size", "3200",        # From GUI settings
-                "--SiftExtraction.max_num_features", "8192",      # From GUI settings
+                "--SiftExtraction.use_gpu", gpu_flag,
+                "--SiftExtraction.max_image_size", str(max_image_size),
+                "--SiftExtraction.max_num_features", str(max_num_features),
                 "--SiftExtraction.max_num_orientations", "2",
                 "--SiftExtraction.peak_threshold", "0.00667",
                 "--SiftExtraction.edge_threshold", "10.0",
             ])
+
+            # Append any extra CLI args supplied by the user
+            if extra_args.strip():
+                extractor_args.extend(extra_args.split())
             
             result = self._run_command(extractor_args, progress_callback)
             
             if result.returncode != 0:
-                return fail_with_cleanup(f'Feature extraction failed: {result.stderr}')
+                return fail_with_cleanup(f'Feature extraction failed: {self._format_cmd_error(result)}')
             
-            # Step 3: Feature matching (sequential for video sequences)
+            # Step 3: Feature matching
             if progress_callback:
-                progress_callback("Matching features...")
-            
-            matching_args = [
-                "sequential_matcher",
-                "--database_path", str(database_path),
-                "--SequentialMatching.overlap", "10",              # From successful GUI test
-                "--SequentialMatching.quadratic_overlap", "1",     # Enabled in GUI
-                "--SequentialMatching.loop_detection", "0",        # Disabled in GUI
-                "--SiftMatching.use_gpu", "0",                     # Force CPU (kernel mismatch)
+                progress_callback(f"Matching features ({matching_method})...")
+
+            # Build matching command based on chosen method
+            sift_match_flags = [
+                "--SiftMatching.use_gpu", gpu_flag,
                 "--SiftMatching.max_ratio", "0.8",
                 "--SiftMatching.max_distance", "0.7",
                 "--SiftMatching.cross_check", "1",
-                "--SiftMatching.max_num_matches", "8192",
+                "--SiftMatching.max_num_matches", str(max_num_features),
                 "--SiftMatching.max_error", "4.0",
                 "--SiftMatching.confidence", "0.999",
                 "--SiftMatching.max_num_trials", "10000",
                 "--SiftMatching.min_inlier_ratio", "0.25",
-                "--SiftMatching.min_num_inliers", "15"             # From GUI settings
+                "--SiftMatching.min_num_inliers", str(min_num_matches),
             ]
+
+            if matching_method == 'exhaustive':
+                matching_cmd = "exhaustive_matcher"
+                matching_args = [matching_cmd, "--database_path", str(database_path)] + sift_match_flags
+            elif matching_method == 'vocab_tree':
+                matching_cmd = "vocab_tree_matcher"
+                matching_args = [matching_cmd, "--database_path", str(database_path)] + sift_match_flags
+            else:  # sequential (default — best for video sequences)
+                matching_cmd = "sequential_matcher"
+                matching_args = [
+                    matching_cmd,
+                    "--database_path", str(database_path),
+                    "--SequentialMatching.overlap", str(sequential_overlap),
+                    "--SequentialMatching.quadratic_overlap", "1",
+                    "--SequentialMatching.loop_detection", "0",
+                ] + sift_match_flags
             
             result = self._run_command(matching_args, progress_callback)
             
             if result.returncode != 0:
-                # Try exhaustive matching as fallback
-                logger.warning("Sequential matching failed, trying exhaustive...")
-                matching_args[0] = "exhaustive_matcher"
-                result = self._run_command(matching_args, progress_callback)
-                
+                if matching_method != 'exhaustive':
+                    # Try exhaustive matching as fallback
+                    logger.warning(f"{matching_cmd} failed, falling back to exhaustive_matcher...")
+                    fallback_args = ["exhaustive_matcher", "--database_path", str(database_path)] + sift_match_flags
+                    result = self._run_command(fallback_args, progress_callback)
                 if result.returncode != 0:
-                    return fail_with_cleanup(f'Feature matching failed: {result.stderr}')
+                    return fail_with_cleanup(f'Feature matching failed: {self._format_cmd_error(result)}')
             
-            # Step 4: Incremental mapping with sphere camera
+            # Step 4: Incremental mapping
             if progress_callback:
-                progress_callback("Running spherical reconstruction...")
+                progress_callback("Running reconstruction (mapper)...")
             
-            # Mapper settings from successful GUI run (100% registration)
             mapper_args = [
                 "mapper",
                 "--database_path", str(database_path),
                 "--image_path", str(frames_dir),
                 "--output_path", str(sparse_path),
-                # BA settings from GUI (refine focal for SPHERE)
-                "--Mapper.ba_refine_focal_length", "0",           # Fixed f=1 for SPHERE
-                "--Mapper.ba_refine_principal_point", "0",
-                "--Mapper.ba_refine_extra_params", "0",
-                # Initialization settings from GUI
+                # BA: for SPHERE keep focal fixed (f=1); for other models let COLMAP refine
+                "--Mapper.ba_refine_focal_length", "0" if is_sphere_model else "1",
+                "--Mapper.ba_refine_principal_point", "0" if is_sphere_model else "1",
+                "--Mapper.ba_refine_extra_params", "0" if is_sphere_model else "1",
+                # Initialization
                 "--Mapper.init_min_num_inliers", "100",
                 "--Mapper.init_num_trials", "200",
                 "--Mapper.init_max_error", "4",
                 "--Mapper.init_max_forward_motion", "0.95",
                 "--Mapper.init_min_tri_angle", "16",
-                # Registration settings
+                # Registration
                 "--Mapper.abs_pose_min_num_inliers", "30",
                 "--Mapper.abs_pose_max_error", "12",
                 "--Mapper.abs_pose_min_inlier_ratio", "0.25",
                 "--Mapper.max_reg_trials", "3",
-                # Triangulation settings
+                # Triangulation
                 "--Mapper.tri_min_angle", "1.5",
                 "--Mapper.tri_max_transitivity", "1",
                 "--Mapper.tri_ignore_two_view_tracks", "1",
-                # Filter settings
+                # Filters
                 "--Mapper.filter_max_reproj_error", "4",
                 "--Mapper.filter_min_tri_angle", "1.5",
-                # Multiple models (allow incomplete reconstructions)
                 "--Mapper.multiple_models", "1",
-                "--Mapper.min_num_matches", "15"
+                "--Mapper.min_num_matches", str(min_num_matches),
             ]
 
-            if self.supports_sphere_camera_mapper:
+            # --Mapper.sphere_camera is only valid for SPHERE/SIMPLE_SPHERE AND only in SphereSfM build
+            if is_sphere_model and self.supports_sphere_camera_mapper:
                 mapper_args.extend(["--Mapper.sphere_camera", "1"])
-            else:
-                logger.warning("Current COLMAP binary does not expose --Mapper.sphere_camera; continuing without it.")
+            elif is_sphere_model:
+                logger.warning("Binary does not expose --Mapper.sphere_camera; continuing without it.")
+            # For non-sphere models (FULL_OPENCV, OPENCV_FISHEYE, etc.) — never add sphere_camera flag
             
             result = self._run_command(mapper_args, progress_callback)
             
             if result.returncode != 0:
-                return fail_with_cleanup(f'Mapper failed: {result.stderr}')
+                return fail_with_cleanup(f'Mapper failed: {self._format_cmd_error(result)}')
             
             # Check if reconstruction was created
             model_path = sparse_path / "0"

@@ -456,13 +456,15 @@ class FrameExtractor:
             lenses_to_extract = [('lens_2', 1)]
         
         for lens_name, stream_index in lenses_to_extract:
-            lens_dir = output_path / lens_name
-            lens_dir.mkdir(parents=True, exist_ok=True)
+            # Use flat naming with lens suffix directly in output_path (e.g. frame_00001_lens1.png)
+            # This avoids subdirectories that confuse downstream tools (SphereSfM, COLMAP)
+            lens_suffix = lens_name.replace('_', '')  # 'lens_1' -> 'lens1', 'lens_2' -> 'lens2'
+            output_path.mkdir(parents=True, exist_ok=True)
             
-            logger.info(f"Extracting {lens_name} (stream {stream_index})...")
+            logger.info(f"Extracting {lens_name} (stream {stream_index}) -> flat naming with _{lens_suffix} suffix...")
             
-            # Output pattern
-            output_pattern = str(lens_dir / "frame_%05d.png")
+            # Output pattern: frame_00001_lens1.png / frame_00001_lens2.png
+            output_pattern = str(output_path / f"frame_%05d_{lens_suffix}.png")
             
             # Build FFmpeg command for this lens
             cmd = [self.ffmpeg_path]
@@ -504,16 +506,16 @@ class FrameExtractor:
                 logger.error(f"FFmpeg failed for {lens_name}: {stderr}")
                 continue
             
-            # Count extracted frames for this lens
-            output_files = sorted(lens_dir.glob("frame_*.png"))
+            # Count extracted frames for this lens (flat naming in output_path)
+            output_files = sorted(output_path.glob(f"frame_*_{lens_suffix}.png"))
             frame_count = len(output_files)
             
-            logger.info(f"Successfully extracted {frame_count} frames from {lens_name}")
+            logger.info(f"Successfully extracted {frame_count} frames from {lens_name} (flat, _{lens_suffix} suffix)")
             
             lens_outputs[lens_name] = {
                 'frame_count': frame_count,
                 'output_files': [str(f) for f in output_files],
-                'output_dir': str(lens_dir)
+                'output_dir': str(output_path)
             }
             
             total_frames += frame_count

@@ -4,6 +4,7 @@ Real-time preview for perspective split with circular compass.
 """
 
 import cv2
+import subprocess
 import numpy as np
 from pathlib import Path
 from typing import Optional
@@ -680,6 +681,56 @@ class _SDKPreviewWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class _FFmpegLensPreviewWorker(QThread):
+    """
+    Background thread: uses FFmpeg to grab 1 preview frame from fisheye stream(s).
+    mode: 'both' | 'lens1' | 'lens2'
+    """
+    frames_ready = pyqtSignal(dict)   # {'lens_1': path, 'lens_2': path} (subset)
+    failed       = pyqtSignal(str)
+
+    def __init__(self, ffmpeg_path: str, input_path: str, mode: str = 'both', parent=None):
+        super().__init__(parent)
+        self._ffmpeg = ffmpeg_path
+        self._path   = input_path
+        self._mode   = mode
+
+    def run(self):
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="360tk_lens_prev_")
+        result = {}
+        try:
+            lenses = []
+            if self._mode in ('both', 'lens1'):
+                lenses.append(('lens_1', 0))
+            if self._mode in ('both', 'lens2'):
+                lenses.append(('lens_2', 1))
+
+            for name, stream in lenses:
+                out = str(Path(tmp) / f"{name}.jpg")
+                cmd = [
+                    self._ffmpeg,
+                    '-y', '-ss', '0',
+                    '-i', self._path,
+                    '-map', f'0:v:{stream}',
+                    '-frames:v', '1',
+                    '-q:v', '3',
+                    out,
+                ]
+                proc = subprocess.run(
+                    cmd, capture_output=True, timeout=30
+                )
+                if proc.returncode == 0 and Path(out).exists():
+                    result[name] = out
+
+            if result:
+                self.frames_ready.emit(result)
+            else:
+                self.failed.emit("FFmpeg could not extract lens frames (is the file an .insv with dual streams?)")
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
 class _PanoRenderWorker(QThread):
     """
     Background thread: applies colour corrections to the equirectangular image
@@ -688,11 +739,13 @@ class _PanoRenderWorker(QThread):
     """
     result_ready = pyqtSignal(object)   # np.ndarray BGR uint8
 
-    def __init__(self, orig_bgr: np.ndarray, yaw: float, color_opts: dict, parent=None):
+    def __init__(self, orig_bgr: np.ndarray, yaw: float, color_opts: dict,
+                 skip_roll: bool = False, parent=None):
         super().__init__(parent)
         self._orig       = orig_bgr
         self._yaw        = float(yaw)
         self._color_opts = dict(color_opts)
+        self._skip_roll  = skip_roll
 
     def run(self):
         try:
@@ -706,12 +759,13 @@ class _PanoRenderWorker(QThread):
             # Apply colour corrections first
             corrected = _apply_color_corrections(src, self._color_opts)
 
-            # Horizontal shift by Yaw: yaw=0 → no shift, yaw=-180 → left edge at center
-            # yaw range -180..180 maps to pixel shift 0..width
-            shift = int((self._yaw / 360.0) * pano_w)
-            shifted = np.roll(corrected, shift, axis=1)
-
-            self.result_ready.emit(shifted)
+            # Horizontal shift by Yaw — disabled for fisheye (skip_roll) mode
+            if self._skip_roll:
+                self.result_ready.emit(corrected)
+            else:
+                # yaw range -180..180 maps to pixel shift 0..width
+                shift = int((self._yaw / 360.0) * pano_w)
+                self.result_ready.emit(np.roll(corrected, shift, axis=1))
         except Exception as exc:  # noqa: BLE001
             import logging
             logging.getLogger(__name__).warning(f"Pano render failed: {exc}")
@@ -778,9 +832,15 @@ class EquirectPreviewWidget(QWidget):
         self._orig_bgr:   Optional[np.ndarray] = None   # raw stitched equirectangular
         self._yaw:        float                = -180.0  # default: left edge (same as slider default)
         self._color_opts: dict                 = {}
+        self._extraction_method: str                     = 'sdk_stitching'
+        self._fisheye_mode:      bool                     = False
+        self._rotation:          int                      = 0   # 0 | 90 | 180 | 270
+        self._fisheye_labels:    list                     = []  # [(text, x_fraction), ...]
         self._sdk         = None
-        self._sdk_worker: Optional[_SDKPreviewWorker]  = None
-        self._render_worker: Optional[_PanoRenderWorker] = None
+        self._sdk_worker: Optional[_SDKPreviewWorker]     = None
+        self._ffmpeg_extractor                            = None
+        self._ffmpeg_lens_worker                          = None
+        self._render_worker: Optional[_PanoRenderWorker]  = None
 
         # 120 ms debounce so slider drags don't flood the worker thread
         self._render_timer = QTimer(self)
@@ -809,6 +869,14 @@ class EquirectPreviewWidget(QWidget):
         self._status_lbl = QLabel("Load input file to enable preview")
         self._status_lbl.setProperty("role", "muted")
         bar.addWidget(self._status_lbl, stretch=1)
+
+        # Rotation button — cycles 0°→90°→180°→270°→0°
+        self._rotate_btn = QToolButton()
+        self._rotate_btn.setText("↻ 0°")
+        self._rotate_btn.setToolTip("Rotate preview — click to rotate 90° clockwise")
+        self._rotate_btn.setFixedWidth(58)
+        self._rotate_btn.clicked.connect(self._cycle_rotation)
+        bar.addWidget(self._rotate_btn)
 
         open_btn = QToolButton()
         open_btn.setText("Open Image…")
@@ -850,6 +918,17 @@ class EquirectPreviewWidget(QWidget):
         else:
             self._status_lbl.setText("Load input file to enable preview")
 
+    def set_extraction_method(self, method: str):
+        """Called when the Extraction Method combo changes.
+        Updates the preview to match the selected lens/stitch mode."""
+        if self._extraction_method == method:
+            return
+        self._extraction_method = method
+        self._fisheye_mode = False   # will be set True when lens frames arrive
+        # Re-trigger preview if we already have a loaded video
+        if self._video_path and Path(self._video_path).exists():
+            self._extract_preview()
+
     def load_image_path(self, path: str):
         """Load an equirectangular image file directly from disk."""
         try:
@@ -885,18 +964,60 @@ class EquirectPreviewWidget(QWidget):
             self._render_worker.terminate()
             self._render_worker.wait()
         self._render_worker = _PanoRenderWorker(
-            self._orig_bgr, self._yaw, self._color_opts, parent=self
+            self._orig_bgr, self._yaw, self._color_opts,
+            skip_roll=self._fisheye_mode, parent=self
         )
         self._render_worker.result_ready.connect(self._on_render_done)
         self._render_worker.start()
 
+    def _cycle_rotation(self):
+        """Rotate preview by 90° clockwise with each click."""
+        self._rotation = (self._rotation + 90) % 360
+        self._rotate_btn.setText(f"↻ {self._rotation}°")
+        if self._orig_bgr is not None:
+            self._trigger_render()
+
     def _on_render_done(self, rendered_bgr: np.ndarray):
+        # Apply rotation to the image
+        if self._rotation == 90:
+            rendered_bgr = cv2.rotate(rendered_bgr, cv2.ROTATE_90_CLOCKWISE)
+        elif self._rotation == 180:
+            rendered_bgr = cv2.rotate(rendered_bgr, cv2.ROTATE_180)
+        elif self._rotation == 270:
+            rendered_bgr = cv2.rotate(rendered_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
         h, w = rendered_bgr.shape[:2]
         rgb  = cv2.cvtColor(rendered_bgr, cv2.COLOR_BGR2RGB)
-        qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
-        self._canvas.set_pixmap(QPixmap.fromImage(qimg))
+        qimg  = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
+        pixmap = QPixmap.fromImage(qimg)
+
+        # Draw fisheye labels with QPainter AFTER rotation — always upright
+        if self._fisheye_labels:
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            font = painter.font()
+            font.setPointSize(10)
+            font.setBold(True)
+            painter.setFont(font)
+            for text, x_frac in self._fisheye_labels:
+                x = int(x_frac * pixmap.width()) + 10
+                y = pixmap.height() - 10   # bottom of the canvas
+                # Shadow
+                painter.setPen(QColor(0, 0, 0, 200))
+                painter.drawText(x + 1, y + 1, text)
+                # Text
+                painter.setPen(QColor(220, 220, 220))
+                painter.drawText(x, y, text)
+            painter.end()
+
+        self._canvas.set_pixmap(pixmap)
 
     def _extract_preview(self):
+        # Route to lens preview for FFmpeg fisheye methods
+        if self._extraction_method in ('ffmpeg_dual_lens', 'ffmpeg_lens1', 'ffmpeg_lens2'):
+            self._extract_lens_preview()
+            return
+
         path = self._video_path
         if not path or not Path(path).exists():
             self._status_lbl.setText("Input file not found")
@@ -927,6 +1048,44 @@ class EquirectPreviewWidget(QWidget):
         self._sdk_worker.finished.connect(lambda: self._extract_btn.setEnabled(True))
         self._sdk_worker.start()
 
+    def _extract_lens_preview(self):
+        """Extract and display fisheye lens preview(s) using FFmpeg."""
+        path = self._video_path
+        if not path or not Path(path).exists():
+            self._status_lbl.setText("Input file not found")
+            return
+
+        # Lazy-init FrameExtractor just to reuse its FFmpeg path detection
+        if self._ffmpeg_extractor is None:
+            try:
+                from ..extraction.frame_extractor import FrameExtractor
+                self._ffmpeg_extractor = FrameExtractor()
+            except Exception as exc:
+                self._status_lbl.setText(f"FFmpeg init failed: {exc}")
+                return
+
+        ffmpeg_path = self._ffmpeg_extractor.ffmpeg_path
+        if not ffmpeg_path:
+            self._status_lbl.setText("FFmpeg not found — install FFmpeg for lens preview")
+            return
+
+        mode = {'ffmpeg_dual_lens': 'both',
+                'ffmpeg_lens1':     'lens1',
+                'ffmpeg_lens2':     'lens2'}.get(self._extraction_method, 'both')
+
+        if self._ffmpeg_lens_worker and self._ffmpeg_lens_worker.isRunning():
+            self._ffmpeg_lens_worker.terminate()
+            self._ffmpeg_lens_worker.wait()
+
+        self._status_lbl.setText("Extracting fisheye lens preview…")
+        self._extract_btn.setEnabled(False)
+
+        self._ffmpeg_lens_worker = _FFmpegLensPreviewWorker(ffmpeg_path, path, mode, self)
+        self._ffmpeg_lens_worker.frames_ready.connect(self._on_lens_frames_ready)
+        self._ffmpeg_lens_worker.failed.connect(self._on_lens_preview_failed)
+        self._ffmpeg_lens_worker.finished.connect(lambda: self._extract_btn.setEnabled(True))
+        self._ffmpeg_lens_worker.start()
+
     def _on_sdk_frame_ready(self, img_path: str):
         img = cv2.imread(img_path)
         if img is None:
@@ -936,7 +1095,54 @@ class EquirectPreviewWidget(QWidget):
         self._status_lbl.setText(
             f"Panorama: {src}  ({img.shape[1]}×{img.shape[0]})  — drag Yaw slider to pan"
         )
+        self._fisheye_mode = False   # equirectangular: yaw rolling enabled
+        self._fisheye_labels = []     # no labels for equirectangular
         self._store_orig(img)
+
+    def _on_lens_frames_ready(self, frames: dict):
+        """Build composite fisheye display (side-by-side for both, single for one lens)."""
+        imgs = {}
+        for name, img_path in frames.items():
+            img = cv2.imread(img_path)
+            if img is not None:
+                imgs[name] = img
+
+        if not imgs:
+            self._status_lbl.setText("Could not load fisheye lens frames")
+            return
+
+        TARGET_H = 400
+
+        def _resize(img):
+            h, w = img.shape[:2]
+            return cv2.resize(img, (int(w * TARGET_H / h), TARGET_H),
+                              interpolation=cv2.INTER_AREA)
+
+        if 'lens_1' in imgs and 'lens_2' in imgs:
+            l1 = _resize(imgs['lens_1'])
+            l2 = _resize(imgs['lens_2'])
+            composite = np.hstack([l1, l2])
+            self._fisheye_labels = [("Lens 1 (Front)", 0.0), ("Lens 2 (Back)", 0.5)]
+            status = "Dual fisheye — Lens 1 (front) | Lens 2 (back)"
+        else:
+            name, raw = next(iter(imgs.items()))
+            r = _resize(raw)
+            label = "Lens 1 (Front)" if name == 'lens_1' else "Lens 2 (Back)"
+            # Pad to dual-lens width so single lens renders at the same apparent scale
+            pad = np.zeros_like(r)
+            composite = np.hstack([r, pad]) if name == 'lens_1' else np.hstack([pad, r])
+            x_frac = 0.0 if name == 'lens_1' else 0.5
+            self._fisheye_labels = [(label, x_frac)]
+            status = f"Fisheye — {label}"
+
+        fn = Path(self._video_path).name if self._video_path else ""
+        self._status_lbl.setText(f"{fn} — {status}")
+        self._fisheye_mode = True   # disable yaw roll for fisheye
+        self._store_orig(composite)
+
+    def _on_lens_preview_failed(self, err: str):
+        self._status_lbl.setText(f"Lens preview failed: {err}")
+        self._extract_btn.setEnabled(True)
 
     def _on_sdk_failed(self, err: str):
         self._status_lbl.setText(f"SDK preview failed: {err}")
