@@ -32,7 +32,7 @@ class CardSection(QFrame):
         self.setObjectName("card")
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(20, 16, 20, 16)
-        self._layout.setSpacing(12)
+        self._layout.setSpacing(8)
 
         if title:
             title_label = QLabel(title)

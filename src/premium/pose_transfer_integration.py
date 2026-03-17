@@ -1529,8 +1529,10 @@ def export_for_realityscan(
                 elif mask_name.endswith(".png.png"):
                     image_stem = mask_name[:-8]
                     rs_mask_name = f"{image_stem}_mask.png"
-                else:
+                elif mask_name.endswith("_mask.png"):
                     rs_mask_name = mask_name
+                else:
+                    rs_mask_name = f"{Path(mask_name).stem}_mask.png"
                 
                 dst = images_out / rs_mask_name
                 if not dst.exists():

@@ -1,84 +1,8 @@
 @echo off
 setlocal enabledelayedexpansion
-REM ============================================================================
-REM 360ToolkitGS Build Script - Full GPU Version
-REM PyTorch 2.10 + CUDA 12.8 (RTX 30/40/50 native support)
-REM ============================================================================
-
-echo.
-echo ========================================================================
-echo 360ToolkitGS - GPU Build (PyTorch + CUDA 12.8)
-echo ========================================================================
-echo.
-echo This build:
-echo   - Uses PyTorch 2.10 with CUDA 12.8
-echo   - RTX 30xx, 40xx, 50xx NATIVE GPU support
-echo   - Bundles Ultralytics YOLOv8 + SAM hybrid masking
-echo   - Bundles Insta360 SDK, FFmpeg, SphereSfM/COLMAP
-echo   - Target size: ~3-4 GB (includes CUDA runtime)
-echo.
-
 cd /d "%~dp0"
-echo Working directory: %CD%
-echo.
-
-REM ============================================================================
-REM Step 1: Activate correct conda environment
-REM ============================================================================
-echo [1/7] Activating 360pipeline conda environment...
-call conda activate 360pipeline
-if errorlevel 1 (
-    echo ERROR: Could not activate 360pipeline conda environment.
-    echo Make sure it exists: conda env list
-    pause
-    exit /b 1
-)
-echo [OK] Environment: 360pipeline
-
-REM ============================================================================
-REM Step 2: Verify PyTorch CUDA
-REM ============================================================================
-echo.
-echo [2/7] Verifying PyTorch CUDA...
-python -c "import torch; assert 'cu' in torch.__version__, f'CPU-only torch: {torch.__version__}'; assert torch.cuda.is_available(), 'CUDA not available'; t=torch.tensor([1.0],device='cuda'); assert (t+1).item()==2.0, 'Kernel test failed'; print(f'  PyTorch {torch.__version__} - CUDA {torch.version.cuda}'); print(f'  GPU: {torch.cuda.get_device_name(0)}'); print(f'  Compute: sm_{torch.cuda.get_device_capability(0)[0]}{torch.cuda.get_device_capability(0)[1]}'); print('  Kernel test: PASSED')"
-if errorlevel 1 (
-    echo.
-    echo ERROR: PyTorch CUDA verification failed!
-    echo.
-    echo Fix: Install PyTorch with CUDA support:
-    echo   pip install torch torchvision --force-reinstall --index-url https://download.pytorch.org/whl/cu128
-    echo.
-    pause
-    exit /b 1
-)
-echo [OK] PyTorch CUDA verified
-
-REM ============================================================================
-REM Step 3: Verify key dependencies
-REM ============================================================================
-echo.
-echo [3/7] Verifying dependencies...
-python -c "import ultralytics; print(f'  Ultralytics: {ultralytics.__version__}')"
-if errorlevel 1 (
-    echo   Installing ultralytics...
-    pip install ultralytics
-)
-python -c "import segment_anything; print('  SAM: OK')" 2>nul
-if errorlevel 1 (
-    echo   SAM not installed (optional - hybrid masking disabled)
-)
-python -c "import PyQt6; print('  PyQt6: OK')"
-if errorlevel 1 (
-    echo ERROR: PyQt6 not found!
-    pause
-    exit /b 1
-)
-python -c "import PyInstaller; print(f'  PyInstaller: {PyInstaller.__version__}')"
-if errorlevel 1 (
-    echo   Installing PyInstaller...
-    pip install pyinstaller
-)
-echo [OK] Dependencies verified
+python scripts\build_release.py build --variant full-bundled --zip %*
+exit /b %ERRORLEVEL%
 
 REM ============================================================================
 REM Step 4: Check YOLO/SAM models
@@ -108,6 +32,7 @@ echo.
 echo [5/7] Checking external tools...
 python -c "from pathlib import Path; sdk=Path(r'C:\Users\Everton-PC\Documents\Windows_CameraSDK-2.1.1_MediaSDK-3.1.0\MediaSDK-3.1.0.0-20250904-win64\MediaSDK'); print(f'  SDK: {\"OK\" if sdk.exists() else \"NOT FOUND\"} ({sdk})')"
 python -c "from pathlib import Path; ff=Path(r'C:\Users\Everton-PC\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-essentials_build\bin\ffmpeg.exe'); print(f'  FFmpeg: {\"OK\" if ff.exists() else \"NOT FOUND\"} ({ff})')"
+python -c "from pathlib import Path; cm=Path(r'C:\Users\Everton-PC\Documents\APLICATIVOS\360toolkit\bin\COLMAP-windows-latest-CUDA-cuDSS-GUI\bin\colmap.exe'); print(f'  COLMAP 4.0.1: {\"OK\" if cm.exists() else \"NOT FOUND\"} ({cm})')"
 echo [OK] External tools checked
 
 REM ============================================================================

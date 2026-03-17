@@ -7,6 +7,7 @@ Based on Extraction Module but adapted for unified pipeline.
 """
 
 import cv2
+import json
 import subprocess
 import logging
 import sys
@@ -362,16 +363,7 @@ class FrameExtractor:
             else:
                 resolution_str = f"{width}×{height}"
             
-            # Detect camera model from filename or resolution
-            camera_model = "Unknown"
-            if file_ext == '.insv':
-                max_dim = max(width, height)
-                if max_dim >= 5760:
-                    camera_model = "Insta360 X3/X4/X5"
-                elif max_dim >= 3840:
-                    camera_model = "Insta360 ONE X/X2"
-                else:
-                    camera_model = "Insta360 camera"
+            camera_model, camera_model_source = self._detect_camera_model(input_path, file_ext, width, height)
             
             # Format duration
             minutes = int(duration // 60)
@@ -397,6 +389,7 @@ class FrameExtractor:
                 'duration_seconds': int(duration),
                 'duration_formatted': duration_formatted,
                 'camera_model': camera_model,
+                'camera_model_source': camera_model_source,
                 'codec': codec if codec.isprintable() else 'Unknown',
                 'file_size_mb': round(input_path.stat().st_size / (1024 * 1024), 2)
             }
@@ -404,6 +397,70 @@ class FrameExtractor:
         except Exception as e:
             logger.error(f"Error getting video info: {e}")
             return {'success': False, 'error': str(e)}
+
+    def _detect_camera_model(self, input_path: Path, file_ext: str, width: int, height: int) -> tuple[str, str]:
+        """Detect camera model from metadata when possible, otherwise leave it blank."""
+        metadata = self._read_media_metadata(input_path)
+        if metadata:
+            metadata_strings = [entry.lower() for entry in self._flatten_metadata_entries(metadata)]
+            known_models = [
+                (("insta360", "x5"), "Insta360 X5"),
+                (("insta360", "x4"), "Insta360 X4"),
+                (("insta360", "x3"), "Insta360 X3"),
+                (("insta360", "one x2"), "Insta360 ONE X2"),
+                (("insta360", "one x"), "Insta360 ONE X"),
+            ]
+            for entry in metadata_strings:
+                for tokens, label in known_models:
+                    if all(token in entry for token in tokens):
+                        return label, 'metadata'
+
+        return '', 'unavailable'
+
+    def _read_media_metadata(self, input_path: Path) -> Dict:
+        """Read media container metadata via ffprobe when available."""
+        if not self.ffprobe_path:
+            return {}
+
+        cmd = [
+            self.ffprobe_path,
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_format',
+            '-show_streams',
+            str(input_path),
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=15,
+                check=False,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return {}
+            return json.loads(result.stdout)
+        except Exception as exc:
+            logger.debug(f"ffprobe metadata read failed for {input_path.name}: {exc}")
+            return {}
+
+    def _flatten_metadata_entries(self, value, prefix: str = '') -> List[str]:
+        """Flatten nested ffprobe metadata into searchable key=value strings."""
+        entries: List[str] = []
+        if isinstance(value, dict):
+            for key, child in value.items():
+                next_prefix = f"{prefix}.{key}" if prefix else str(key)
+                entries.extend(self._flatten_metadata_entries(child, next_prefix))
+        elif isinstance(value, list):
+            for child in value:
+                entries.extend(self._flatten_metadata_entries(child, prefix))
+        elif value not in (None, ''):
+            rendered = str(value)
+            entries.append(f"{prefix}={rendered}" if prefix else rendered)
+        return entries
     
     def _extract_dual_lens_ffmpeg(self, input_path: Path, output_path: Path,
                                    fps: float, start_time: float, end_time: Optional[float],

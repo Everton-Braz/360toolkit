@@ -1,6 +1,7 @@
 ﻿# Build artifacts
 dist/
 build/
+releases/
 *.egg-info/
 __pycache__/
 *.pyc
@@ -51,6 +52,11 @@ test_masking_batch/
 *.tmp
 *.temp
 .cache/
+tmp_*.ps1
+
+# Generated test / sandbox outputs
+sandbox-test-output/
+test_export/
 
 # Original projects (reference only)
 Original_Projects/

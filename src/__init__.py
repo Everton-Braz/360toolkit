@@ -1,8 +1,9 @@
-"""
-360FrameTools Source Package
-"""
+"""360FrameTools source package."""
 
-__version__ = '1.0.0'
-__author__ = '360FrameTools Development Team'
+from src.config.defaults import APP_AUTHOR, APP_VERSION
+
+
+__version__ = APP_VERSION
+__author__ = APP_AUTHOR
 
 # This allows running: python -m src.main

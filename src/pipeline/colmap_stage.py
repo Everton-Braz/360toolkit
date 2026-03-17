@@ -61,6 +61,7 @@ class ColmapSettings:
     # GPU settings
     use_gpu: bool = True
     gpu_index: int = 0
+    strict_gpu_only: bool = False
     
     # SphereSfM-specific parameters (used by sphere_sfm_integration.py)
     spheresfm_camera_model: str = 'SPHERE'          # SPHERE | SIMPLE_SPHERE | FULL_OPENCV | OPENCV_FISHEYE
@@ -71,6 +72,9 @@ class ColmapSettings:
     spheresfm_max_num_features: int = 8192
     spheresfm_sequential_overlap: int = 10
     spheresfm_min_num_matches: int = 15
+    spheresfm_feature_flags: str = ''
+    spheresfm_matcher_flags: str = ''
+    spheresfm_mapper_flags: str = ''
     spheresfm_extra_args: str = ''
 
     # Legacy compatibility
@@ -100,6 +104,7 @@ class ColmapSettings:
             'export_3dgs': self.export_3dgs,
             'use_gpu': self.use_gpu,
             'gpu_index': self.gpu_index,
+            'strict_gpu_only': self.strict_gpu_only,
             'sphere_camera_model': self.sphere_camera_model,
             'use_rig_sfm': self.use_rig_sfm,
             # SphereSfM-specific params
@@ -111,6 +116,9 @@ class ColmapSettings:
             'spheresfm_max_num_features': self.spheresfm_max_num_features,
             'spheresfm_sequential_overlap': self.spheresfm_sequential_overlap,
             'spheresfm_min_num_matches': self.spheresfm_min_num_matches,
+            'spheresfm_feature_flags': self.spheresfm_feature_flags,
+            'spheresfm_matcher_flags': self.spheresfm_matcher_flags,
+            'spheresfm_mapper_flags': self.spheresfm_mapper_flags,
             'spheresfm_extra_args': self.spheresfm_extra_args,
         }
     

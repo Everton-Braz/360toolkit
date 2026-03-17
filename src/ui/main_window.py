@@ -7,6 +7,7 @@ and polished dark theme for professional photogrammetry workflow.
 import sys
 import os
 import logging
+import shlex
 from pathlib import Path
 from datetime import datetime
 
@@ -45,6 +46,39 @@ from src.ui.widgets import (
 from src.ui.preview_panels import EquirectPreviewWidget
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_SPHERESFM_FEATURE_FLAGS = (
+    "--ImageReader.single_camera 1 --SiftExtraction.max_num_orientations 2 "
+    "--SiftExtraction.peak_threshold 0.00667 --SiftExtraction.edge_threshold 10.0"
+)
+
+DEFAULT_SPHERESFM_MATCHER_FLAGS = (
+    "--SequentialMatching.quadratic_overlap 1 --SequentialMatching.loop_detection 0 "
+    "--SiftMatching.max_ratio 0.8 --SiftMatching.max_distance 0.7 --SiftMatching.cross_check 1 "
+    "--SiftMatching.max_error 4.0 --SiftMatching.confidence 0.999 "
+    "--SiftMatching.max_num_trials 10000 --SiftMatching.min_inlier_ratio 0.25"
+)
+
+DEFAULT_SPHERESFM_MAPPER_FLAGS = (
+    "--Mapper.ba_refine_focal_length 0 --Mapper.ba_refine_principal_point 0 "
+    "--Mapper.ba_refine_extra_params 0 --Mapper.init_min_num_inliers 100 "
+    "--Mapper.init_num_trials 200 --Mapper.init_max_error 4 --Mapper.init_max_forward_motion 0.95 "
+    "--Mapper.init_min_tri_angle 16 --Mapper.abs_pose_min_num_inliers 50 "
+    "--Mapper.abs_pose_max_error 8 --Mapper.abs_pose_min_inlier_ratio 0.25 --Mapper.max_reg_trials 3 "
+    "--Mapper.tri_min_angle 1.5 --Mapper.tri_max_transitivity 1 --Mapper.tri_ignore_two_view_tracks 1 "
+    "--Mapper.filter_max_reproj_error 4 --Mapper.filter_min_tri_angle 1.5 --Mapper.multiple_models 1"
+)
+
+
+def _normalize_image_format(value: str | None, default: str = "png") -> str:
+    normalized = str(value or default).strip().lower()
+    aliases = {
+        'jpeg': 'jpg',
+        'jpe': 'jpg',
+        'tif': 'tiff',
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in {'png', 'jpg', 'tiff'} else default
 
 
 class SidebarButton(QPushButton):
@@ -721,7 +755,7 @@ class MainWindow(QMainWindow):
         # Output Format
         self.output_format_combo = QComboBox()
         self.output_format_combo.addItem("PNG (Lossless)", "png")
-        self.output_format_combo.addItem("JPEG (Compressed)", "jpeg")
+        self.output_format_combo.addItem("JPEG (Compressed)", "jpg")
         self.output_format_combo.setFixedWidth(200)
         card_extract.addWidget(FormRow("Output Format:", self.output_format_combo))
 
@@ -813,7 +847,7 @@ class MainWindow(QMainWindow):
 
         self.stage2_format_combo = QComboBox()
         self.stage2_format_combo.addItem("PNG", "png")
-        self.stage2_format_combo.addItem("JPEG", "jpeg")
+        self.stage2_format_combo.addItem("JPEG", "jpg")
         self.stage2_format_combo.addItem("TIFF", "tiff")
         self.stage2_format_combo.setFixedWidth(120)
 
@@ -906,7 +940,7 @@ class MainWindow(QMainWindow):
         
         self.cubemap_format_combo = QComboBox()
         self.cubemap_format_combo.addItem("PNG", "png")
-        self.cubemap_format_combo.addItem("JPEG", "jpeg")
+        self.cubemap_format_combo.addItem("JPEG", "jpg")
         self.cubemap_format_combo.addItem("TIFF", "tiff")
         self.cubemap_format_combo.setFixedWidth(120)
         card_tiles.addWidget(FormRow("Tile Format:", self.cubemap_format_combo))
@@ -966,14 +1000,21 @@ class MainWindow(QMainWindow):
             "Choose detection categories, engine, and confidence, then validate before running."
         ))
 
-        # Auto-target info
+        card_source = CardWidget("Input Source")
+        self.mask_input_source_combo = QComboBox()
+        self.mask_input_source_combo.addItem("Auto", "auto")
+        self.mask_input_source_combo.addItem("Perspective Views", "perspective")
+        self.mask_input_source_combo.addItem("Equirect / Extracted Frames", "equirect")
+        card_source.addWidget(FormRow("Images:", self.mask_input_source_combo))
+
         auto_note = QLabel(
-            "ℹ️  Masking input is detected automatically: "
-            "perspective views when Split Views is enabled, extracted frames (equirect/fisheye) otherwise."
+            "Auto uses perspective views when available and falls back to extracted frames. "
+            "Masks are stored separately as masks_perspective or masks_equirect."
         )
         auto_note.setProperty("role", "secondary")
         auto_note.setWordWrap(True)
-        layout.addWidget(auto_note)
+        card_source.addWidget(auto_note)
+        layout.addWidget(card_source)
 
         # ── Detection Categories — compact dropdown card ────────────────────
         card_cats = CardWidget("Detection Categories")
@@ -1092,17 +1133,58 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(16)
+        layout.setSpacing(10)
+
+        def _make_divider() -> QFrame:
+            divider = QFrame()
+            divider.setFrameShape(QFrame.Shape.HLine)
+            divider.setProperty("role", "divider")
+            divider.setFixedHeight(1)
+            divider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            return divider
         
         layout.addWidget(StageHeader(
             "3D Reconstruction",
             "Reconstruct camera poses and 3D structure. Required for Gaussian Splatting and photogrammetry."
         ))
 
-        layout.addWidget(StageSummaryStrip(
-            "Reconstruction",
-            "Select tool, configure parameters, then resolve dependency warnings before running."
-        ))
+        card_sources = CardWidget("Data Sources")
+        self.recon_image_source_combo = QComboBox()
+        self.recon_image_source_combo.addItem("Auto", "auto")
+        self.recon_image_source_combo.addItem("Perspective Views", "perspective")
+        self.recon_image_source_combo.addItem("Equirect / Extracted Frames", "equirect")
+        card_sources.addWidget(FormRow("Reconstruction Images:", self.recon_image_source_combo))
+
+        self.recon_mask_source_combo = QComboBox()
+        self.recon_mask_source_combo.addItem("Auto", "auto")
+        self.recon_mask_source_combo.addItem("Match Reconstruction Images", "match_images")
+        self.recon_mask_source_combo.addItem("Perspective Masks", "perspective")
+        self.recon_mask_source_combo.addItem("Equirect Masks", "equirect")
+        self.recon_mask_source_combo.addItem("No Masks", "none")
+        card_sources.addWidget(FormRow("Reconstruction Masks:", self.recon_mask_source_combo))
+
+        self.export_image_source_combo = QComboBox()
+        self.export_image_source_combo.addItem("Auto", "auto")
+        self.export_image_source_combo.addItem("Use Reconstruction Images", "reconstruction")
+        self.export_image_source_combo.addItem("Perspective Views", "perspective")
+        self.export_image_source_combo.addItem("Equirect / Extracted Frames", "equirect")
+        card_sources.addWidget(FormRow("Export Images:", self.export_image_source_combo))
+
+        self.export_mask_source_combo = QComboBox()
+        self.export_mask_source_combo.addItem("Auto", "auto")
+        self.export_mask_source_combo.addItem("Match Reconstruction Masks", "match_reconstruction")
+        self.export_mask_source_combo.addItem("Perspective Masks", "perspective")
+        self.export_mask_source_combo.addItem("Equirect Masks", "equirect")
+        self.export_mask_source_combo.addItem("No Masks", "none")
+        card_sources.addWidget(FormRow("Export Masks:", self.export_mask_source_combo))
+
+        source_hint = QLabel(
+            "Choose sources here when running stages separately so reconstruction and exports stay on the same image and mask set."
+        )
+        source_hint.setProperty("role", "mutedSmall")
+        source_hint.setWordWrap(True)
+        card_sources.addWidget(source_hint)
+        layout.addWidget(card_sources)
 
         # ── Tool selector ─────────────────────────────────────────────────────
         card_tool = CardWidget("Reconstruction Tool")
@@ -1116,14 +1198,6 @@ class MainWindow(QMainWindow):
         self.recon_tool_desc = QLabel("Perspective Reconstruction | COLMAP GPU on split images | Universal output")
         self.recon_tool_desc.setProperty("role", "mutedSmall")
         card_tool.addWidget(self.recon_tool_desc)
-
-        _sep_tool = QFrame(); _sep_tool.setFrameShape(QFrame.Shape.HLine); _sep_tool.setProperty("role", "divider")
-        card_tool.addWidget(_sep_tool)
-
-        self.recon_paths_label = QLabel("Loading...")
-        self.recon_paths_label.setWordWrap(True)
-        self.recon_paths_label.setProperty("role", "muted")
-        card_tool.addWidget(FormRow("Binary:", self.recon_paths_label))
 
         _open_settings_btn = QPushButton("Manage in Settings")
         _open_settings_btn.setFixedWidth(160)
@@ -1169,7 +1243,7 @@ class MainWindow(QMainWindow):
         self.colmap_single_camera_check.setChecked(False)
         card_colmap.addWidget(self.colmap_single_camera_check)
 
-        _sep_c1 = QFrame(); _sep_c1.setFrameShape(QFrame.Shape.HLine); _sep_c1.setProperty("role", "divider")
+        _sep_c1 = _make_divider()
         card_colmap.addWidget(_sep_c1)
 
         _cp_nums = QGridLayout()
@@ -1203,7 +1277,7 @@ class MainWindow(QMainWindow):
         _cp_nums.addWidget(self.colmap_overlap_spin, 1, 3)
         card_colmap.addLayout(_cp_nums)
 
-        _sep_c2 = QFrame(); _sep_c2.setFrameShape(QFrame.Shape.HLine); _sep_c2.setProperty("role", "divider")
+        _sep_c2 = _make_divider()
         card_colmap.addWidget(_sep_c2)
 
         self.colmap_matching_combo = QComboBox()
@@ -1225,7 +1299,7 @@ class MainWindow(QMainWindow):
         self.require_learned_pipeline_check.setChecked(False)
         card_colmap.addWidget(self.require_learned_pipeline_check)
 
-        _sep_c3 = QFrame(); _sep_c3.setFrameShape(QFrame.Shape.HLine); _sep_c3.setProperty("role", "divider")
+        _sep_c3 = _make_divider()
         card_colmap.addWidget(_sep_c3)
 
         self.colmap_extra_args_edit = QLineEdit()
@@ -1238,6 +1312,7 @@ class MainWindow(QMainWindow):
         card_colmap.addWidget(_colmap_extra_hint)
 
         _cp_layout.addWidget(card_colmap)
+        _cp_layout.addStretch()
         self.recon_params_stack.addWidget(_colmap_page)
 
         # ══ Page 1: SphereSfM ══
@@ -1271,13 +1346,13 @@ class MainWindow(QMainWindow):
         card_sphere.addWidget(FormRow("Feature Extractor:", self.sphere_feature_extractor_combo))
 
         self.sphere_matching_combo = QComboBox()
-        self.sphere_matching_combo.addItem("Exhaustive (all pairs — best quality)", "exhaustive")
-        self.sphere_matching_combo.addItem("Sequential (ordered frames)", "sequential")
+        self.sphere_matching_combo.addItem("Sequential (ordered frames — recommended)", "sequential")
+        self.sphere_matching_combo.addItem("Exhaustive (all pairs)", "exhaustive")
         self.sphere_matching_combo.addItem("Vocab Tree (large sets)", "vocab_tree")
-        self.sphere_matching_combo.setCurrentIndex(0)
+        self.sphere_matching_combo.setCurrentIndex(0)  # Sequential is best for video sequences
         card_sphere.addWidget(FormRow("Feature Matching:", self.sphere_matching_combo))
 
-        _sep_s1 = QFrame(); _sep_s1.setFrameShape(QFrame.Shape.HLine); _sep_s1.setProperty("role", "divider")
+        _sep_s1 = _make_divider()
         card_sphere.addWidget(_sep_s1)
 
         _sp_nums = QGridLayout()
@@ -1307,7 +1382,7 @@ class MainWindow(QMainWindow):
         _sp_nums.addWidget(self.sphere_min_matches_spin, 1, 3)
         card_sphere.addLayout(_sp_nums)
 
-        _sep_s2 = QFrame(); _sep_s2.setFrameShape(QFrame.Shape.HLine); _sep_s2.setProperty("role", "divider")
+        _sep_s2 = _make_divider()
         card_sphere.addWidget(_sep_s2)
 
         self.sphere_extra_args_edit = QLineEdit()
@@ -1319,11 +1394,249 @@ class MainWindow(QMainWindow):
         _sphere_extra_hint.setProperty("role", "mutedSmall")
         card_sphere.addWidget(_sphere_extra_hint)
 
+        _sep_s3 = _make_divider()
+        card_sphere.addWidget(_sep_s3)
+
+        _sphere_tuning_hint = QLabel(
+            "Advanced tuning is exposed as form controls instead of raw command-line flags."
+        )
+        _sphere_tuning_hint.setWordWrap(True)
+        _sphere_tuning_hint.setProperty("role", "mutedSmall")
+        card_sphere.addWidget(_sphere_tuning_hint)
+
+        feature_group = QGroupBox("Feature Extraction Tuning")
+        feature_layout = QGridLayout(feature_group)
+        feature_layout.setHorizontalSpacing(10)
+        feature_layout.setVerticalSpacing(8)
+        feature_layout.setColumnStretch(1, 1)
+        feature_layout.setColumnStretch(3, 1)
+
+        self.sphere_single_camera_check = QCheckBox("Single camera intrinsics")
+        self.sphere_single_camera_check.setChecked(True)
+        feature_layout.addWidget(self.sphere_single_camera_check, 0, 0, 1, 2)
+
+        self.sphere_max_orientations_spin = QSpinBox()
+        self.sphere_max_orientations_spin.setRange(1, 8)
+        self.sphere_max_orientations_spin.setValue(2)
+        feature_layout.addWidget(QLabel("Max Orientations:"), 1, 0)
+        feature_layout.addWidget(self.sphere_max_orientations_spin, 1, 1)
+
+        self.sphere_peak_threshold_spin = QDoubleSpinBox()
+        self.sphere_peak_threshold_spin.setDecimals(5)
+        self.sphere_peak_threshold_spin.setRange(0.00001, 1.0)
+        self.sphere_peak_threshold_spin.setSingleStep(0.0005)
+        self.sphere_peak_threshold_spin.setValue(0.00667)
+        feature_layout.addWidget(QLabel("Peak Threshold:"), 1, 2)
+        feature_layout.addWidget(self.sphere_peak_threshold_spin, 1, 3)
+
+        self.sphere_edge_threshold_spin = QDoubleSpinBox()
+        self.sphere_edge_threshold_spin.setDecimals(2)
+        self.sphere_edge_threshold_spin.setRange(1.0, 50.0)
+        self.sphere_edge_threshold_spin.setSingleStep(0.5)
+        self.sphere_edge_threshold_spin.setValue(10.0)
+        feature_layout.addWidget(QLabel("Edge Threshold:"), 2, 0)
+        feature_layout.addWidget(self.sphere_edge_threshold_spin, 2, 1)
+
+        card_sphere.addWidget(feature_group)
+
+        matcher_group = QGroupBox("Feature Matching Tuning")
+        matcher_layout = QGridLayout(matcher_group)
+        matcher_layout.setHorizontalSpacing(10)
+        matcher_layout.setVerticalSpacing(8)
+        matcher_layout.setColumnStretch(1, 1)
+        matcher_layout.setColumnStretch(3, 1)
+
+        self.sphere_quadratic_overlap_check = QCheckBox("Quadratic overlap")
+        self.sphere_quadratic_overlap_check.setChecked(True)
+        matcher_layout.addWidget(self.sphere_quadratic_overlap_check, 0, 0, 1, 2)
+
+        self.sphere_loop_detection_check = QCheckBox("Loop detection")
+        self.sphere_loop_detection_check.setChecked(False)
+        matcher_layout.addWidget(self.sphere_loop_detection_check, 0, 2, 1, 2)
+
+        self.sphere_cross_check_check = QCheckBox("Cross-check matches")
+        self.sphere_cross_check_check.setChecked(True)
+        matcher_layout.addWidget(self.sphere_cross_check_check, 1, 0, 1, 2)
+
+        self.sphere_max_ratio_spin = QDoubleSpinBox()
+        self.sphere_max_ratio_spin.setDecimals(2)
+        self.sphere_max_ratio_spin.setRange(0.1, 1.0)
+        self.sphere_max_ratio_spin.setSingleStep(0.05)
+        self.sphere_max_ratio_spin.setValue(0.8)
+        matcher_layout.addWidget(QLabel("Max Ratio:"), 2, 0)
+        matcher_layout.addWidget(self.sphere_max_ratio_spin, 2, 1)
+
+        self.sphere_max_distance_spin = QDoubleSpinBox()
+        self.sphere_max_distance_spin.setDecimals(2)
+        self.sphere_max_distance_spin.setRange(0.1, 5.0)
+        self.sphere_max_distance_spin.setSingleStep(0.05)
+        self.sphere_max_distance_spin.setValue(0.7)
+        matcher_layout.addWidget(QLabel("Max Distance:"), 2, 2)
+        matcher_layout.addWidget(self.sphere_max_distance_spin, 2, 3)
+
+        self.sphere_matcher_max_error_spin = QDoubleSpinBox()
+        self.sphere_matcher_max_error_spin.setDecimals(2)
+        self.sphere_matcher_max_error_spin.setRange(0.5, 20.0)
+        self.sphere_matcher_max_error_spin.setSingleStep(0.5)
+        self.sphere_matcher_max_error_spin.setValue(4.0)
+        matcher_layout.addWidget(QLabel("Max Error:"), 3, 0)
+        matcher_layout.addWidget(self.sphere_matcher_max_error_spin, 3, 1)
+
+        self.sphere_matcher_confidence_spin = QDoubleSpinBox()
+        self.sphere_matcher_confidence_spin.setDecimals(3)
+        self.sphere_matcher_confidence_spin.setRange(0.1, 1.0)
+        self.sphere_matcher_confidence_spin.setSingleStep(0.001)
+        self.sphere_matcher_confidence_spin.setValue(0.999)
+        matcher_layout.addWidget(QLabel("Confidence:"), 3, 2)
+        matcher_layout.addWidget(self.sphere_matcher_confidence_spin, 3, 3)
+
+        self.sphere_max_trials_spin = QSpinBox()
+        self.sphere_max_trials_spin.setRange(100, 100000)
+        self.sphere_max_trials_spin.setSingleStep(100)
+        self.sphere_max_trials_spin.setValue(10000)
+        matcher_layout.addWidget(QLabel("Max Trials:"), 4, 0)
+        matcher_layout.addWidget(self.sphere_max_trials_spin, 4, 1)
+
+        self.sphere_min_inlier_ratio_spin = QDoubleSpinBox()
+        self.sphere_min_inlier_ratio_spin.setDecimals(2)
+        self.sphere_min_inlier_ratio_spin.setRange(0.0, 1.0)
+        self.sphere_min_inlier_ratio_spin.setSingleStep(0.05)
+        self.sphere_min_inlier_ratio_spin.setValue(0.25)
+        matcher_layout.addWidget(QLabel("Min Inlier Ratio:"), 4, 2)
+        matcher_layout.addWidget(self.sphere_min_inlier_ratio_spin, 4, 3)
+
+        card_sphere.addWidget(matcher_group)
+
+        mapper_group = QGroupBox("Mapping Tuning")
+        mapper_layout = QGridLayout(mapper_group)
+        mapper_layout.setHorizontalSpacing(10)
+        mapper_layout.setVerticalSpacing(8)
+        mapper_layout.setColumnStretch(1, 1)
+        mapper_layout.setColumnStretch(3, 1)
+
+        self.sphere_refine_focal_check = QCheckBox("Refine focal length")
+        self.sphere_refine_focal_check.setChecked(False)
+        mapper_layout.addWidget(self.sphere_refine_focal_check, 0, 0, 1, 2)
+
+        self.sphere_refine_principal_point_check = QCheckBox("Refine principal point")
+        self.sphere_refine_principal_point_check.setChecked(False)
+        mapper_layout.addWidget(self.sphere_refine_principal_point_check, 0, 2, 1, 2)
+
+        self.sphere_refine_extra_params_check = QCheckBox("Refine extra params")
+        self.sphere_refine_extra_params_check.setChecked(False)
+        mapper_layout.addWidget(self.sphere_refine_extra_params_check, 1, 0, 1, 2)
+
+        self.sphere_ignore_two_view_tracks_check = QCheckBox("Ignore two-view tracks")
+        self.sphere_ignore_two_view_tracks_check.setChecked(True)
+        mapper_layout.addWidget(self.sphere_ignore_two_view_tracks_check, 1, 2, 1, 2)
+
+        self.sphere_multiple_models_check = QCheckBox("Allow multiple models")
+        self.sphere_multiple_models_check.setChecked(True)
+        mapper_layout.addWidget(self.sphere_multiple_models_check, 2, 0, 1, 2)
+
+        self.sphere_init_min_inliers_spin = QSpinBox()
+        self.sphere_init_min_inliers_spin.setRange(1, 1000)
+        self.sphere_init_min_inliers_spin.setValue(100)
+        mapper_layout.addWidget(QLabel("Init Min Inliers:"), 3, 0)
+        mapper_layout.addWidget(self.sphere_init_min_inliers_spin, 3, 1)
+
+        self.sphere_init_trials_spin = QSpinBox()
+        self.sphere_init_trials_spin.setRange(1, 5000)
+        self.sphere_init_trials_spin.setValue(200)
+        mapper_layout.addWidget(QLabel("Init Trials:"), 3, 2)
+        mapper_layout.addWidget(self.sphere_init_trials_spin, 3, 3)
+
+        self.sphere_init_max_error_spin = QDoubleSpinBox()
+        self.sphere_init_max_error_spin.setDecimals(2)
+        self.sphere_init_max_error_spin.setRange(0.5, 20.0)
+        self.sphere_init_max_error_spin.setSingleStep(0.5)
+        self.sphere_init_max_error_spin.setValue(4.0)
+        mapper_layout.addWidget(QLabel("Init Max Error:"), 4, 0)
+        mapper_layout.addWidget(self.sphere_init_max_error_spin, 4, 1)
+
+        self.sphere_init_forward_motion_spin = QDoubleSpinBox()
+        self.sphere_init_forward_motion_spin.setDecimals(2)
+        self.sphere_init_forward_motion_spin.setRange(0.1, 1.0)
+        self.sphere_init_forward_motion_spin.setSingleStep(0.01)
+        self.sphere_init_forward_motion_spin.setValue(0.95)
+        mapper_layout.addWidget(QLabel("Init Max Forward Motion:"), 4, 2)
+        mapper_layout.addWidget(self.sphere_init_forward_motion_spin, 4, 3)
+
+        self.sphere_init_min_tri_angle_spin = QDoubleSpinBox()
+        self.sphere_init_min_tri_angle_spin.setDecimals(1)
+        self.sphere_init_min_tri_angle_spin.setRange(0.1, 90.0)
+        self.sphere_init_min_tri_angle_spin.setSingleStep(0.5)
+        self.sphere_init_min_tri_angle_spin.setValue(16.0)
+        mapper_layout.addWidget(QLabel("Init Min Tri Angle:"), 5, 0)
+        mapper_layout.addWidget(self.sphere_init_min_tri_angle_spin, 5, 1)
+
+        self.sphere_abs_pose_min_inliers_spin = QSpinBox()
+        self.sphere_abs_pose_min_inliers_spin.setRange(1, 500)
+        self.sphere_abs_pose_min_inliers_spin.setValue(50)
+        mapper_layout.addWidget(QLabel("Abs Pose Min Inliers:"), 5, 2)
+        mapper_layout.addWidget(self.sphere_abs_pose_min_inliers_spin, 5, 3)
+
+        self.sphere_abs_pose_max_error_spin = QDoubleSpinBox()
+        self.sphere_abs_pose_max_error_spin.setDecimals(2)
+        self.sphere_abs_pose_max_error_spin.setRange(0.5, 50.0)
+        self.sphere_abs_pose_max_error_spin.setSingleStep(0.5)
+        self.sphere_abs_pose_max_error_spin.setValue(8.0)
+        mapper_layout.addWidget(QLabel("Abs Pose Max Error:"), 6, 0)
+        mapper_layout.addWidget(self.sphere_abs_pose_max_error_spin, 6, 1)
+
+        self.sphere_abs_pose_min_inlier_ratio_spin = QDoubleSpinBox()
+        self.sphere_abs_pose_min_inlier_ratio_spin.setDecimals(2)
+        self.sphere_abs_pose_min_inlier_ratio_spin.setRange(0.0, 1.0)
+        self.sphere_abs_pose_min_inlier_ratio_spin.setSingleStep(0.05)
+        self.sphere_abs_pose_min_inlier_ratio_spin.setValue(0.25)
+        mapper_layout.addWidget(QLabel("Abs Pose Min Inlier Ratio:"), 6, 2)
+        mapper_layout.addWidget(self.sphere_abs_pose_min_inlier_ratio_spin, 6, 3)
+
+        self.sphere_max_reg_trials_spin = QSpinBox()
+        self.sphere_max_reg_trials_spin.setRange(1, 20)
+        self.sphere_max_reg_trials_spin.setValue(3)
+        mapper_layout.addWidget(QLabel("Max Registration Trials:"), 7, 0)
+        mapper_layout.addWidget(self.sphere_max_reg_trials_spin, 7, 1)
+
+        self.sphere_tri_min_angle_spin = QDoubleSpinBox()
+        self.sphere_tri_min_angle_spin.setDecimals(1)
+        self.sphere_tri_min_angle_spin.setRange(0.0, 30.0)
+        self.sphere_tri_min_angle_spin.setSingleStep(0.5)
+        self.sphere_tri_min_angle_spin.setValue(1.5)
+        mapper_layout.addWidget(QLabel("Triangulation Min Angle:"), 7, 2)
+        mapper_layout.addWidget(self.sphere_tri_min_angle_spin, 7, 3)
+
+        self.sphere_tri_max_transitivity_spin = QSpinBox()
+        self.sphere_tri_max_transitivity_spin.setRange(1, 10)
+        self.sphere_tri_max_transitivity_spin.setValue(1)
+        mapper_layout.addWidget(QLabel("Triangulation Max Transitivity:"), 8, 0)
+        mapper_layout.addWidget(self.sphere_tri_max_transitivity_spin, 8, 1)
+
+        self.sphere_filter_max_reproj_error_spin = QDoubleSpinBox()
+        self.sphere_filter_max_reproj_error_spin.setDecimals(2)
+        self.sphere_filter_max_reproj_error_spin.setRange(0.5, 20.0)
+        self.sphere_filter_max_reproj_error_spin.setSingleStep(0.5)
+        self.sphere_filter_max_reproj_error_spin.setValue(4.0)
+        mapper_layout.addWidget(QLabel("Filter Max Reproj Error:"), 8, 2)
+        mapper_layout.addWidget(self.sphere_filter_max_reproj_error_spin, 8, 3)
+
+        self.sphere_filter_min_tri_angle_spin = QDoubleSpinBox()
+        self.sphere_filter_min_tri_angle_spin.setDecimals(1)
+        self.sphere_filter_min_tri_angle_spin.setRange(0.0, 30.0)
+        self.sphere_filter_min_tri_angle_spin.setSingleStep(0.5)
+        self.sphere_filter_min_tri_angle_spin.setValue(1.5)
+        mapper_layout.addWidget(QLabel("Filter Min Tri Angle:"), 9, 0)
+        mapper_layout.addWidget(self.sphere_filter_min_tri_angle_spin, 9, 1)
+
+        card_sphere.addWidget(mapper_group)
+
         _sp_layout.addWidget(card_sphere)
+        _sp_layout.addStretch()
         self.recon_params_stack.addWidget(_sphere_page)
 
         # Wire tool dropdown → stack
         self.recon_tool_combo.currentIndexChanged.connect(self._on_recon_tool_changed)
+        self.recon_params_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout.addWidget(self.recon_params_stack)
 
         # ── Legacy hidden widgets (config compat) ─────────────────────────────
@@ -1387,6 +1700,8 @@ class MainWindow(QMainWindow):
         stage4_footer.primary_button.clicked.connect(self.run_stage_4_only)
         stage4_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(5))
         layout.addWidget(stage4_footer)
+
+        QTimer.singleShot(0, self._update_recon_stack_height)
         
         layout.addStretch()
         return self._scroll_wrap(page)
@@ -1869,15 +2184,6 @@ class MainWindow(QMainWindow):
             parts.append(f"COLMAP GPU: {colmap_path.name}")
         self.statusBar().showMessage(" | ".join(parts) if parts else "Dependencies not configured")
 
-        if hasattr(self, 'recon_paths_label'):
-            spheresfm_text = str(spheresfm_path) if spheresfm_path else "Not configured"
-            colmap_text = str(colmap_path) if colmap_path else "Not configured"
-            self.recon_paths_label.setText(
-                f"SphereSfM: {spheresfm_text}\n"
-                f"COLMAP GPU: {colmap_text}\n"
-                f"COLMAP Version: {colmap_version}"
-            )
-    
     def show_about(self):
         QMessageBox.about(self, f"About {APP_NAME}",
             f"{APP_NAME} v{APP_VERSION}\n\n"
@@ -1907,9 +2213,9 @@ class MainWindow(QMainWindow):
     def get_current_config(self) -> dict:
         stage2_method = self.stage2_method_combo.currentData()
         if stage2_method == 'cubemap':
-            stage2_format = self.cubemap_format_combo.currentData()
+            stage2_format = _normalize_image_format(self.cubemap_format_combo.currentData(), 'png')
         else:
-            stage2_format = self.stage2_format_combo.currentData()
+            stage2_format = _normalize_image_format(self.stage2_format_combo.currentData(), 'png')
 
         return {
             'input_file': self.input_file_edit.text(),
@@ -1921,12 +2227,12 @@ class MainWindow(QMainWindow):
             'frame_rotation': getattr(self.stage1_eq_preview, '_rotation', 0) if hasattr(self, 'stage1_eq_preview') else 0,
             'sdk_quality': self.sdk_quality_combo.currentData(),
             'sdk_resolution': self.sdk_resolution_combo.currentData(),
-            'output_format': self.output_format_combo.currentData(),
+            'output_format': _normalize_image_format(self.output_format_combo.currentData(), 'jpg'),
             'stage2_enabled': self.stage2_enable.isChecked(),
             'transform_type': self.stage2_method_combo.currentData(),
             'stage2_format': stage2_format,
-            'stage2_format_perspective': self.stage2_format_combo.currentData(),
-            'stage2_format_cubemap': self.cubemap_format_combo.currentData(),
+            'stage2_format_perspective': _normalize_image_format(self.stage2_format_combo.currentData(), 'png'),
+            'stage2_format_cubemap': _normalize_image_format(self.cubemap_format_combo.currentData(), 'png'),
             'output_width': self.stage2_width_spin.value(),
             'output_height': self.stage2_height_spin.value(),
             'cubemap_tile_width': self.cubemap_tile_width_spin.value(),
@@ -1942,10 +2248,13 @@ class MainWindow(QMainWindow):
                 'personal_objects': self.objects_enable.isChecked(),
                 'animals': self.animals_enable.isChecked(),
             },
-            'mask_target': 'equirect' if not self.stage2_enable.isChecked() else 'split',
+            'stage3_image_source': self._get_stage3_image_source(),
+            'mask_target': self._legacy_mask_target_from_source(self._get_stage3_image_source()),
             'stage4_enabled': self.stage4_enable.isChecked(),
             'use_rig_sfm': self.use_rig_sfm_check.isChecked(),
             'alignment_mode': self._get_alignment_mode(),
+            'stage4_image_source': self._get_stage4_image_source(),
+            'stage4_mask_source': self._get_stage4_mask_source(),
             'use_gpu_colmap': (
                 self.use_gpu_colmap_check.isChecked()
                 if self.recon_tool_combo.currentData() == 'colmap'
@@ -1981,11 +2290,16 @@ class MainWindow(QMainWindow):
                 'max_num_features': self.sphere_max_features_spin.value(),
                 'sequential_overlap': self.sphere_overlap_spin.value(),
                 'min_num_matches': self.sphere_min_matches_spin.value(),
+                'feature_flags': self._build_spheresfm_feature_flags(),
+                'matcher_flags': self._build_spheresfm_matcher_flags(),
+                'mapper_flags': self._build_spheresfm_mapper_flags(),
                 'extra_args': self.sphere_extra_args_edit.text().strip(),
             },
             'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
             'export_realityscan': self.export_realityscan_check.isChecked(),
             'export_include_masks': self.export_include_masks_check.isChecked(),
+            'export_image_source': self._get_export_image_source(),
+            'export_mask_source': self._get_export_mask_source(),
             'export_sidecars': self.export_sidecar_check.isChecked(),
             'stage5_enabled': self.stage5_enable.isChecked(),
             'train_lighting': self.train_lichtfeld_check.isChecked(),
@@ -1998,6 +2312,117 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'recon_tool_combo') and self.recon_tool_combo.currentData() == 'spheresfm':
             return 'panorama_sfm'
         return 'perspective_reconstruction'
+
+    def _get_stage3_image_source(self) -> str:
+        if hasattr(self, 'mask_input_source_combo'):
+            return self.mask_input_source_combo.currentData()
+        return 'equirect' if not self.stage2_enable.isChecked() else 'perspective'
+
+    def _get_stage4_image_source(self) -> str:
+        if hasattr(self, 'recon_image_source_combo'):
+            return self.recon_image_source_combo.currentData()
+        return 'auto'
+
+    def _get_stage4_mask_source(self) -> str:
+        if hasattr(self, 'recon_mask_source_combo'):
+            return self.recon_mask_source_combo.currentData()
+        return 'auto'
+
+    def _get_export_image_source(self) -> str:
+        if hasattr(self, 'export_image_source_combo'):
+            return self.export_image_source_combo.currentData()
+        return 'auto'
+
+    def _get_export_mask_source(self) -> str:
+        if hasattr(self, 'export_mask_source_combo'):
+            return self.export_mask_source_combo.currentData()
+        return 'auto'
+
+    def _legacy_mask_target_from_source(self, source: str) -> str:
+        if source == 'equirect':
+            return 'equirect'
+        return 'split'
+
+    def _set_combo_data(self, combo: QComboBox, value: str):
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _directory_has_images(self, folder: Path) -> bool:
+        if not folder or not folder.exists() or not folder.is_dir():
+            return False
+        for ext in ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp', '*.PNG', '*.JPG', '*.JPEG', '*.TIF', '*.TIFF', '*.BMP'):
+            if any(folder.rglob(ext)):
+                return True
+        return False
+
+    def _resolve_output_image_dir(
+        self,
+        output_root: Path,
+        source: str,
+        alignment_mode: str | None = None,
+        reconstruction_dir: Path | None = None,
+    ) -> Path | None:
+        perspective_dir = output_root / 'perspective_views'
+        equirect_dir = output_root / 'extracted_frames'
+
+        if source == 'reconstruction':
+            if reconstruction_dir and self._directory_has_images(reconstruction_dir):
+                return reconstruction_dir
+            source = 'auto'
+
+        if source == 'perspective':
+            return perspective_dir if self._directory_has_images(perspective_dir) else None
+        if source == 'equirect':
+            return equirect_dir if self._directory_has_images(equirect_dir) else None
+
+        ordered = []
+        if reconstruction_dir and self._directory_has_images(reconstruction_dir):
+            ordered.append(reconstruction_dir)
+        if alignment_mode == 'panorama_sfm':
+            ordered.extend([equirect_dir, perspective_dir])
+        else:
+            ordered.extend([perspective_dir, equirect_dir])
+
+        for folder in ordered:
+            if self._directory_has_images(folder):
+                return folder
+        return None
+
+    def _resolve_output_masks_dir(
+        self,
+        output_root: Path,
+        source: str,
+        image_source: str,
+    ) -> Path | None:
+        mask_dirs = {
+            'perspective': output_root / 'masks_perspective',
+            'equirect': output_root / 'masks_equirect',
+            'custom': output_root / 'masks_custom',
+        }
+        legacy_dir = output_root / 'masks'
+
+        def _existing(folder: Path | None) -> Path | None:
+            if folder and folder.exists() and any(folder.rglob('*.png')):
+                return folder
+            return None
+
+        if source in ('match_images', 'match_reconstruction'):
+            source = image_source
+        if source == 'none':
+            return None
+        if source in mask_dirs:
+            return _existing(mask_dirs[source]) or _existing(legacy_dir)
+
+        ordered = []
+        if image_source in mask_dirs:
+            ordered.append(mask_dirs[image_source])
+        ordered.extend([legacy_dir, mask_dirs['perspective'], mask_dirs['equirect'], mask_dirs['custom']])
+        for folder in ordered:
+            existing = _existing(folder)
+            if existing:
+                return existing
+        return None
     
     def apply_loaded_config(self, config: dict):
         try:
@@ -2024,7 +2449,7 @@ class MainWindow(QMainWindow):
             if 'sdk_options' in config and hasattr(self, 'stage1_media_panel'):
                 self.stage1_media_panel.set_values(config.get('sdk_options') or {})
             if 'output_format' in config:
-                idx = self.output_format_combo.findData(config['output_format'])
+                idx = self.output_format_combo.findData(_normalize_image_format(config['output_format'], 'jpg'))
                 if idx >= 0:
                     self.output_format_combo.setCurrentIndex(idx)
             if 'stage2_enabled' in config:
@@ -2038,22 +2463,25 @@ class MainWindow(QMainWindow):
             if 'output_height' in config:
                 self.stage2_height_spin.setValue(config['output_height'])
             if 'stage2_format' in config:
-                idx_p = self.stage2_format_combo.findData(config['stage2_format'])
+                normalized_stage2 = _normalize_image_format(config['stage2_format'], 'png')
+                idx_p = self.stage2_format_combo.findData(normalized_stage2)
                 if idx_p >= 0:
                     self.stage2_format_combo.setCurrentIndex(idx_p)
-                idx_c = self.cubemap_format_combo.findData(config['stage2_format'])
+                idx_c = self.cubemap_format_combo.findData(normalized_stage2)
                 if idx_c >= 0:
                     self.cubemap_format_combo.setCurrentIndex(idx_c)
             if 'stage2_format_perspective' in config:
-                idx = self.stage2_format_combo.findData(config['stage2_format_perspective'])
+                idx = self.stage2_format_combo.findData(_normalize_image_format(config['stage2_format_perspective'], 'png'))
                 if idx >= 0:
                     self.stage2_format_combo.setCurrentIndex(idx)
             if 'stage2_format_cubemap' in config:
-                idx = self.cubemap_format_combo.findData(config['stage2_format_cubemap'])
+                idx = self.cubemap_format_combo.findData(_normalize_image_format(config['stage2_format_cubemap'], 'png'))
                 if idx >= 0:
                     self.cubemap_format_combo.setCurrentIndex(idx)
             if 'stage3_enabled' in config:
                 self.stage3_enable.setChecked(config['stage3_enabled'])
+            if 'stage3_image_source' in config and hasattr(self, 'mask_input_source_combo'):
+                self._set_combo_data(self.mask_input_source_combo, config['stage3_image_source'])
             if 'model_size' in config:
                 models = list(YOLOV8_MODELS.keys())
                 if config['model_size'] in models:
@@ -2075,6 +2503,10 @@ class MainWindow(QMainWindow):
                     self.recon_tool_combo.setCurrentIndex(1)
                 else:
                     self.recon_tool_combo.setCurrentIndex(0)
+            if 'stage4_image_source' in config and hasattr(self, 'recon_image_source_combo'):
+                self._set_combo_data(self.recon_image_source_combo, config['stage4_image_source'])
+            if 'stage4_mask_source' in config and hasattr(self, 'recon_mask_source_combo'):
+                self._set_combo_data(self.recon_mask_source_combo, config['stage4_mask_source'])
             if 'use_gpu_colmap' in config:
                 self.use_gpu_colmap_check.setChecked(config['use_gpu_colmap'])
                 self.use_gpu_spheresfm_check.setChecked(config['use_gpu_colmap'])
@@ -2102,6 +2534,23 @@ class MainWindow(QMainWindow):
                 backend_idx = self.mapping_backend_combo.findData(config['mapping_backend'])
                 if backend_idx >= 0:
                     self.mapping_backend_combo.setCurrentIndex(backend_idx)
+            if 'spheresfm_params' in config:
+                sfm_params = config['spheresfm_params']
+                camera_idx = self.sphere_camera_model_combo.findData(sfm_params.get('camera_model', 'SPHERE'))
+                if camera_idx >= 0:
+                    self.sphere_camera_model_combo.setCurrentIndex(camera_idx)
+                feature_idx = self.sphere_feature_extractor_combo.findData(sfm_params.get('feature_extractor', 'sift'))
+                if feature_idx >= 0:
+                    self.sphere_feature_extractor_combo.setCurrentIndex(feature_idx)
+                matching_idx = self.sphere_matching_combo.findData(sfm_params.get('matching_method', 'sequential'))
+                if matching_idx >= 0:
+                    self.sphere_matching_combo.setCurrentIndex(matching_idx)
+                self.sphere_max_image_size_spin.setValue(int(sfm_params.get('max_image_size', 3200)))
+                self.sphere_max_features_spin.setValue(int(sfm_params.get('max_num_features', 8192)))
+                self.sphere_overlap_spin.setValue(int(sfm_params.get('sequential_overlap', 10)))
+                self.sphere_min_matches_spin.setValue(int(sfm_params.get('min_num_matches', 15)))
+                self._apply_spheresfm_flag_config(sfm_params)
+                self.sphere_extra_args_edit.setText(str(sfm_params.get('extra_args', '')))
             if 'enable_hloc_fallback' in config:
                 self.enable_hloc_fallback_check.setChecked(config['enable_hloc_fallback'])
             if 'prefer_colmap_learned' in config:
@@ -2114,6 +2563,10 @@ class MainWindow(QMainWindow):
                 self.export_realityscan_check.setChecked(config['export_realityscan'])
             if 'export_include_masks' in config:
                 self.export_include_masks_check.setChecked(config['export_include_masks'])
+            if 'export_image_source' in config and hasattr(self, 'export_image_source_combo'):
+                self._set_combo_data(self.export_image_source_combo, config['export_image_source'])
+            if 'export_mask_source' in config and hasattr(self, 'export_mask_source_combo'):
+                self._set_combo_data(self.export_mask_source_combo, config['export_mask_source'])
             if 'export_sidecars' in config:
                 self.export_sidecar_check.setChecked(config['export_sidecars'])
             if 'stage5_enabled' in config:
@@ -2212,18 +2665,175 @@ class MainWindow(QMainWindow):
         self.recon_params_stack.setCurrentIndex(index)
         if index == 0:
             self.recon_tool_desc.setText(
-                "Perspective Reconstruction | COLMAP GPU on split images | Universal output"
+                "Perspective reconstruction on split images using COLMAP GPU."
             )
             self.output_info_label.setText(
                 "Output: <output_dir>/reconstruction/sparse/0/"
             )
         else:
             self.recon_tool_desc.setText(
-                "Panorama SfM | SphereSfM direct spherical matching on equirectangular images"
+                "Panorama SfM on equirectangular images using SphereSfM."
             )
             self.output_info_label.setText(
                 "Output: <output_dir>/reconstruction/sparse/0/  (SphereSfM SPHERE model)"
             )
+        self._update_recon_stack_height()
+
+    def _update_recon_stack_height(self):
+        if not hasattr(self, 'recon_params_stack'):
+            return
+        current = self.recon_params_stack.currentWidget()
+        if current is None:
+            return
+        self.recon_params_stack.setFixedHeight(current.sizeHint().height())
+
+    def _parse_cli_flag_values(self, flags: str) -> dict[str, str]:
+        if not flags or not flags.strip():
+            return {}
+
+        try:
+            tokens = shlex.split(flags, posix=False)
+        except ValueError:
+            tokens = flags.split()
+
+        values: dict[str, str] = {}
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token.startswith("--"):
+                value = "1"
+                if index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+                    value = tokens[index + 1]
+                    index += 1
+                values[token] = value
+            index += 1
+        return values
+
+    def _flag_enabled(self, values: dict[str, str], flag: str, default: bool) -> bool:
+        raw_value = values.get(flag)
+        if raw_value is None:
+            return default
+        return str(raw_value).strip().lower() not in {"0", "false", "no", "off"}
+
+    def _format_flag_number(self, value) -> str:
+        if isinstance(value, float):
+            return f"{value:g}"
+        return str(value)
+
+    def _build_spheresfm_feature_flags(self) -> str:
+        parts = [
+            "--ImageReader.single_camera", "1" if self.sphere_single_camera_check.isChecked() else "0",
+            "--SiftExtraction.max_num_orientations", str(self.sphere_max_orientations_spin.value()),
+            "--SiftExtraction.peak_threshold", self._format_flag_number(self.sphere_peak_threshold_spin.value()),
+            "--SiftExtraction.edge_threshold", self._format_flag_number(self.sphere_edge_threshold_spin.value()),
+        ]
+        return " ".join(parts)
+
+    def _build_spheresfm_matcher_flags(self) -> str:
+        parts = [
+            "--SequentialMatching.quadratic_overlap", "1" if self.sphere_quadratic_overlap_check.isChecked() else "0",
+            "--SequentialMatching.loop_detection", "1" if self.sphere_loop_detection_check.isChecked() else "0",
+            "--SiftMatching.max_ratio", self._format_flag_number(self.sphere_max_ratio_spin.value()),
+            "--SiftMatching.max_distance", self._format_flag_number(self.sphere_max_distance_spin.value()),
+            "--SiftMatching.cross_check", "1" if self.sphere_cross_check_check.isChecked() else "0",
+            "--SiftMatching.max_error", self._format_flag_number(self.sphere_matcher_max_error_spin.value()),
+            "--SiftMatching.confidence", self._format_flag_number(self.sphere_matcher_confidence_spin.value()),
+            "--SiftMatching.max_num_trials", str(self.sphere_max_trials_spin.value()),
+            "--SiftMatching.min_inlier_ratio", self._format_flag_number(self.sphere_min_inlier_ratio_spin.value()),
+        ]
+        return " ".join(parts)
+
+    def _build_spheresfm_mapper_flags(self) -> str:
+        parts = [
+            "--Mapper.ba_refine_focal_length", "1" if self.sphere_refine_focal_check.isChecked() else "0",
+            "--Mapper.ba_refine_principal_point", "1" if self.sphere_refine_principal_point_check.isChecked() else "0",
+            "--Mapper.ba_refine_extra_params", "1" if self.sphere_refine_extra_params_check.isChecked() else "0",
+            "--Mapper.init_min_num_inliers", str(self.sphere_init_min_inliers_spin.value()),
+            "--Mapper.init_num_trials", str(self.sphere_init_trials_spin.value()),
+            "--Mapper.init_max_error", self._format_flag_number(self.sphere_init_max_error_spin.value()),
+            "--Mapper.init_max_forward_motion", self._format_flag_number(self.sphere_init_forward_motion_spin.value()),
+            "--Mapper.init_min_tri_angle", self._format_flag_number(self.sphere_init_min_tri_angle_spin.value()),
+            "--Mapper.abs_pose_min_num_inliers", str(self.sphere_abs_pose_min_inliers_spin.value()),
+            "--Mapper.abs_pose_max_error", self._format_flag_number(self.sphere_abs_pose_max_error_spin.value()),
+            "--Mapper.abs_pose_min_inlier_ratio", self._format_flag_number(self.sphere_abs_pose_min_inlier_ratio_spin.value()),
+            "--Mapper.max_reg_trials", str(self.sphere_max_reg_trials_spin.value()),
+            "--Mapper.tri_min_angle", self._format_flag_number(self.sphere_tri_min_angle_spin.value()),
+            "--Mapper.tri_max_transitivity", str(self.sphere_tri_max_transitivity_spin.value()),
+            "--Mapper.tri_ignore_two_view_tracks", "1" if self.sphere_ignore_two_view_tracks_check.isChecked() else "0",
+            "--Mapper.filter_max_reproj_error", self._format_flag_number(self.sphere_filter_max_reproj_error_spin.value()),
+            "--Mapper.filter_min_tri_angle", self._format_flag_number(self.sphere_filter_min_tri_angle_spin.value()),
+            "--Mapper.multiple_models", "1" if self.sphere_multiple_models_check.isChecked() else "0",
+        ]
+        return " ".join(parts)
+
+    def _apply_spheresfm_flag_config(self, sfm_params: dict):
+        feature_values = self._parse_cli_flag_values(str(sfm_params.get('feature_flags', DEFAULT_SPHERESFM_FEATURE_FLAGS)))
+        matcher_values = self._parse_cli_flag_values(str(sfm_params.get('matcher_flags', DEFAULT_SPHERESFM_MATCHER_FLAGS)))
+        mapper_values = self._parse_cli_flag_values(str(sfm_params.get('mapper_flags', DEFAULT_SPHERESFM_MAPPER_FLAGS)))
+
+        self.sphere_single_camera_check.setChecked(
+            self._flag_enabled(feature_values, '--ImageReader.single_camera', True)
+        )
+        self.sphere_max_orientations_spin.setValue(
+            int(feature_values.get('--SiftExtraction.max_num_orientations', 2))
+        )
+        self.sphere_peak_threshold_spin.setValue(
+            float(feature_values.get('--SiftExtraction.peak_threshold', 0.00667))
+        )
+        self.sphere_edge_threshold_spin.setValue(
+            float(feature_values.get('--SiftExtraction.edge_threshold', 10.0))
+        )
+
+        self.sphere_quadratic_overlap_check.setChecked(
+            self._flag_enabled(matcher_values, '--SequentialMatching.quadratic_overlap', True)
+        )
+        self.sphere_loop_detection_check.setChecked(
+            self._flag_enabled(matcher_values, '--SequentialMatching.loop_detection', False)
+        )
+        self.sphere_cross_check_check.setChecked(
+            self._flag_enabled(matcher_values, '--SiftMatching.cross_check', True)
+        )
+        self.sphere_max_ratio_spin.setValue(float(matcher_values.get('--SiftMatching.max_ratio', 0.8)))
+        self.sphere_max_distance_spin.setValue(float(matcher_values.get('--SiftMatching.max_distance', 0.7)))
+        self.sphere_matcher_max_error_spin.setValue(float(matcher_values.get('--SiftMatching.max_error', 4.0)))
+        self.sphere_matcher_confidence_spin.setValue(float(matcher_values.get('--SiftMatching.confidence', 0.999)))
+        self.sphere_max_trials_spin.setValue(int(matcher_values.get('--SiftMatching.max_num_trials', 10000)))
+        self.sphere_min_inlier_ratio_spin.setValue(float(matcher_values.get('--SiftMatching.min_inlier_ratio', 0.25)))
+
+        self.sphere_refine_focal_check.setChecked(
+            self._flag_enabled(mapper_values, '--Mapper.ba_refine_focal_length', False)
+        )
+        self.sphere_refine_principal_point_check.setChecked(
+            self._flag_enabled(mapper_values, '--Mapper.ba_refine_principal_point', False)
+        )
+        self.sphere_refine_extra_params_check.setChecked(
+            self._flag_enabled(mapper_values, '--Mapper.ba_refine_extra_params', False)
+        )
+        self.sphere_ignore_two_view_tracks_check.setChecked(
+            self._flag_enabled(mapper_values, '--Mapper.tri_ignore_two_view_tracks', True)
+        )
+        self.sphere_multiple_models_check.setChecked(
+            self._flag_enabled(mapper_values, '--Mapper.multiple_models', True)
+        )
+        self.sphere_init_min_inliers_spin.setValue(int(mapper_values.get('--Mapper.init_min_num_inliers', 100)))
+        self.sphere_init_trials_spin.setValue(int(mapper_values.get('--Mapper.init_num_trials', 200)))
+        self.sphere_init_max_error_spin.setValue(float(mapper_values.get('--Mapper.init_max_error', 4.0)))
+        self.sphere_init_forward_motion_spin.setValue(float(mapper_values.get('--Mapper.init_max_forward_motion', 0.95)))
+        self.sphere_init_min_tri_angle_spin.setValue(float(mapper_values.get('--Mapper.init_min_tri_angle', 16.0)))
+        self.sphere_abs_pose_min_inliers_spin.setValue(int(mapper_values.get('--Mapper.abs_pose_min_num_inliers', 50)))
+        self.sphere_abs_pose_max_error_spin.setValue(float(mapper_values.get('--Mapper.abs_pose_max_error', 8.0)))
+        self.sphere_abs_pose_min_inlier_ratio_spin.setValue(
+            float(mapper_values.get('--Mapper.abs_pose_min_inlier_ratio', 0.25))
+        )
+        self.sphere_max_reg_trials_spin.setValue(int(mapper_values.get('--Mapper.max_reg_trials', 3)))
+        self.sphere_tri_min_angle_spin.setValue(float(mapper_values.get('--Mapper.tri_min_angle', 1.5)))
+        self.sphere_tri_max_transitivity_spin.setValue(int(mapper_values.get('--Mapper.tri_max_transitivity', 1)))
+        self.sphere_filter_max_reproj_error_spin.setValue(
+            float(mapper_values.get('--Mapper.filter_max_reproj_error', 4.0))
+        )
+        self.sphere_filter_min_tri_angle_spin.setValue(
+            float(mapper_values.get('--Mapper.filter_min_tri_angle', 1.5))
+        )
 
     def _on_alignment_mode_changed(self, checked: bool = True):
         """Legacy — kept so old signal connections don\'t raise AttributeError."""
@@ -2306,6 +2916,10 @@ class MainWindow(QMainWindow):
         worker = PipelineWorker({
             'output_dir': str(output_root),
             'export_include_masks': self.export_include_masks_check.isChecked(),
+            'alignment_mode': self._get_alignment_mode(),
+            'stage4_image_source': self._get_stage4_image_source(),
+            'export_image_source': self._get_export_image_source(),
+            'export_mask_source': self._get_export_mask_source(),
         })
         result = worker._execute_realityscan_export_only()
 
@@ -2355,15 +2969,26 @@ class MainWindow(QMainWindow):
             )
             return
 
-        images_dir = output_root / 'reconstruction' / 'images'
-        if not images_dir.exists():
-            images_dir = output_root / 'perspective_views'
-        if not images_dir.exists():
-            QMessageBox.warning(self, "Images Not Found", "Could not find perspective images to export.")
+        images_dir = self._resolve_output_image_dir(
+            output_root,
+            self._get_export_image_source(),
+            alignment_mode=self._get_alignment_mode(),
+            reconstruction_dir=output_root / 'reconstruction' / 'images',
+        )
+        if images_dir is None or not images_dir.exists():
+            QMessageBox.warning(self, "Images Not Found", "Could not find the selected images to export.")
             return
 
-        masks_dir = output_root / 'masks'
-        export_masks_dir = str(masks_dir) if (self.export_include_masks_check.isChecked() and masks_dir.exists()) else None
+        export_masks_dir = None
+        if self.export_include_masks_check.isChecked():
+            if images_dir == (output_root / 'perspective_views'):
+                image_source = 'perspective'
+            elif images_dir == (output_root / 'extracted_frames'):
+                image_source = 'equirect'
+            else:
+                image_source = self._get_stage4_image_source()
+            masks_dir = self._resolve_output_masks_dir(output_root, self._get_export_mask_source(), image_source)
+            export_masks_dir = str(masks_dir) if masks_dir else None
 
         from src.premium.pose_transfer_integration import export_for_realityscan
 
@@ -2434,14 +3059,16 @@ class MainWindow(QMainWindow):
         info = extractor.get_video_info(input_file)
         
         if info.get('success'):
+            camera_model = (info.get('camera_model') or '').strip()
+            camera_segment = f" | <b>Camera:</b> {camera_model}" if camera_model else ""
             self.file_metadata_label.setText(
                 f"<b>Type:</b> {info.get('file_type_desc', 'Unknown')} | "
                 f"<b>Duration:</b> {info.get('duration_formatted', 'N/A')} | "
                 f"<b>Resolution:</b> {info.get('resolution', 'N/A')} | "
                 f"<b>FPS:</b> {info.get('fps', 0):.2f} | "
                 f"<b>Frames:</b> {info.get('frame_count', 0):,} | "
-                f"<b>Camera:</b> {info.get('camera_model', 'Unknown')} | "
                 f"<b>Size:</b> {info.get('file_size_mb', 0):.1f} MB"
+                f"{camera_segment}"
             )
             self.file_metadata_label.setProperty("state", "ok")
             self._refresh_widget_style(self.file_metadata_label)
@@ -2514,7 +3141,7 @@ class MainWindow(QMainWindow):
             'end_time': None if self.full_video_check.isChecked() else self.end_time_spin.value(),
             'sdk_quality': self.sdk_quality_combo.currentData(),
             'sdk_resolution': self.sdk_resolution_combo.currentData(),
-            'output_format': self.output_format_combo.currentData(),
+            'output_format': _normalize_image_format(self.output_format_combo.currentData(), 'jpg'),
             'transform_type': stage2_method,
             'camera_config': {'cameras': self._generate_camera_positions()},
             'sdk_options': self.stage1_media_panel.get_sdk_options() if hasattr(self, 'stage1_media_panel') else {},
@@ -2532,7 +3159,7 @@ class MainWindow(QMainWindow):
             self.pipeline_config.update({
                 'output_width': self.stage2_width_spin.value(),
                 'output_height': self.stage2_height_spin.value(),
-                'stage2_format': self.stage2_format_combo.currentData(),
+                'stage2_format': _normalize_image_format(self.stage2_format_combo.currentData(), 'png'),
                 'perspective_params': {'camera_groups': camera_groups}
             })
         elif stage2_method == 'cubemap':
@@ -2542,7 +3169,7 @@ class MainWindow(QMainWindow):
             self.pipeline_config.update({
                 'output_width': tw,
                 'output_height': th,
-                'stage2_format': self.cubemap_format_combo.currentData(),
+                'stage2_format': _normalize_image_format(self.cubemap_format_combo.currentData(), 'png'),
                 'cubemap_params': {
                     'cubemap_type': ct, 'tile_width': tw, 'tile_height': th,
                     'fov': 90, 'layout': 'separate'
@@ -2593,6 +3220,8 @@ class MainWindow(QMainWindow):
                     'personal_objects': object_classes,
                     'animals': animal_classes,
                 },
+                'stage3_image_source': self._get_stage3_image_source(),
+                'mask_target': self._legacy_mask_target_from_source(self._get_stage3_image_source()),
             })
         
         # Reconstruction config
@@ -2634,9 +3263,16 @@ class MainWindow(QMainWindow):
                     'max_num_features': self.sphere_max_features_spin.value(),
                     'sequential_overlap': self.sphere_overlap_spin.value(),
                     'min_num_matches': self.sphere_min_matches_spin.value(),
+                    'feature_flags': self._build_spheresfm_feature_flags(),
+                    'matcher_flags': self._build_spheresfm_matcher_flags(),
+                    'mapper_flags': self._build_spheresfm_mapper_flags(),
                     'extra_args': self.sphere_extra_args_edit.text().strip(),
                 },
                 'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
+                'stage4_image_source': self._get_stage4_image_source(),
+                'stage4_mask_source': self._get_stage4_mask_source(),
+                'export_image_source': self._get_export_image_source(),
+                'export_mask_source': self._get_export_mask_source(),
                 'export_sidecars': self.export_sidecar_check.isChecked(),
             })
         
@@ -2656,6 +3292,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_pending_stage3_input') and self._pending_stage3_input:
             self.pipeline_config['stage3_input_dir'] = self._pending_stage3_input
             del self._pending_stage3_input
+        if hasattr(self, '_pending_stage4_input') and self._pending_stage4_input:
+            self.pipeline_config['stage4_input_dir'] = self._pending_stage4_input
+            del self._pending_stage4_input
 
         self.orchestrator.run_pipeline(
             config=self.pipeline_config,
@@ -2740,9 +3379,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing", "Configure output directory first")
             return
 
-        from src.pipeline.batch_orchestrator import PipelineWorker
-        worker = PipelineWorker({})
-        folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
+        output_root = Path(output_dir)
+        preferred_source = self._get_stage3_image_source()
+        folder = self._resolve_output_image_dir(output_root, preferred_source, alignment_mode=self._get_alignment_mode())
+        if folder is None and preferred_source == 'auto':
+            from src.pipeline.batch_orchestrator import PipelineWorker
+            worker = PipelineWorker({})
+            folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
         if not folder:
             folder_str = QFileDialog.getExistingDirectory(
                 self, "Select images to mask", str(Path(output_dir))
@@ -2776,35 +3419,97 @@ class MainWindow(QMainWindow):
         if not output_dir:
             QMessageBox.warning(self, "Missing", "Configure output directory first")
             return
-        
-        input_dir = Path(output_dir) / 'extracted_frames'
-        if not input_dir.exists():
+
+        output_root = Path(output_dir)
+        input_dir = self._resolve_output_image_dir(
+            output_root,
+            self._get_stage4_image_source(),
+            alignment_mode=self._get_alignment_mode(),
+        )
+        if input_dir is None:
             from src.pipeline.batch_orchestrator import PipelineWorker
             worker = PipelineWorker({})
             input_dir = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
         
         if not input_dir or not input_dir.exists():
-            folder = QFileDialog.getExistingDirectory(self, "Select Equirect Frames", str(Path(output_dir)))
+            caption = "Select Reconstruction Images"
+            if self._get_stage4_image_source() == 'equirect':
+                caption = "Select Equirect Frames"
+            elif self._get_stage4_image_source() == 'perspective':
+                caption = "Select Perspective Views"
+            folder = QFileDialog.getExistingDirectory(self, caption, str(Path(output_dir)))
             if not folder:
                 return
             input_dir = Path(folder)
         
         self.log_message(f"Using input: {input_dir}")
-        self._auto_advance_enabled = True
+        self._pending_stage4_input = str(input_dir)
+        self._auto_advance_enabled = False
+        s1 = self.stage1_enable.isChecked()
+        s2 = self.stage2_enable.isChecked()
+        s3 = self.stage3_enable.isChecked()
+        s5 = self.stage5_enable.isChecked()
         orig = self.stage4_enable.isChecked()
+        self.stage1_enable.setChecked(False)
+        self.stage2_enable.setChecked(False)
+        self.stage3_enable.setChecked(False)
+        self.stage5_enable.setChecked(False)
         self.stage4_enable.setChecked(True)
         self.start_pipeline()
+        self.stage1_enable.setChecked(s1)
+        self.stage2_enable.setChecked(s2)
+        self.stage3_enable.setChecked(s3)
+        self.stage5_enable.setChecked(s5)
         self.stage4_enable.setChecked(orig)
     
     def run_stage_5_only(self):
         self.log_message("Running training only")
-        output_dir = self.output_dir_edit.text()
-        if not output_dir:
+        output_dir_text = self.output_dir_edit.text()
+        if not output_dir_text:
             QMessageBox.warning(self, "Missing", "Configure output directory first")
             return
+
+        output_dir = Path(output_dir_text)
+        if not output_dir.exists():
+            QMessageBox.warning(self, "Missing", f"Output directory not found:\n{output_dir}")
+            return
+
+        model_dir = output_dir / 'reconstruction' / 'sparse' / '0'
+        has_model = model_dir.exists() and any((model_dir / name).exists() for name in ('images.bin', 'images.txt'))
+        if not has_model:
+            QMessageBox.warning(
+                self,
+                "No Reconstruction",
+                "No aligned COLMAP model was found. Run Stage 4 (Reconstruction) first."
+            )
+            return
+
+        if self.train_lichtfeld_check.isChecked():
+            lichtfeld_path = self.lichtfeld_path_edit.text().strip()
+            if not lichtfeld_path or not Path(lichtfeld_path).exists():
+                QMessageBox.warning(
+                    self,
+                    "Invalid Lichtfeld Path",
+                    "Training is enabled, but the Lichtfeld Studio executable path is missing or invalid."
+                )
+                return
+
+        self._auto_advance_enabled = False
+        s1 = self.stage1_enable.isChecked()
+        s2 = self.stage2_enable.isChecked()
+        s3 = self.stage3_enable.isChecked()
+        s4 = self.stage4_enable.isChecked()
         orig = self.stage5_enable.isChecked()
+        self.stage1_enable.setChecked(False)
+        self.stage2_enable.setChecked(False)
+        self.stage3_enable.setChecked(False)
+        self.stage4_enable.setChecked(False)
         self.stage5_enable.setChecked(True)
         self.start_pipeline()
+        self.stage1_enable.setChecked(s1)
+        self.stage2_enable.setChecked(s2)
+        self.stage3_enable.setChecked(s3)
+        self.stage4_enable.setChecked(s4)
         self.stage5_enable.setChecked(orig)
     
     # ========================================================================

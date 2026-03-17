@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.pipeline.batch_orchestrator import PipelineWorker
+from src.utils.colmap_paths import resolve_default_colmap_path
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
@@ -54,7 +55,7 @@ def main() -> int:
     parser.add_argument("--max-frames", type=int, default=5, help="How many sample frames to use")
     parser.add_argument(
         "--colmap-bin",
-        default=None,
+        default=str(resolve_default_colmap_path(PROJECT_ROOT)),
         help="Optional external COLMAP binary path (uses CLI path and GPU flags)",
     )
     args = parser.parse_args()
@@ -99,6 +100,7 @@ def main() -> int:
     }
     if args.colmap_bin:
         config["sphere_alignment_path"] = str(Path(args.colmap_bin))
+        config["colmap_path"] = str(Path(args.colmap_bin))
 
     print(f"[INFO] Using {len(selected)} sample frames from: {sample_dir}")
     print(f"[INFO] Run directory: {run_dir}")
@@ -110,7 +112,7 @@ def main() -> int:
     summary = {
         "success": bool(result.get("success")),
         "error": result.get("error"),
-        "colmap_output": result.get("colmap_output"),
+        "colmap_output": str(result.get("colmap_output")) if result.get("colmap_output") else None,
         "run_dir": str(run_dir),
     }
 

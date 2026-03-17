@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.pipeline.batch_orchestrator import PipelineWorker
+from src.utils.colmap_paths import get_colmap_runtime_dirs, resolve_default_colmap_path
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 
@@ -48,8 +49,8 @@ def _build_colmap_env() -> dict[str, str]:
             if p not in extra_paths:
                 extra_paths.append(p)
 
-    # Always include COLMAP folder itself
-    _add(PROJECT_ROOT / "bin" / "colmap")
+    for runtime_dir in get_colmap_runtime_dirs(resolve_default_colmap_path(PROJECT_ROOT)):
+        _add(runtime_dir)
 
     # CUDA from current conda env (if any)
     conda_prefix = os.environ.get("CONDA_PREFIX")
@@ -155,7 +156,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--colmap-bin",
-        default=str(PROJECT_ROOT / "bin" / "colmap" / "colmap.exe"),
+        default=str(resolve_default_colmap_path(PROJECT_ROOT)),
         help="COLMAP GPU binary path",
     )
     parser.add_argument("--fps", type=float, default=1.0, help="Extraction FPS")

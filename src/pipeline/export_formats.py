@@ -19,6 +19,24 @@ import shutil
 
 logger = logging.getLogger(__name__)
 
+try:
+    import pycolmap
+except Exception:
+    pycolmap = None
+
+
+def _find_related_mask(masks_dir: Path, image_name: str) -> Optional[Path]:
+    """Resolve either project-style or COLMAP-style mask names for one image."""
+    image_path = Path(image_name)
+    candidates = [
+        masks_dir / f"{image_path.stem}_mask.png",
+        masks_dir / f"{image_path.name}.png",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
 
 class LichtfeldExporter:
     """Export COLMAP data to Lichtfeld Studio format (transforms.json)."""
@@ -94,10 +112,8 @@ class LichtfeldExporter:
                 # Copy and rename mask if exists
                 # LichtFeld Studio expects: image "36.jpg" → mask "36.jpg.png"
                 if masks_out_dir:
-                    # Source mask: "36_mask.png"
-                    stem = Path(name).stem
-                    src_mask = masks_source_dir / f"{stem}_mask.png"
-                    if src_mask.exists():
+                    src_mask = _find_related_mask(masks_source_dir, name)
+                    if src_mask and src_mask.exists():
                         # Target mask: "36.jpg.png"
                         dst_mask = masks_out_dir / f"{name}.png"
                         try:
@@ -350,19 +366,78 @@ class RealityScanExporter:
                 logger.info(f"Parsed {len(self.images)} images from {images_file}")
             else:
                 logger.error(f"images.txt not found: {images_file}")
-                return False
             
             # Parse points3D.txt (optional)
             points_file = self.colmap_dir / "points3D.txt"
             if points_file.exists():
                 self.points3d = self._parse_points3d_txt(points_file)
                 logger.info(f"Parsed {len(self.points3d)} 3D points from {points_file}")
-            
-            return len(self.images) > 0
+
+            if len(self.images) > 0:
+                return True
+
+            return self._parse_colmap_binary()
             
         except Exception as e:
             logger.error(f"Error parsing COLMAP files: {e}")
+            return self._parse_colmap_binary()
+
+    def _parse_colmap_binary(self) -> bool:
+        """Fallback: parse COLMAP binary model files using pycolmap."""
+        if pycolmap is None:
+            logger.error("COLMAP binary fallback unavailable: pycolmap import failed")
             return False
+
+        cameras_bin = self.colmap_dir / "cameras.bin"
+        images_bin = self.colmap_dir / "images.bin"
+        if not (cameras_bin.exists() and images_bin.exists()):
+            logger.error(f"COLMAP binary model not found in {self.colmap_dir}")
+            return False
+
+        try:
+            reconstruction = pycolmap.Reconstruction(str(self.colmap_dir))
+        except Exception as exc:
+            logger.error(f"Failed to load COLMAP binary model from {self.colmap_dir}: {exc}")
+            return False
+
+        self.cameras = {}
+        for camera_id, camera in reconstruction.cameras.items():
+            self.cameras[int(camera_id)] = {
+                'model': getattr(camera, 'model_name', str(getattr(camera, 'model', 'UNKNOWN'))),
+                'width': int(camera.width),
+                'height': int(camera.height),
+                'params': [float(param) for param in camera.params],
+            }
+
+        self.images = {}
+        for image_id, image in reconstruction.images.items():
+            pose = image.cam_from_world()
+            qx, qy, qz, qw = [float(value) for value in pose.rotation.quat]
+            tx, ty, tz = [float(value) for value in pose.translation]
+            self.images[int(image_id)] = {
+                'name': image.name,
+                'camera_id': int(image.camera_id),
+                'qvec': (qw, qx, qy, qz),
+                'tvec': (tx, ty, tz),
+                'position': self._compute_camera_center(qw, qx, qy, qz, tx, ty, tz),
+            }
+
+        self.points3d = {}
+        for point_id, point in reconstruction.points3D.items():
+            self.points3d[int(point_id)] = {
+                'xyz': tuple(float(value) for value in point.xyz),
+                'rgb': tuple(int(value) for value in point.color),
+                'error': float(point.error),
+            }
+
+        logger.info(
+            "Parsed COLMAP binary model from %s (%d cameras, %d images, %d points)",
+            self.colmap_dir,
+            len(self.cameras),
+            len(self.images),
+            len(self.points3d),
+        )
+        return len(self.images) > 0
     
     def build_perspective_mapping(self, perspective_dir: Optional[str] = None) -> bool:
         """

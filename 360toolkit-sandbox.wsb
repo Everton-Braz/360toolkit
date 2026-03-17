@@ -1,11 +1,25 @@
 <Configuration>
   <VGpu>Enable</VGpu>
+  <Networking>Enable</Networking>
   <MappedFolders>
     <MappedFolder>
-      <HostFolder>C:\Users\User\Documents\APLICATIVOS\360ToolKit\dist\360ToolkitGS-ONNX</HostFolder>
-      <SandboxFolder>C:\360toolkit</SandboxFolder>
+      <HostFolder>C:\Users\Everton-PC\Documents\APLICATIVOS\360toolkit\dist\360ToolkitGS</HostFolder>
+      <SandboxFolder>C:\360toolkit\app</SandboxFolder>
       <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\Everton-PC\Documents\APLICATIVOS\360toolkit\scripts\sandbox</HostFolder>
+      <SandboxFolder>C:\360toolkit\scripts</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\Everton-PC\Documents\APLICATIVOS\360toolkit\sandbox-test-output</HostFolder>
+      <SandboxFolder>C:\360toolkit\reports</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
     </MappedFolder>
   </MappedFolders>
   <MemoryInMB>8192</MemoryInMB>
+  <LogonCommand>
+    <Command>powershell.exe -ExecutionPolicy Bypass -File "C:\360toolkit\scripts\bootstrap_sandbox_test.ps1"</Command>
+  </LogonCommand>
 </Configuration>

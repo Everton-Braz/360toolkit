@@ -6,8 +6,13 @@ Handles user preferences, path detection, and configuration persistence.
 import json
 import logging
 import shutil
+import sys
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
+
+from src.utils.colmap_paths import build_colmap_cli_context, normalize_colmap_executable, preferred_colmap_candidates
+from src.utils.app_paths import get_settings_file_path
+from src.utils.resource_path import get_base_path
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +33,15 @@ class SettingsManager:
         Initialize settings manager.
         
         Args:
-            settings_file: Path to settings JSON file (default: config/user_settings.json)
+            settings_file: Path to settings JSON file (default: user-writable app data path)
         """
         if settings_file is None:
-            settings_file = Path(__file__).parent / "user_settings.json"
+            settings_file = get_settings_file_path()
         
         self.settings_file = Path(settings_file)
         self.settings = self._load_settings()
+
+        self._refresh_bundled_reconstruction_paths()
         
         # Auto-detect paths if not configured
         if not self.settings.get('sdk_path') or not self.is_sdk_valid(self.settings.get('sdk_path')):
@@ -68,6 +75,38 @@ class SettingsManager:
             if detected_colmap:
                 self.settings['colmap_gpu_path'] = str(detected_colmap)
                 self.settings['colmap_auto_detected'] = True
+
+        normalized_colmap = self._normalize_colmap_setting()
+        if normalized_colmap is not None:
+            self.settings['colmap_gpu_path'] = str(normalized_colmap)
+            self.settings['colmap_path'] = str(normalized_colmap)
+            self.save_settings()
+
+    def _refresh_bundled_reconstruction_paths(self) -> None:
+        """Prefer executables shipped with the current frozen build over stale saved paths."""
+        if not getattr(sys, 'frozen', False):
+            return
+
+        changed = False
+
+        bundled_spheresfm = self.auto_detect_spheresfm()
+        if bundled_spheresfm and self.settings.get('spheresfm_path') != str(bundled_spheresfm):
+            self.settings['spheresfm_path'] = str(bundled_spheresfm)
+            self.settings['spheresfm_auto_detected'] = True
+            changed = True
+
+        bundled_colmap = self.auto_detect_colmap()
+        if bundled_colmap:
+            if self.settings.get('colmap_gpu_path') != str(bundled_colmap):
+                self.settings['colmap_gpu_path'] = str(bundled_colmap)
+                changed = True
+            if self.settings.get('colmap_path') != str(bundled_colmap):
+                self.settings['colmap_path'] = str(bundled_colmap)
+                changed = True
+            self.settings['colmap_auto_detected'] = True
+
+        if changed:
+            self.save_settings()
         
     
     def _load_settings(self) -> Dict:
@@ -150,7 +189,7 @@ class SettingsManager:
                 return pf
         
         # 3. Relative to app
-        app_dir = Path(__file__).parent.parent.parent
+        app_dir = get_base_path()
         relative_sdk = app_dir / "sdk"
         if self.is_sdk_valid(relative_sdk):
             logger.info(f"[OK] SDK found at {relative_sdk}")
@@ -256,11 +295,15 @@ class SettingsManager:
                         return ffmpeg_exe
         
         # 4. Relative to app
-        app_dir = Path(__file__).parent.parent.parent
-        relative_ffmpeg = app_dir / "ffmpeg" / "bin" / "ffmpeg.exe"
-        if self.is_ffmpeg_valid(relative_ffmpeg):
-            logger.info(f"[OK] FFmpeg found at {relative_ffmpeg}")
-            return relative_ffmpeg
+        app_dir = get_base_path()
+        relative_candidates = [
+            app_dir / "ffmpeg" / "ffmpeg.exe",
+            app_dir / "ffmpeg" / "bin" / "ffmpeg.exe",
+        ]
+        for relative_ffmpeg in relative_candidates:
+            if self.is_ffmpeg_valid(relative_ffmpeg):
+                logger.info(f"[OK] FFmpeg found at {relative_ffmpeg}")
+                return relative_ffmpeg
         
         logger.warning("[X] FFmpeg not found in any standard location")
         return None
@@ -311,8 +354,11 @@ class SettingsManager:
         """
         logger.info("Searching for SphereSfM...")
 
-        app_dir = Path(__file__).parent.parent.parent
+        app_dir = get_base_path()
         candidates = [
+            app_dir / "bin" / "SphereSfM-2024-12-14" / "colmap.exe",
+            app_dir / "bin" / "SphereSfM-2024-12-14" / "colmap.bat",
+            app_dir / "bin" / "SphereSfM-2024-12-14" / "colmap.cmd",
             app_dir / "bin" / "SphereSfM" / "colmap.exe",
             app_dir / "bin" / "SphereSfM" / "colmap.bat",
             app_dir / "bin" / "SphereSfM" / "colmap.cmd",
@@ -320,6 +366,8 @@ class SettingsManager:
 
         docs = Path.home() / "Documents"
         candidates.extend([
+            docs / "APLICATIVOS" / "360toolkit" / "bin" / "SphereSfM-2024-12-14" / "colmap.exe",
+            docs / "APLICATIVOS" / "360ToolKit" / "bin" / "SphereSfM-2024-12-14" / "colmap.exe",
             docs / "APLICATIVOS" / "360toolkit" / "bin" / "SphereSfM" / "colmap.exe",
             docs / "APLICATIVOS" / "360ToolKit" / "bin" / "SphereSfM" / "colmap.exe",
         ])
@@ -346,19 +394,23 @@ class SettingsManager:
         """
         logger.info("Searching for COLMAP (GPU build)...")
 
-        app_dir = Path(__file__).parent.parent.parent
-        bundled_candidates = [
-            app_dir / "bin" / "colmap" / "colmap.exe",
-            app_dir / "bin" / "colmap" / "colmap.bat",
-            app_dir / "bin" / "colmap" / "colmap.cmd",
-        ]
+        app_dir = get_base_path()
+        bundled_candidates = preferred_colmap_candidates(app_dir)
         for candidate in bundled_candidates:
             if self.is_colmap_valid(candidate):
                 logger.info(f"[OK] COLMAP found at {candidate}")
                 return candidate
 
+        if getattr(sys, "frozen", False):
+            logger.warning("[X] Bundled COLMAP not found in frozen application layout")
+            return None
+
         docs = Path.home() / "Documents"
         common_candidates = [
+            docs / "APLICATIVOS" / "360toolkit" / "bin" / "COLMAP-windows-latest-CUDA-cuDSS-GUI" / "bin" / "colmap.exe",
+            docs / "APLICATIVOS" / "360toolkit" / "bin" / "COLMAP-windows-latest-CUDA-cuDSS-GUI" / "COLMAP.bat",
+            docs / "APLICATIVOS" / "360ToolKit" / "bin" / "COLMAP-windows-latest-CUDA-cuDSS-GUI" / "bin" / "colmap.exe",
+            docs / "APLICATIVOS" / "360ToolKit" / "bin" / "COLMAP-windows-latest-CUDA-cuDSS-GUI" / "COLMAP.bat",
             docs / "APLICATIVOS" / "360toolkit" / "bin" / "colmap" / "colmap.exe",
             docs / "APLICATIVOS" / "360ToolKit" / "bin" / "colmap" / "colmap.exe",
             docs / "colmap-x64-windows-cuda" / "colmap.exe",
@@ -384,7 +436,9 @@ class SettingsManager:
         if colmap_path is None:
             return False
 
-        colmap_path = Path(colmap_path)
+        colmap_path = normalize_colmap_executable(colmap_path)
+        if colmap_path is None:
+            return False
         if colmap_path.is_dir():
             for name in ("colmap.exe", "colmap.bat", "colmap.cmd"):
                 candidate = colmap_path / name
@@ -412,16 +466,13 @@ class SettingsManager:
             logger.warning(f"Invalid COLMAP path: {path}")
             return False
 
-        path_obj = Path(path)
+        path_obj = normalize_colmap_executable(path)
+        if path_obj is None:
+            logger.warning(f"Invalid COLMAP path: {path}")
+            return False
         if not path_obj.is_absolute():
             logger.warning(f"COLMAP path must be absolute (got: {path_obj})")
             return False
-        if path_obj.is_dir():
-            for name in ("colmap.exe", "colmap.bat", "colmap.cmd"):
-                candidate = path_obj / name
-                if candidate.exists() and candidate.is_file():
-                    path_obj = candidate
-                    break
 
         path_obj = path_obj.resolve()
 
@@ -440,7 +491,12 @@ class SettingsManager:
         """Get current COLMAP GPU path."""
         colmap_str = self.settings.get('colmap_gpu_path') or self.settings.get('colmap_path')
         if colmap_str:
-            return Path(colmap_str)
+            normalized = normalize_colmap_executable(colmap_str)
+            if normalized and self.settings.get('colmap_gpu_path') != str(normalized):
+                self.settings['colmap_gpu_path'] = str(normalized)
+                self.settings['colmap_path'] = str(normalized)
+                self.save_settings()
+            return normalized
         return None
 
     def set_spheresfm_path(self, path: Optional[Path], auto_detected: bool = False) -> bool:
@@ -487,7 +543,9 @@ class SettingsManager:
         if colmap_path is None or not self.is_colmap_valid(colmap_path):
             return {'valid': False, 'error': 'Invalid or missing COLMAP path'}
 
-        colmap_path = Path(colmap_path)
+        colmap_path = normalize_colmap_executable(colmap_path)
+        if colmap_path is None:
+            return {'valid': False, 'error': 'Invalid or missing COLMAP path'}
         if colmap_path.is_dir():
             for name in ("colmap.exe", "colmap.bat", "colmap.cmd"):
                 candidate = colmap_path / name
@@ -503,6 +561,7 @@ class SettingsManager:
 
         try:
             import subprocess
+            run_cwd, run_env = build_colmap_cli_context(colmap_path)
             version_cmds = [
                 [str(colmap_path), '--version'],
                 [str(colmap_path), 'version'],
@@ -512,7 +571,9 @@ class SettingsManager:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=5,
+                    cwd=run_cwd,
+                    env=run_env,
                 )
                 output = (result.stdout or result.stderr).strip()
                 if result.returncode == 0 and output:
@@ -524,6 +585,31 @@ class SettingsManager:
             info['version'] = f'Could not determine version: {e}'
 
         return info
+
+    def _normalize_colmap_setting(self) -> Optional[Path]:
+        stored_value = self.settings.get('colmap_gpu_path') or self.settings.get('colmap_path')
+        if not stored_value:
+            return None
+
+        normalized = normalize_colmap_executable(stored_value)
+        if normalized and not getattr(sys, 'frozen', False):
+            try:
+                normalized_str = str(normalized.resolve()).lower()
+            except Exception:
+                normalized_str = str(normalized).lower()
+
+            if '\\dist\\360toolkitgs\\_internal\\' in normalized_str:
+                detected = self.auto_detect_colmap()
+                if detected and detected.exists() and detected.is_file():
+                    logger.info(
+                        "Replacing source-mode COLMAP path from packaged dist runtime with workspace binary: %s",
+                        detected,
+                    )
+                    return detected
+
+        if normalized and normalized.exists() and normalized.is_file():
+            return normalized
+        return None
     
     # === YOLO MODEL PATH MANAGEMENT ===
     

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from .tokens import get_theme_tokens
+from src.utils.resource_path import get_base_path
 
 _COMPONENT_ORDER = [
     "base.qss",
@@ -36,7 +35,7 @@ def build_theme_stylesheet(theme: str = "dark") -> str:
     theme_tokens = get_theme_tokens(theme)
     flat_tokens = _flatten_tokens(theme_tokens)
 
-    styles_dir = Path(__file__).resolve().parent
+    styles_dir = get_base_path() / "src" / "ui" / "styles"
     components_dir = styles_dir / "components"
 
     chunks: list[str] = []

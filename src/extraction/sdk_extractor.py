@@ -70,13 +70,14 @@ from pathlib import Path
 from typing import Dict, Optional, Callable, List, Tuple
 
 from src.config.settings import get_settings
+from src.utils.resource_path import get_base_path
 
 logger = logging.getLogger(__name__)
 
 
 # Auto-detect SDK path (supports frozen PyInstaller apps)
 def _get_default_sdk_path():
-    """Get SDK path - checks environment variable first, then bundled location, then dev path."""
+    """Get SDK path from environment or bundled locations only."""
     # 1. Check environment variable (set by runtime hook)
     if 'INSTA360_SDK_PATH' in os.environ:
         logger.info(f"Using SDK from environment: {os.environ['INSTA360_SDK_PATH']}")
@@ -97,9 +98,19 @@ def _get_default_sdk_path():
                 logger.info(f"Found bundled SDK at: {loc}")
                 return str(loc)
         logger.warning("Running as frozen app but SDK not found in bundle!")
-    
-    # 3. Fallback to dev machine path
-    return r"C:\Users\User\Documents\Windows_CameraSDK-2.0.2-build1+MediaSDK-3.0.5-build1"
+
+    base_path = get_base_path()
+    dev_candidates = [
+        base_path / 'sdk',
+        base_path / 'bin' / 'sdk',
+    ]
+    for loc in dev_candidates:
+        if loc.exists():
+            logger.info(f"Found SDK candidate at: {loc}")
+            return str(loc)
+
+    logger.warning("SDK path not auto-detected; user configuration is required")
+    return None
 
 # SDK configuration
 DEFAULT_SDK_PATH = _get_default_sdk_path()
@@ -218,8 +229,12 @@ class SDKExtractor:
                 logger.info(f"Using SDK from settings: {configured_sdk}")
             else:
                 # Fall back to default detection
-                self.sdk_path = Path(DEFAULT_SDK_PATH)
-                logger.info(f"No SDK configured in settings, using default: {self.sdk_path}")
+                if DEFAULT_SDK_PATH:
+                    self.sdk_path = Path(DEFAULT_SDK_PATH)
+                    logger.info(f"No SDK configured in settings, using detected path: {self.sdk_path}")
+                else:
+                    self.sdk_path = get_base_path() / "sdk"
+                    logger.info("No SDK configured in settings and no bundled SDK found")
         
         self.is_cancelled = False
         
@@ -458,6 +473,8 @@ class SDKExtractor:
         """
         if not self.available:
             raise RuntimeError("MediaSDK not available - use FFmpeg fallback")
+
+        output_format = 'png' if str(output_format).strip().lower() == 'png' else 'jpg'
         
         # Check GPU availability and adjust quality preset if needed
         if not self._gpu_available and quality in ['best', 'good', 'balanced']:

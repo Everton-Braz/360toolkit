@@ -20,6 +20,8 @@ import re
 import urllib.request
 import sqlite3
 
+from src.utils.colmap_paths import build_colmap_cli_context, get_colmap_runtime_dirs, resolve_default_colmap_path
+
 logger = logging.getLogger(__name__)
 
 _COLMAP_LEARNED_MODEL_URLS = {
@@ -32,6 +34,7 @@ _COLMAP_LEARNED_MODEL_URLS = {
 # GPU probe cache: None = not tested, True = works, False = doesn't work
 _colmap_gpu_probe_result: Optional[bool] = None
 _colmap_learned_crash_cache: Optional[Dict[str, Dict[str, Any]]] = None
+_windows_dll_dir_handles: List[Any] = []
 
 
 def _get_colmap_learned_crash_cache_path() -> Path:
@@ -75,6 +78,38 @@ def _import_pycolmap():
     import pycolmap
     return pycolmap
 
+
+def _register_windows_dll_dirs(dll_dirs: List[Path]) -> None:
+    """Keep add_dll_directory handles alive for the process lifetime on Windows."""
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+
+    current_path = os.environ.get("PATH", "")
+    prepend_path: List[str] = []
+    existing_registered = {str(getattr(handle, "path", "")) for handle in _windows_dll_dir_handles}
+
+    for dll_dir in dll_dirs:
+        if not dll_dir.exists():
+            continue
+        dll_dir_str = str(dll_dir)
+        if dll_dir_str not in existing_registered:
+            try:
+                handle = os.add_dll_directory(dll_dir_str)
+            except Exception:
+                handle = None
+            if handle is not None:
+                _windows_dll_dir_handles.append(handle)
+                existing_registered.add(dll_dir_str)
+        if dll_dir_str not in current_path:
+            prepend_path.append(dll_dir_str)
+
+    if prepend_path:
+        os.environ["PATH"] = os.pathsep.join(prepend_path + [current_path])
+
+
+def _resolve_runtime_path(path_value: Path | str) -> Path:
+    return Path(path_value).expanduser().resolve()
+
 class RigColmapIntegrator:
     """
     Implements the Rig-based SfM approach for 360 videos.
@@ -84,6 +119,7 @@ class RigColmapIntegrator:
 
     def __init__(self, settings):
         self.settings = settings
+        self._cli_help_cache: Dict[Tuple[str, str], str] = {}
 
     def _is_global_backend(self, mapping_backend: str) -> bool:
         return str(mapping_backend).strip().lower() in {"glomap", "global", "global_mapper", "colmap_global"}
@@ -123,6 +159,61 @@ class RigColmapIntegrator:
             return "unknown"
         except Exception as exc:
             return f"error({exc})"
+
+    def _get_cli_command_help(self, executable: str, command_name: str) -> str:
+        cache_key = (self._colmap_binary_cache_key(executable), str(command_name).strip().lower())
+        if cache_key in self._cli_help_cache:
+            return self._cli_help_cache[cache_key]
+
+        try:
+            run_cwd, run_env = self._get_cli_env(executable)
+            result = subprocess.run(
+                [executable, command_name, "-h"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=run_cwd,
+                env=run_env,
+            )
+            help_text = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+        except Exception:
+            help_text = ""
+
+        self._cli_help_cache[cache_key] = help_text
+        return help_text
+
+    def _filter_supported_cli_args(self, executable: str, command_name: str, args: List[str]) -> List[str]:
+        help_text = self._get_cli_command_help(executable, command_name)
+        if not help_text:
+            return list(args)
+
+        filtered: List[str] = []
+        index = 0
+        while index < len(args):
+            token = args[index]
+            if not token.startswith("--"):
+                filtered.append(token)
+                index += 1
+                continue
+
+            option_name = token.split("=", 1)[0].lstrip("-").lower()
+            has_inline_value = "=" in token
+            value_token = None
+            has_separate_value = False
+            if not has_inline_value and index + 1 < len(args) and not args[index + 1].startswith("--"):
+                value_token = args[index + 1]
+                has_separate_value = True
+
+            if option_name in help_text:
+                filtered.append(token)
+                if has_separate_value:
+                    filtered.append(value_token)
+            else:
+                logger.warning("[RigSfM] Dropping unsupported %s option for %s: %s", command_name, Path(executable).name, token)
+
+            index += 2 if has_separate_value else 1
+
+        return filtered
 
     def _database_has_features_and_matches(self, database_path: Path) -> bool:
         if not database_path.exists():
@@ -383,8 +474,7 @@ class RigColmapIntegrator:
         # Prefer bundled COLMAP binary in project (Windows build used by this app)
         try:
             project_root = Path(__file__).resolve().parents[2]
-            bundled_name = "colmap.exe" if os.name == "nt" else "colmap"
-            bundled_colmap = project_root / "bin" / "colmap" / bundled_name
+            bundled_colmap = resolve_default_colmap_path(project_root)
             if bundled_colmap.exists():
                 return str(bundled_colmap)
         except Exception:
@@ -403,28 +493,17 @@ class RigColmapIntegrator:
 
     def _get_cli_env(self, executable: str):
         """Build environment and cwd for running COLMAP CLI."""
-        exe_path = Path(executable)
-        run_cwd = str(exe_path.parent) if exe_path.exists() else None
-        run_env = None
-        if exe_path.exists():
-            run_env = os.environ.copy()
-            extra_dirs = [str(exe_path.parent)]
+        extra_dirs: List[Path | str] = []
 
-            colmap_path = getattr(self.settings, 'colmap_path', None) or getattr(self.settings, 'sphere_alignment_path', None)
-            if colmap_path:
-                extra_dirs.append(str(Path(colmap_path).parent))
+        colmap_path = getattr(self.settings, 'colmap_path', None) or getattr(self.settings, 'sphere_alignment_path', None)
+        if colmap_path:
+            extra_dirs.append(Path(colmap_path).parent)
 
-            glomap_path = getattr(self.settings, 'glomap_path', None)
-            if glomap_path:
-                extra_dirs.append(str(Path(glomap_path).parent))
+        glomap_path = getattr(self.settings, 'glomap_path', None)
+        if glomap_path:
+            extra_dirs.append(Path(glomap_path).parent)
 
-            unique_dirs = []
-            for d in extra_dirs:
-                if d and d not in unique_dirs:
-                    unique_dirs.append(d)
-
-            run_env["PATH"] = ";".join(unique_dirs + [run_env.get('PATH', '')])
-        return run_cwd, run_env
+        return build_colmap_cli_context(executable, extra_dirs=extra_dirs)
 
     def _probe_colmap_gpu(self, colmap_bin: str) -> bool:
         """Test if COLMAP GPU feature extraction actually works on this hardware.
@@ -498,7 +577,7 @@ class RigColmapIntegrator:
             gpu_index = str(getattr(self.settings, 'gpu_index', -1))
             return ("1", gpu_index)
 
-        strict_gpu_only = bool(getattr(self.settings, 'strict_gpu_only', True))
+        strict_gpu_only = bool(getattr(self.settings, 'strict_gpu_only', False))
         if strict_gpu_only:
             raise RuntimeError(
                 "COLMAP GPU requested but probe failed. CPU fallback is disabled (strict_gpu_only=True). "
@@ -532,8 +611,24 @@ class RigColmapIntegrator:
     def _learned_models_dir(self, colmap_bin: str) -> Path:
         exe_path = Path(colmap_bin)
         if exe_path.exists():
-            return exe_path.parent / "models"
-        return Path(__file__).resolve().parents[2] / "bin" / "colmap" / "models"
+            runtime_dirs = get_colmap_runtime_dirs(exe_path)
+            ordered_runtime_dirs = sorted(
+                runtime_dirs,
+                key=lambda path: (0 if path.name.lower() == "bin" else 1, len(path.parts)),
+            )
+            candidate_dirs = [runtime_dir / "models" for runtime_dir in ordered_runtime_dirs]
+            for candidate_dir in candidate_dirs:
+                if candidate_dir.exists():
+                    return candidate_dir
+            if candidate_dirs:
+                return candidate_dirs[0]
+
+        fallback_root = Path(__file__).resolve().parents[2] / "bin" / "COLMAP-windows-latest-CUDA-cuDSS-GUI"
+        fallback_candidates = [fallback_root / "bin" / "models", fallback_root / "models"]
+        for candidate_dir in fallback_candidates:
+            if candidate_dir.exists():
+                return candidate_dir
+        return fallback_candidates[0]
 
     def _ensure_learned_model(self, colmap_bin: str, model_filename: str) -> str:
         url = _COLMAP_LEARNED_MODEL_URLS.get(model_filename)
@@ -652,20 +747,7 @@ class RigColmapIntegrator:
             ]
             if torch_lib and torch_lib.exists():
                 dll_candidates.insert(0, torch_lib)
-
-            current_path = os.environ.get("PATH", "")
-            prepend_path: List[str] = []
-            for dll_dir in dll_candidates:
-                if dll_dir.exists():
-                    dll_dir_str = str(dll_dir)
-                    try:
-                        os.add_dll_directory(dll_dir_str)
-                    except Exception:
-                        pass
-                    if dll_dir_str not in current_path:
-                        prepend_path.append(dll_dir_str)
-            if prepend_path:
-                os.environ["PATH"] = os.pathsep.join(prepend_path + [current_path])
+            _register_windows_dll_dirs(dll_candidates)
 
         try:
             from hloc import extract_features as hloc_extract_features
@@ -881,7 +963,8 @@ class RigColmapIntegrator:
     ) -> int:
         """Generate rig-aware matching pairs for multi-camera rig datasets.
 
-        For 360-rig datasets (frame_NNNNN_cam_CC naming), this generates
+        For 360-rig datasets (frame_NNNNN_cam_CC naming) and cubemap exports
+        (frame_NNNNN_front/back/left/right/top/bottom naming), this generates
         CROSS-FRAME pairs ONLY (Soft C — zero-baseline fix):
 
         1. Temporal pairs: same camera across ±temporal_window frames (real
@@ -907,15 +990,81 @@ class RigColmapIntegrator:
             if p.is_file() and p.suffix.lower() in valid_exts
         ])
 
-        # Parse rig structure: frame index → list of image names sorted by cam id
+        # Parse rig structure from either numbered camera ids or cubemap face names.
         rig_pattern = _re.compile(r'frame_(\d+)_cam_(\d+)', _re.IGNORECASE)
-        frames: Dict[int, List[str]] = {}
+        cubemap_pattern = _re.compile(
+            r'frame_(\d+)_(front|back|left|right|top|bottom)(?=\.[^.]+$)',
+            _re.IGNORECASE,
+        )
+        cubemap_face_ids = {
+            'front': 0,
+            'right': 1,
+            'back': 2,
+            'left': 3,
+            'top': 4,
+            'bottom': 5,
+        }
+        cubemap_neighbors = {
+            cubemap_face_ids['front']: {
+                cubemap_face_ids['left'],
+                cubemap_face_ids['right'],
+                cubemap_face_ids['top'],
+                cubemap_face_ids['bottom'],
+            },
+            cubemap_face_ids['back']: {
+                cubemap_face_ids['left'],
+                cubemap_face_ids['right'],
+                cubemap_face_ids['top'],
+                cubemap_face_ids['bottom'],
+            },
+            cubemap_face_ids['left']: {
+                cubemap_face_ids['front'],
+                cubemap_face_ids['back'],
+                cubemap_face_ids['top'],
+                cubemap_face_ids['bottom'],
+            },
+            cubemap_face_ids['right']: {
+                cubemap_face_ids['front'],
+                cubemap_face_ids['back'],
+                cubemap_face_ids['top'],
+                cubemap_face_ids['bottom'],
+            },
+            cubemap_face_ids['top']: {
+                cubemap_face_ids['front'],
+                cubemap_face_ids['back'],
+                cubemap_face_ids['left'],
+                cubemap_face_ids['right'],
+            },
+            cubemap_face_ids['bottom']: {
+                cubemap_face_ids['front'],
+                cubemap_face_ids['back'],
+                cubemap_face_ids['left'],
+                cubemap_face_ids['right'],
+            },
+        }
+
+        def _parse_rig_image(name: str) -> Optional[Tuple[int, int, str]]:
+            rig_match = rig_pattern.search(name)
+            if rig_match:
+                return int(rig_match.group(1)), int(rig_match.group(2)), 'cam'
+
+            cubemap_match = cubemap_pattern.search(name)
+            if cubemap_match:
+                frame_id = int(cubemap_match.group(1))
+                face_name = cubemap_match.group(2).lower()
+                return frame_id, cubemap_face_ids[face_name], 'cubemap'
+
+            return None
+
+        frames: Dict[int, List[Tuple[int, str]]] = {}
         non_rig: List[str] = []
+        detected_layouts: set[str] = set()
         for name in all_images:
-            m = rig_pattern.search(name)
-            if m:
-                fid = int(m.group(1))
-                frames.setdefault(fid, []).append(name)
+            parsed = _parse_rig_image(name)
+            if parsed:
+                fid, cid, layout = parsed
+                detected_layouts.add(layout)
+                frames.setdefault(fid, []).append((cid, name))
             else:
                 non_rig.append(name)
 
@@ -942,15 +1091,11 @@ class RigColmapIntegrator:
 
         # 1. Temporal pairs: same camera across ±temporal_window frames
         # Group images by camera id
-        cam_pattern = _re.compile(r'_cam_(\d+)', _re.IGNORECASE)
         cam_images: Dict[int, List[Tuple[int, str]]] = {}  # cam_id → [(frame_seq_idx, name)]
         for fid, cams in frames.items():
             fi = frame_idx[fid]
-            for name in cams:
-                cm = cam_pattern.search(name)
-                if cm:
-                    cid = int(cm.group(1))
-                    cam_images.setdefault(cid, []).append((fi, name))
+            for cid, name in sorted(cams, key=lambda item: item[0]):
+                cam_images.setdefault(cid, []).append((fi, name))
 
         for cid, entries in cam_images.items():
             entries.sort()  # sort by frame_seq_idx
@@ -964,19 +1109,23 @@ class RigColmapIntegrator:
         # 2. Cross-camera temporal pairs (neighboring cam IDs across ±2 frames)
         all_cam_ids = sorted(cam_images.keys())
         n_cams = len(all_cam_ids)
+        use_cubemap_adjacency = detected_layouts == {'cubemap'}
         for ci_idx, cid in enumerate(all_cam_ids):
-            # adjacent cameras in rig (wrap-around)
-            neighbor_cids = [
-                all_cam_ids[(ci_idx - 1) % n_cams],
-                all_cam_ids[(ci_idx + 1) % n_cams],
-            ]
+            if use_cubemap_adjacency:
+                neighbor_cids = [ncid for ncid in sorted(cubemap_neighbors.get(cid, set())) if ncid in cam_images]
+            else:
+                # adjacent cameras in rig (wrap-around)
+                neighbor_cids = [
+                    all_cam_ids[(ci_idx - 1) % n_cams],
+                    all_cam_ids[(ci_idx + 1) % n_cams],
+                ]
             entries_a = cam_images[cid]
             for ncid in neighbor_cids:
                 entries_b = cam_images[ncid]
                 # Pair each frame ±2
                 for i, (fi, name_a) in enumerate(entries_a):
                     for j, (fj, name_b) in enumerate(entries_b):
-                        if abs(fi - fj) <= 2:
+                        if 0 < abs(fi - fj) <= 2:
                             a, b = (name_a, name_b) if name_a < name_b else (name_b, name_a)
                             pairs.add((a, b))
 
@@ -991,9 +1140,9 @@ class RigColmapIntegrator:
                 if len(parts) >= 2:
                     a, b = parts[0], parts[1]
                     # Skip if both images are from the same frame (zero baseline)
-                    ma = rig_pattern.search(a)
-                    mb = rig_pattern.search(b)
-                    if ma and mb and int(ma.group(1)) == int(mb.group(1)):
+                    parsed_a = _parse_rig_image(a)
+                    parsed_b = _parse_rig_image(b)
+                    if parsed_a and parsed_b and parsed_a[0] == parsed_b[0]:
                         continue  # same frame → skip
                     pairs.add((a, b) if a < b else (b, a))
 
@@ -1143,6 +1292,9 @@ class RigColmapIntegrator:
         output_dir: Path,
         progress_callback: Optional[Callable] = None
     ) -> Dict:
+        frames_dir = _resolve_runtime_path(frames_dir)
+        masks_dir = _resolve_runtime_path(masks_dir) if masks_dir is not None else None
+        output_dir = _resolve_runtime_path(output_dir)
         
         output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -1548,13 +1700,10 @@ class RigColmapIntegrator:
                 # Always use GLOMAP global_mapper — fast, parallel, scales well at
                 # any image count. pycolmap incremental SfM is intentionally skipped.
                 logger.info("[RigSfM] Running GLOMAP global_mapper (always-GLOMAP mode)...")
-                self._run_cli(
+                global_mapper_optional_args = self._filter_supported_cli_args(
                     global_mapper_bin,
+                    "global_mapper",
                     [
-                        "global_mapper",
-                        "--database_path", str(database_path),
-                        "--image_path", str(perspectives_dir),
-                        "--output_path", str(sparse_path),
                         # Increase relpose tolerance for rig cameras — cameras at the
                         # same frame share a position, creating near-degenerate geometry.
                         "--GlobalMapper.vgc_relpose_max_error", "4",
@@ -1563,6 +1712,15 @@ class RigColmapIntegrator:
                         # Use pairs with fewer matches (rig pairs have fewer overlapping features).
                         "--GlobalMapper.min_num_matches", "8",
                     ],
+                )
+                self._run_cli(
+                    global_mapper_bin,
+                    [
+                        "global_mapper",
+                        "--database_path", str(database_path),
+                        "--image_path", str(perspectives_dir),
+                        "--output_path", str(sparse_path),
+                    ] + global_mapper_optional_args,
                     progress_callback,
                     "Running GLOMAP global mapper..."
                 )

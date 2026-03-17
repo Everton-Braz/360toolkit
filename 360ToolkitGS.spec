@@ -66,6 +66,11 @@ def _patch_file(rel_path, new_content=None, replacements=None):
     _backed_up_files.append((target, backup))
     
     if new_content is not None:
+        with open(target, 'r', encoding='utf-8', errors='ignore') as f:
+            current = f.read()
+        if current == new_content:
+            print(f"  [SKIP] {rel_path} already patched")
+            return False
         with open(target, 'w', encoding='utf-8') as f:
             f.write(new_content)
         print(f"  [PATCH] {rel_path} (full replacement)")
@@ -76,6 +81,8 @@ def _patch_file(rel_path, new_content=None, replacements=None):
             content = f.read()
         changed = False
         for old_text, new_text in replacements:
+            if new_text in content:
+                continue
             if old_text in content:
                 content = content.replace(old_text, new_text)
                 changed = True
@@ -192,8 +199,17 @@ def is_available():
     
     # 4. torch/_jit_internal.py - Guard bare import
     _patch_file('_jit_internal.py', replacements=[
-        ('import torch.distributed.rpc\n',
-         'try:  # PATCHED for frozen app\n    import torch.distributed.rpc\nexcept (ImportError, ModuleNotFoundError):\n    pass\n'),
+           ('# This is needed. `torch._jit_internal` is imported before `torch.distributed.__init__`.\n'
+            '# Explicitly ask to import `torch.distributed.__init__` first.\n'
+            '# Otherwise, "AttributeError: module \'torch\' has no attribute \'distributed\'" is raised.\n'
+            'import torch.distributed.rpc\n',
+            '# This is needed. `torch._jit_internal` is imported before `torch.distributed.__init__`.\n'
+            '# Explicitly ask to import `torch.distributed.__init__` first.\n'
+            '# Otherwise, "AttributeError: module \'torch\' has no attribute \'distributed\'" is raised.\n'
+            'try:  # PATCHED for frozen app\n'
+            '    import torch.distributed.rpc\n'
+            'except (ImportError, ModuleNotFoundError):\n'
+            '    pass\n'),
         ('if torch.distributed.rpc.is_available():',
          'if getattr(getattr(getattr(torch, "distributed", None), "rpc", None), "is_available", lambda: False)():  # PATCHED'),
     ])
@@ -206,8 +222,13 @@ def is_available():
     
     # 6. torch/nn/parallel/__init__.py
     _patch_file(os.path.join('nn', 'parallel', '__init__.py'), replacements=[
-        ('from torch.nn.parallel.distributed import DistributedDataParallel\n',
-         'try:  # PATCHED for frozen app\n    from torch.nn.parallel.distributed import DistributedDataParallel\nexcept (ImportError, RuntimeError):\n    pass\n'),
+           ('from torch.nn.parallel.data_parallel import data_parallel, DataParallel\n'
+            'from torch.nn.parallel.distributed import DistributedDataParallel\n',
+            'from torch.nn.parallel.data_parallel import data_parallel, DataParallel\n'
+            'try:  # PATCHED for frozen app\n'
+            '    from torch.nn.parallel.distributed import DistributedDataParallel\n'
+            'except (ImportError, RuntimeError):\n'
+            '    DistributedDataParallel = None\n'),
     ])
     
     print(f"  Total: {len(_backed_up_files)} files patched (will restore after build)\n")
@@ -231,11 +252,15 @@ FFPROBE_EXE = FFMPEG_EXE.parent / 'ffprobe.exe'
 
 # SphereSfM / COLMAP binaries (bundled in project)
 SPHERE_SFM_DIR = Path('bin/SphereSfM')
-COLMAP_DIR = Path('bin/COLMAP-3.11.1')
+COLMAP_DIR = Path('bin/COLMAP-windows-latest-CUDA-cuDSS-GUI')
+RESOURCES_IMAGES_DIR = Path('resources/images')
+WINDOWS_ICON = Path(os.environ.get('TOOLKIT_WINDOWS_ICON', 'resources/images/logo-favicon.ico'))
 
 # Build configuration
-BUILD_NAME = '360ToolkitGS'
-BUILD_VERSION = '1.3.0'
+BUILD_VARIANT = os.environ.get('TOOLKIT_RELEASE_VARIANT', 'full-bundled').strip().lower()
+BUILD_NAME = os.environ.get('TOOLKIT_BUILD_NAME', '360ToolkitGS')
+BUILD_VERSION = os.environ.get('TOOLKIT_BUILD_VERSION', '1.3.0')
+BUNDLE_EXTERNAL_TOOLS = os.environ.get('TOOLKIT_BUNDLE_EXTERNAL_TOOLS', '1') == '1'
 
 # ============================================================================
 # PyQt6 path
@@ -249,10 +274,11 @@ print(f"Building {BUILD_NAME} v{BUILD_VERSION} - Universal GPU Edition")
 print(f"{'='*70}")
 print(f"Python: {sys.version}")
 print(f"Conda: {CONDA_PREFIX}")
+print(f"Variant: {BUILD_VARIANT}")
 print(f"SDK: {SDK_PATH}")
 print(f"FFmpeg: {FFMPEG_EXE}")
 print(f"PyQt6: {pyqt6_path}")
-print(f"Target GPUs: RTX 30xx (sm_86), 40xx (sm_89), 50xx (sm_120) - ALL NATIVE")
+print(f"Target GPUs: RTX 20xx/30xx/40xx/50xx")
 print(f"{'='*70}\n")
 
 # ============================================================================
@@ -260,8 +286,19 @@ print(f"{'='*70}\n")
 # ============================================================================
 datas = []
 
+# Bundled UI stylesheet partials and tokens used by build_theme_stylesheet().
+# Without these files the packaged app falls back to near-default Qt styling.
+UI_STYLES_DIR = Path('src/ui/styles')
+if UI_STYLES_DIR.exists():
+    datas.append((str(UI_STYLES_DIR), 'src/ui/styles'))
+    print(f"[OK] UI styles: {UI_STYLES_DIR}")
+
+if RESOURCES_IMAGES_DIR.exists():
+    datas.append((str(RESOURCES_IMAGES_DIR), 'resources/images'))
+    print(f"[OK] Resource images: {RESOURCES_IMAGES_DIR}")
+
 # Insta360 SDK
-if SDK_PATH.exists():
+if BUNDLE_EXTERNAL_TOOLS and SDK_PATH.exists():
     sdk_bin = SDK_PATH / 'bin'
     sdk_models = SDK_PATH / 'models'
     if sdk_bin.exists():
@@ -270,27 +307,27 @@ if SDK_PATH.exists():
     if sdk_models.exists():
         datas.append((str(sdk_models), 'sdk/models'))
         print(f"[OK] SDK models: {sdk_models}")
-else:
+elif BUNDLE_EXTERNAL_TOOLS:
     print(f"[WARN] SDK not found at {SDK_PATH}")
 
 # FFmpeg
-if FFMPEG_EXE.exists():
+if BUNDLE_EXTERNAL_TOOLS and FFMPEG_EXE.exists():
     datas.append((str(FFMPEG_EXE), 'ffmpeg'))
     print(f"[OK] FFmpeg: {FFMPEG_EXE}")
     if FFPROBE_EXE.exists():
         datas.append((str(FFPROBE_EXE), 'ffmpeg'))
         print(f"[OK] FFprobe: {FFPROBE_EXE}")
-else:
+elif BUNDLE_EXTERNAL_TOOLS:
     print(f"[WARN] FFmpeg not found at {FFMPEG_EXE}")
 
 # SphereSfM binaries
-if SPHERE_SFM_DIR.exists():
+if BUNDLE_EXTERNAL_TOOLS and SPHERE_SFM_DIR.exists():
     datas.append((str(SPHERE_SFM_DIR), 'bin/SphereSfM'))
     print(f"[OK] SphereSfM: {SPHERE_SFM_DIR}")
 
 # COLMAP binaries
-if COLMAP_DIR.exists():
-    datas.append((str(COLMAP_DIR), 'bin/COLMAP-3.11.1'))
+if BUNDLE_EXTERNAL_TOOLS and COLMAP_DIR.exists():
+    datas.append((str(COLMAP_DIR), 'bin/COLMAP-windows-latest-CUDA-cuDSS-GUI'))
     print(f"[OK] COLMAP: {COLMAP_DIR}")
 
 # YOLO models (bundle if present)
@@ -337,10 +374,33 @@ except ImportError:
 # Conda Library/bin dependencies  
 if CONDA_PREFIX:
     library_bin = os.path.join(CONDA_PREFIX, 'Library', 'bin')
+    conda_root = CONDA_PREFIX
+
+    # Python runtime support DLLs that clean systems and Sandbox do not guarantee.
+    python_runtime_dlls = [
+        ('libexpat.dll', [library_bin]),
+        ('libcrypto-3-x64.dll', [library_bin]),
+        ('liblzma.dll', [library_bin]),
+        ('libssl-3-x64.dll', [library_bin]),
+        ('msvcp140.dll', [conda_root, library_bin]),
+        ('sqlite3.dll', [library_bin]),
+        ('vcruntime140.dll', [conda_root, library_bin]),
+        ('vcruntime140_1.dll', [conda_root, library_bin]),
+    ]
+    for dll_name, search_roots in python_runtime_dlls:
+        for search_root in search_roots:
+            dll_path = os.path.join(search_root, dll_name)
+            if os.path.exists(dll_path):
+                binaries.append((dll_path, '.'))
+                datas.append((dll_path, '.'))
+                print(f"  Python runtime DLL: {dll_name}")
+                break
+
     if os.path.exists(library_bin):
         needed_dlls = [
             'zlib.dll', 'libpng16.dll', 'jpeg62.dll', 'tiff.dll',
             'libwebp.dll', 'openblas.dll',
+            'libcrypto-3-x64.dll', 'liblzma.dll', 'libssl-3-x64.dll', 'sqlite3.dll',
             # NOTE: Do NOT include libiomp5md.dll from conda - torch provides its
             # own LLVM version which has different exports. Using Intel's smaller
             # version causes WinError 127 when loading fbgemm.dll.
@@ -571,7 +631,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # Add icon path here if available
+    icon=str(WINDOWS_ICON) if WINDOWS_ICON.exists() else None,
 )
 
 coll = COLLECT(
@@ -624,13 +684,26 @@ for dll_name, src_path in torch_lib_fixes.items():
 # DLLs that must be in root _internal/ for numpy BLAS
 if CONDA_PREFIX:
     library_bin = os.path.join(CONDA_PREFIX, 'Library', 'bin')
-    root_fixes = ['liblapack.dll', 'libblas.dll', 'libcblas.dll']
-    for dll_name in root_fixes:
-        src = os.path.join(library_bin, dll_name)
+    conda_root = CONDA_PREFIX
+    root_fixes = [
+        ('liblapack.dll', [library_bin]),
+        ('libblas.dll', [library_bin]),
+        ('libcblas.dll', [library_bin]),
+        ('libexpat.dll', [library_bin]),
+        ('msvcp140.dll', [conda_root, library_bin]),
+        ('vcruntime140.dll', [conda_root, library_bin]),
+        ('vcruntime140_1.dll', [conda_root, library_bin]),
+    ]
+    for dll_name, search_roots in root_fixes:
         dst = os.path.join(dist_internal, dll_name)
-        if os.path.exists(src) and not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            print(f"  [FIX] Copied {dll_name} -> _internal/")
+        if os.path.exists(dst):
+            continue
+        for search_root in search_roots:
+            src = os.path.join(search_root, dll_name)
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                print(f"  [FIX] Copied {dll_name} -> _internal/")
+                break
 
 print("Post-build DLL fixes complete.")
 
@@ -642,7 +715,7 @@ print("Post-build DLL fixes complete.")
 # Also restore OpenCV CUDA DLLs that PyInstaller may skip.
 # ============================================================================
 sdk_bin_dist = os.path.join(dist_internal, 'sdk', 'bin')
-if os.path.isdir(sdk_bin_dist) and SDK_PATH.exists():
+if BUNDLE_EXTERNAL_TOOLS and os.path.isdir(sdk_bin_dist) and SDK_PATH.exists():
     sdk_bin_orig = str(SDK_PATH / 'bin')
     if os.path.isdir(sdk_bin_orig):
         restored_count = 0
@@ -674,8 +747,8 @@ if os.path.isdir(torch_dist_dir):
 
 print(f"\n{'='*70}")
 print(f"Build spec created for {BUILD_NAME} v{BUILD_VERSION}")
-print(f"GPU Support: RTX 30xx (sm_86), 40xx (sm_89), 50xx (sm_120)")
-print(f"CUDA 12.8: Full native GPU on all RTX generations")
+print(f"GPU Support: RTX 20xx/30xx/40xx/50xx")
+print(f"CUDA release path: universal NVIDIA GPU target")
 print(f"{'='*70}")
 
 # ============================================================================

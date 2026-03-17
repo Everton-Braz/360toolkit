@@ -21,6 +21,7 @@ References:
 """
 
 import logging
+import shlex
 import subprocess
 import shutil
 from pathlib import Path
@@ -31,8 +32,104 @@ logger = logging.getLogger(__name__)
 
 # Preferred bundled COLMAP release location (user-provided GPU build)
 DEFAULT_COLMAP_RELEASE_PATH = Path(__file__).parent.parent.parent / "bin" / "colmap" / "colmap.exe"
+# Preferred SphereSfM release path (user-downloaded V1.2)
+DEFAULT_SPHERESFM_RELEASE_PATH = Path(__file__).parent.parent.parent / "bin" / "SphereSfM-2024-12-14" / "colmap.exe"
 # Legacy SphereSfM binary location
-DEFAULT_SPHERESFM_PATH = Path(__file__).parent.parent.parent / "bin" / "SphereSfM" / "colmap.exe"
+LEGACY_SPHERESFM_PATH = Path(__file__).parent.parent.parent / "bin" / "SphereSfM" / "colmap.exe"
+
+DEFAULT_SPHERESFM_FEATURE_FLAGS = (
+    "--ImageReader.single_camera 1 "
+    "--SiftExtraction.max_num_orientations 2 "
+    "--SiftExtraction.peak_threshold 0.00667 "
+    "--SiftExtraction.edge_threshold 10.0"
+)
+
+DEFAULT_SPHERESFM_MATCHER_FLAGS = (
+    "--SequentialMatching.quadratic_overlap 1 "
+    "--SequentialMatching.loop_detection 0 "
+    "--SiftMatching.max_ratio 0.8 "
+    "--SiftMatching.max_distance 0.7 "
+    "--SiftMatching.cross_check 1 "
+    "--SiftMatching.max_error 4.0 "
+    "--SiftMatching.confidence 0.999 "
+    "--SiftMatching.max_num_trials 10000 "
+    "--SiftMatching.min_inlier_ratio 0.25"
+)
+
+DEFAULT_SPHERESFM_MAPPER_FLAGS = (
+    "--Mapper.ba_refine_focal_length 0 "
+    "--Mapper.ba_refine_principal_point 0 "
+    "--Mapper.ba_refine_extra_params 0 "
+    "--Mapper.init_min_num_inliers 100 "
+    "--Mapper.init_num_trials 200 "
+    "--Mapper.init_max_error 4 "
+    "--Mapper.init_max_forward_motion 0.95 "
+    "--Mapper.init_min_tri_angle 16 "
+    "--Mapper.abs_pose_min_num_inliers 50 "
+    "--Mapper.abs_pose_max_error 8 "
+    "--Mapper.abs_pose_min_inlier_ratio 0.25 "
+    "--Mapper.max_reg_trials 3 "
+    "--Mapper.tri_min_angle 1.5 "
+    "--Mapper.tri_max_transitivity 1 "
+    "--Mapper.tri_ignore_two_view_tracks 1 "
+    "--Mapper.filter_max_reproj_error 4 "
+    "--Mapper.filter_min_tri_angle 1.5 "
+    "--Mapper.multiple_models 1"
+)
+
+DEFAULT_SPHERESFM_RUNTIME_MAX_IMAGE_SIZE = 3200
+DEFAULT_SPHERESFM_RUNTIME_MAX_NUM_FEATURES = 8192
+DEFAULT_SPHERESFM_RUNTIME_SEQUENTIAL_OVERLAP = 10
+DEFAULT_SPHERESFM_RUNTIME_MIN_NUM_MATCHES = 15
+DEFAULT_SPHERESFM_RUNTIME_MAX_NUM_MATCHES = 32000
+
+
+def _split_cli_flags(flags: str) -> List[str]:
+    """Split CLI flags while preserving quoted values when possible."""
+    if not flags or not flags.strip():
+        return []
+    try:
+        return shlex.split(flags, posix=False)
+    except ValueError:
+        return flags.split()
+
+
+def _override_cli_flag_values(flags: str, overrides: Dict[str, str]) -> str:
+    """Override CLI flag values while preserving unmodified flags."""
+    tokens = _split_cli_flags(flags)
+    if not tokens:
+        tokens = []
+
+    result: List[str] = []
+    seen: set[str] = set()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("--"):
+            value = None
+            if "=" in token:
+                token, inline_value = token.split("=", 1)
+                value = inline_value
+            elif index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+                value = tokens[index + 1]
+                index += 1
+
+            if token in overrides:
+                result.extend([token, str(overrides[token])])
+                seen.add(token)
+            else:
+                result.append(token)
+                if value is not None:
+                    result.append(value)
+        else:
+            result.append(token)
+        index += 1
+
+    for token, value in overrides.items():
+        if token not in seen:
+            result.extend([token, str(value)])
+
+    return " ".join(result)
 
 
 def _normalize_binary_candidate(path_value) -> Optional[Path]:
@@ -130,10 +227,13 @@ def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] =
         if env_value:
             add_candidate(env_value)
 
-    add_candidate(DEFAULT_SPHERESFM_PATH)
+    add_candidate(DEFAULT_SPHERESFM_RELEASE_PATH)
+    add_candidate(LEGACY_SPHERESFM_PATH)
 
     home = Path.home()
     spheresfm_common_paths = [
+        home / "Documents" / "APLICATIVOS" / "360ToolKit" / "bin" / "SphereSfM-2024-12-14" / "colmap.exe",
+        home / "Documents" / "APLICATIVOS" / "360toolkit" / "bin" / "SphereSfM-2024-12-14" / "colmap.exe",
         home / "Documents" / "APLICATIVOS" / "360ToolKit" / "bin" / "SphereSfM" / "colmap.exe",
         home / "Documents" / "APLICATIVOS" / "360toolkit" / "bin" / "SphereSfM" / "colmap.exe",
         home / "Documents" / "SphereSfM" / "colmap.exe",
@@ -173,7 +273,7 @@ def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] =
     if existing_candidates:
         return existing_candidates[0], [str(c) for c in candidates]
 
-    fallback = candidates[0] if candidates else DEFAULT_SPHERESFM_PATH
+    fallback = candidates[0] if candidates else DEFAULT_SPHERESFM_RELEASE_PATH
     return fallback, [str(c) for c in candidates]
 
 
@@ -187,6 +287,7 @@ class SphereSfMIntegrator:
     def __init__(self, settings, spheresfm_path: Optional[Path] = None):
         self.settings = settings
         self.spheresfm_path, self.searched_paths = resolve_spheresfm_binary_path(settings, spheresfm_path)
+        self._command_help_cache: Dict[str, str] = {}
         self.supports_sphere_camera_mapper = self._detect_mapper_sphere_support()
         
         # Validate SphereSfM binary exists
@@ -196,6 +297,133 @@ class SphereSfMIntegrator:
     def is_available(self) -> bool:
         """Check if SphereSfM binary is available."""
         return self.spheresfm_path.exists()
+
+    def _get_command_help(self, command_name: str) -> str:
+        """Return lowercase help text for a specific COLMAP command."""
+        if command_name in self._command_help_cache:
+            return self._command_help_cache[command_name]
+
+        if not self.spheresfm_path.exists():
+            return ""
+
+        try:
+            cmd = _compose_binary_command(self.spheresfm_path, [command_name, "-h"])
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                stdin=subprocess.DEVNULL,
+            )
+            help_text = f"{proc.stdout}\n{proc.stderr}".lower()
+        except Exception:
+            help_text = ""
+
+        self._command_help_cache[command_name] = help_text
+        return help_text
+
+    def _resolve_supported_option(self, command_name: str, candidates: List[str]) -> str:
+        """Return the first supported option for a command, falling back to the first candidate."""
+        help_text = self._get_command_help(command_name)
+        for candidate in candidates:
+            if candidate.lstrip("-").lower() in help_text:
+                return candidate
+        return candidates[0]
+
+    def _filter_supported_cli_args(self, command_name: str, args: List[str]) -> List[str]:
+        """Drop unsupported option/value pairs for a specific COLMAP command."""
+        help_text = self._get_command_help(command_name)
+        if not help_text:
+            return list(args)
+
+        filtered: List[str] = []
+        index = 0
+        while index < len(args):
+            token = args[index]
+            if not token.startswith("--"):
+                filtered.append(token)
+                index += 1
+                continue
+
+            option_name = token.split("=", 1)[0].lstrip("-").lower()
+            has_inline_value = "=" in token
+            value_token = None
+            has_separate_value = False
+            if not has_inline_value and index + 1 < len(args) and not args[index + 1].startswith("--"):
+                value_token = args[index + 1]
+                has_separate_value = True
+
+            if option_name in help_text:
+                filtered.append(token)
+                if has_separate_value:
+                    filtered.append(value_token)
+            else:
+                logger.warning("[SphereSfM] Dropping unsupported %s option for %s: %s", command_name, self.spheresfm_path.name, token)
+
+            index += 2 if has_separate_value else 1
+
+        return filtered
+
+    def _prepare_colmap_masks(
+        self,
+        images_dir: Path,
+        masks_dir: Path,
+        colmap_masks_dir: Path,
+    ) -> Optional[Path]:
+        """Convert project mask naming into COLMAP/SphereSfM per-image mask naming.
+
+        COLMAP expects a mask folder where each image `foo.jpg` maps to
+        `foo.jpg.png` below the same relative subpath. Our pipeline commonly
+        stores masks as `foo_mask.png`. This helper copies the available masks
+        into a temporary folder with COLMAP-compatible names.
+        """
+        if not images_dir.exists() or not masks_dir.exists():
+            return None
+
+        colmap_masks_dir.mkdir(parents=True, exist_ok=True)
+
+        valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+        rel_images: Dict[str, str] = {}
+        for img in images_dir.rglob("*"):
+            if not img.is_file() or img.suffix.lower() not in valid_exts:
+                continue
+            rel_path = img.relative_to(images_dir)
+            rel_images[img.stem] = rel_path.as_posix()
+
+        converted = 0
+        for mask_file in masks_dir.rglob("*.png"):
+            if not mask_file.is_file():
+                continue
+
+            rel_mask = mask_file.relative_to(masks_dir)
+            mask_stem = rel_mask.stem
+            candidate_stems = [
+                mask_stem,
+                mask_stem.removesuffix("_mask"),
+                mask_stem.replace("_mask", ""),
+            ]
+
+            image_rel = None
+            for candidate in candidate_stems:
+                if candidate in rel_images:
+                    image_rel = rel_images[candidate]
+                    break
+
+            if image_rel is None:
+                continue
+
+            dest = colmap_masks_dir / f"{image_rel}.png"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists():
+                shutil.copy2(mask_file, dest)
+            converted += 1
+
+        if converted == 0:
+            logger.warning("[SphereSfM] No per-image masks could be matched in %s", masks_dir)
+            return None
+
+        logger.info("[SphereSfM] Prepared %d COLMAP-compatible per-image masks in %s", converted, colmap_masks_dir)
+        return colmap_masks_dir
 
     def _detect_mapper_sphere_support(self) -> bool:
         """Detect if current binary supports --Mapper.sphere_camera option."""
@@ -293,6 +521,362 @@ class SphereSfMIntegrator:
                     target.unlink()
             except Exception as e:
                 logger.debug(f"Cleanup skipped for {target}: {e}")
+
+    def _is_feature_extractor_retryable(self, result: subprocess.CompletedProcess) -> bool:
+        """Return whether a failed extractor run should be retried with safer settings."""
+        if result.returncode == 0:
+            return False
+
+        output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+        retryable_markers = (
+            "access violation",
+            "segmentation fault",
+            "stack buffer",
+            "bad allocation",
+            "out of memory",
+        )
+        windows_access_violation_codes = {3221225477, -1073741819}
+        return result.returncode in windows_access_violation_codes or any(marker in output for marker in retryable_markers)
+
+    def _is_mapper_initialization_failure(self, result: subprocess.CompletedProcess) -> bool:
+        """Detect mapper failures that benefit from relaxed initialization thresholds."""
+        output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+        markers = (
+            "no good initial image pair",
+            "initial image pair",
+            "could not find initial image pair",
+            "failed to create an initial image pair",
+        )
+        return any(marker in output for marker in markers)
+
+    def _build_feature_extractor_args(
+        self,
+        *,
+        database_path: Path,
+        frames_dir: Path,
+        masks_dir: Optional[Path],
+        output_dir: Path,
+        camera_model: str,
+        is_sphere_model: bool,
+        width: int,
+        height: int,
+        gpu_flag: str,
+        max_image_size: int,
+        max_num_features: int,
+        feature_flags: str,
+        extra_args: str,
+        extractor_use_gpu_option: str,
+        extractor_max_image_size_option: str,
+    ) -> List[str]:
+        extractor_args = [
+            "feature_extractor",
+            "--database_path", str(database_path),
+            "--image_path", str(frames_dir),
+            "--ImageReader.camera_model", camera_model,
+        ]
+
+        if is_sphere_model:
+            extractor_args.extend(["--ImageReader.camera_params", f"1,{width},{height}"])
+
+        if masks_dir and masks_dir.exists():
+            prepared_masks_dir = self._prepare_colmap_masks(
+                frames_dir,
+                masks_dir,
+                output_dir / "masks_colmap",
+            )
+            if prepared_masks_dir is not None:
+                extractor_args.extend(["--ImageReader.mask_path", str(prepared_masks_dir)])
+            else:
+                mask_file = masks_dir / "camera_mask.png"
+                if mask_file.exists():
+                    extractor_args.extend(["--ImageReader.camera_mask_path", str(mask_file)])
+
+        extractor_args.extend([
+            extractor_use_gpu_option, gpu_flag,
+            extractor_max_image_size_option, str(max_image_size),
+            "--SiftExtraction.max_num_features", str(max_num_features),
+        ])
+        extractor_args.extend(self._filter_supported_cli_args(
+            "feature_extractor",
+            _split_cli_flags(feature_flags or DEFAULT_SPHERESFM_FEATURE_FLAGS),
+        ))
+        extractor_args.extend(self._filter_supported_cli_args(
+            "feature_extractor",
+            _split_cli_flags(extra_args),
+        ))
+        return extractor_args
+
+    def _run_feature_extractor_with_fallback(
+        self,
+        *,
+        database_path: Path,
+        frames_dir: Path,
+        masks_dir: Optional[Path],
+        output_dir: Path,
+        camera_model: str,
+        is_sphere_model: bool,
+        width: int,
+        height: int,
+        gpu_flag: str,
+        max_image_size: int,
+        max_num_features: int,
+        feature_flags: str,
+        extra_args: str,
+        extractor_use_gpu_option: str,
+        extractor_max_image_size_option: str,
+        progress_callback: Optional[Callable],
+    ) -> Tuple[Optional[subprocess.CompletedProcess], Optional[str]]:
+        attempts: List[Tuple[str, int, int]] = []
+        for label, profile in [
+            ("requested", (max_image_size, max_num_features)),
+            ("safe", (DEFAULT_SPHERESFM_RUNTIME_MAX_IMAGE_SIZE, DEFAULT_SPHERESFM_RUNTIME_MAX_NUM_FEATURES)),
+            ("low-memory", (2560, 6144)),
+        ]:
+            if profile not in [(size, features) for _, size, features in attempts]:
+                attempts.append((label, profile[0], profile[1]))
+
+        failure_messages: List[str] = []
+        last_result: Optional[subprocess.CompletedProcess] = None
+
+        for attempt_index, (label, attempt_image_size, attempt_num_features) in enumerate(attempts, start=1):
+            if database_path.exists():
+                database_path.unlink()
+
+            db_result = self._run_command([
+                "database_creator",
+                "--database_path", str(database_path)
+            ], progress_callback)
+            if db_result.returncode != 0:
+                return db_result, f"Database creation failed: {self._format_cmd_error(db_result)}"
+
+            logger.info(
+                "[SphereSfM] Feature extraction attempt %d/%d (%s): max_image_size=%d, max_num_features=%d",
+                attempt_index,
+                len(attempts),
+                label,
+                attempt_image_size,
+                attempt_num_features,
+            )
+            if progress_callback:
+                progress_callback(
+                    f"Extracting features ({camera_model}, {label} profile {attempt_image_size}px/{attempt_num_features})..."
+                )
+
+            extractor_args = self._build_feature_extractor_args(
+                database_path=database_path,
+                frames_dir=frames_dir,
+                masks_dir=masks_dir,
+                output_dir=output_dir,
+                camera_model=camera_model,
+                is_sphere_model=is_sphere_model,
+                width=width,
+                height=height,
+                gpu_flag=gpu_flag,
+                max_image_size=attempt_image_size,
+                max_num_features=attempt_num_features,
+                feature_flags=feature_flags,
+                extra_args=extra_args,
+                extractor_use_gpu_option=extractor_use_gpu_option,
+                extractor_max_image_size_option=extractor_max_image_size_option,
+            )
+            last_result = self._run_command(extractor_args, progress_callback)
+            if last_result.returncode == 0:
+                return last_result, None
+
+            failure_summary = (
+                f"{label} profile ({attempt_image_size}px/{attempt_num_features}) failed: "
+                f"{self._format_cmd_error(last_result)}"
+            )
+            failure_messages.append(failure_summary)
+            logger.warning("[SphereSfM] %s", failure_summary)
+
+            if not self._is_feature_extractor_retryable(last_result):
+                break
+
+        if last_result is None:
+            return None, "Feature extraction did not run"
+        return last_result, "Feature extraction failed across all profiles:\n" + "\n".join(failure_messages)
+
+    def _build_mapper_args(
+        self,
+        *,
+        database_path: Path,
+        frames_dir: Path,
+        sparse_path: Path,
+        min_num_matches: int,
+        mapper_flags: str,
+        extra_args: str,
+        is_sphere_model: bool,
+    ) -> List[str]:
+        mapper_args = [
+            "mapper",
+            "--database_path", str(database_path),
+            "--image_path", str(frames_dir),
+            "--output_path", str(sparse_path),
+            "--Mapper.min_num_matches", str(min_num_matches),
+        ]
+
+        mapper_args.extend(self._filter_supported_cli_args(
+            "mapper",
+            _split_cli_flags(mapper_flags or DEFAULT_SPHERESFM_MAPPER_FLAGS),
+        ))
+        mapper_args.extend(self._filter_supported_cli_args(
+            "mapper",
+            _split_cli_flags(extra_args),
+        ))
+
+        mapper_flag_tokens = mapper_flags or DEFAULT_SPHERESFM_MAPPER_FLAGS
+        if (
+            is_sphere_model
+            and self.supports_sphere_camera_mapper
+            and "--Mapper.sphere_camera" not in mapper_flag_tokens
+        ):
+            mapper_args.extend(["--Mapper.sphere_camera", "1"])
+        elif is_sphere_model and not self.supports_sphere_camera_mapper:
+            logger.warning("Binary does not expose --Mapper.sphere_camera; continuing without it.")
+
+        return mapper_args
+
+    def _run_mapper_with_fallback(
+        self,
+        *,
+        database_path: Path,
+        frames_dir: Path,
+        sparse_path: Path,
+        mapper_flags: str,
+        extra_args: str,
+        min_num_matches: int,
+        is_sphere_model: bool,
+        progress_callback: Optional[Callable],
+    ) -> Tuple[subprocess.CompletedProcess, Optional[str]]:
+        attempts: List[Tuple[str, str, int]] = [
+            ("strict", mapper_flags or DEFAULT_SPHERESFM_MAPPER_FLAGS, min_num_matches),
+            (
+                "lenient",
+                _override_cli_flag_values(
+                    mapper_flags or DEFAULT_SPHERESFM_MAPPER_FLAGS,
+                    {
+                        "--Mapper.init_min_num_inliers": "50",
+                        "--Mapper.init_num_trials": "500",
+                        "--Mapper.init_min_tri_angle": "8",
+                        "--Mapper.abs_pose_min_num_inliers": "15",
+                        "--Mapper.abs_pose_max_error": "12",
+                    },
+                ),
+                min(min_num_matches, 15),
+            ),
+            (
+                "single-model-lenient",
+                _override_cli_flag_values(
+                    mapper_flags or DEFAULT_SPHERESFM_MAPPER_FLAGS,
+                    {
+                        "--Mapper.init_min_num_inliers": "50",
+                        "--Mapper.init_num_trials": "500",
+                        "--Mapper.init_min_tri_angle": "8",
+                        "--Mapper.abs_pose_min_num_inliers": "15",
+                        "--Mapper.abs_pose_max_error": "12",
+                        "--Mapper.max_reg_trials": "6",
+                        "--Mapper.tri_ignore_two_view_tracks": "0",
+                        "--Mapper.filter_max_reproj_error": "6",
+                        "--Mapper.multiple_models": "0",
+                    },
+                ),
+                min(min_num_matches, 12),
+            ),
+            (
+                "aggressive-registration",
+                _override_cli_flag_values(
+                    mapper_flags or DEFAULT_SPHERESFM_MAPPER_FLAGS,
+                    {
+                        "--Mapper.init_min_num_inliers": "40",
+                        "--Mapper.init_num_trials": "800",
+                        "--Mapper.init_max_forward_motion": "0.99",
+                        "--Mapper.init_min_tri_angle": "6",
+                        "--Mapper.abs_pose_min_num_inliers": "12",
+                        "--Mapper.abs_pose_max_error": "16",
+                        "--Mapper.abs_pose_min_inlier_ratio": "0.15",
+                        "--Mapper.max_reg_trials": "8",
+                        "--Mapper.tri_min_angle": "0.75",
+                        "--Mapper.tri_max_transitivity": "2",
+                        "--Mapper.tri_ignore_two_view_tracks": "0",
+                        "--Mapper.filter_max_reproj_error": "8",
+                        "--Mapper.filter_min_tri_angle": "0.75",
+                        "--Mapper.multiple_models": "0",
+                    },
+                ),
+                min(min_num_matches, 10),
+            ),
+            (
+                "ultra-lenient",
+                _override_cli_flag_values(
+                    mapper_flags or DEFAULT_SPHERESFM_MAPPER_FLAGS,
+                    {
+                        "--Mapper.init_min_num_inliers": "30",
+                        "--Mapper.init_num_trials": "1000",
+                        "--Mapper.init_max_error": "8",
+                        "--Mapper.init_max_forward_motion": "0.99",
+                        "--Mapper.init_min_tri_angle": "4",
+                        "--Mapper.abs_pose_min_num_inliers": "10",
+                        "--Mapper.abs_pose_max_error": "16",
+                        "--Mapper.abs_pose_min_inlier_ratio": "0.1",
+                        "--Mapper.max_reg_trials": "5",
+                        "--Mapper.tri_min_angle": "0.5",
+                        "--Mapper.tri_max_transitivity": "2",
+                        "--Mapper.tri_ignore_two_view_tracks": "0",
+                        "--Mapper.filter_max_reproj_error": "8",
+                        "--Mapper.filter_min_tri_angle": "0.5",
+                    },
+                ),
+                min(min_num_matches, 10),
+            ),
+        ]
+
+        last_result: Optional[subprocess.CompletedProcess] = None
+        failure_messages: List[str] = []
+        model_path = sparse_path / "0"
+
+        for attempt_index, (label, attempt_flags, attempt_min_matches) in enumerate(attempts, start=1):
+            shutil.rmtree(sparse_path, ignore_errors=True)
+            sparse_path.mkdir(parents=True, exist_ok=True)
+
+            logger.info(
+                "[SphereSfM] Mapper attempt %d/%d (%s): min_num_matches=%d",
+                attempt_index,
+                len(attempts),
+                label,
+                attempt_min_matches,
+            )
+            if progress_callback:
+                progress_callback(f"Running reconstruction (mapper, {label})...")
+
+            mapper_args = self._build_mapper_args(
+                database_path=database_path,
+                frames_dir=frames_dir,
+                sparse_path=sparse_path,
+                min_num_matches=attempt_min_matches,
+                mapper_flags=attempt_flags,
+                extra_args=extra_args,
+                is_sphere_model=is_sphere_model,
+            )
+            last_result = self._run_command(mapper_args, progress_callback)
+
+            if last_result.returncode == 0 and model_path.exists():
+                return last_result, None
+
+            failure_summary = f"{label} mapper failed: {self._format_cmd_error(last_result)}"
+            if last_result.returncode == 0 and not model_path.exists():
+                failure_summary = f"{label} mapper produced no reconstruction model"
+            failure_messages.append(failure_summary)
+            logger.warning("[SphereSfM] %s", failure_summary)
+
+            if attempt_index == 1 and not self._is_mapper_initialization_failure(last_result):
+                break
+            if attempt_index > 1 and not self._is_mapper_initialization_failure(last_result):
+                break
+
+        if last_result is None:
+            raise RuntimeError("Mapper did not execute")
+        return last_result, "Mapper failed across all profiles:\n" + "\n".join(failure_messages)
     
     def run_alignment_mode_a(
         self,
@@ -357,15 +941,26 @@ class SphereSfMIntegrator:
         camera_model = getattr(self.settings, 'spheresfm_camera_model', 'SPHERE')
         use_gpu = getattr(self.settings, 'spheresfm_use_gpu', False)
         matching_method = getattr(self.settings, 'spheresfm_matching_method', 'sequential')
-        max_image_size = getattr(self.settings, 'spheresfm_max_image_size', 3200)
-        max_num_features = getattr(self.settings, 'spheresfm_max_num_features', 8192)
-        sequential_overlap = getattr(self.settings, 'spheresfm_sequential_overlap', 10)
-        min_num_matches = getattr(self.settings, 'spheresfm_min_num_matches', 15)
+        max_image_size = getattr(self.settings, 'spheresfm_max_image_size', DEFAULT_SPHERESFM_RUNTIME_MAX_IMAGE_SIZE)
+        max_num_features = getattr(self.settings, 'spheresfm_max_num_features', DEFAULT_SPHERESFM_RUNTIME_MAX_NUM_FEATURES)
+        sequential_overlap = getattr(self.settings, 'spheresfm_sequential_overlap', DEFAULT_SPHERESFM_RUNTIME_SEQUENTIAL_OVERLAP)
+        min_num_matches = getattr(self.settings, 'spheresfm_min_num_matches', DEFAULT_SPHERESFM_RUNTIME_MIN_NUM_MATCHES)
+        feature_flags = getattr(self.settings, 'spheresfm_feature_flags', DEFAULT_SPHERESFM_FEATURE_FLAGS)
+        matcher_flags = getattr(self.settings, 'spheresfm_matcher_flags', DEFAULT_SPHERESFM_MATCHER_FLAGS)
+        mapper_flags = getattr(self.settings, 'spheresfm_mapper_flags', DEFAULT_SPHERESFM_MAPPER_FLAGS)
         extra_args = getattr(self.settings, 'spheresfm_extra_args', '')
         gpu_flag = "1" if use_gpu else "0"
 
         # SPHERE model uses fixed focal length (f=1), others use standard COLMAP calibration
         is_sphere_model = camera_model in ('SPHERE', 'SIMPLE_SPHERE')
+        extractor_use_gpu_option = self._resolve_supported_option(
+            "feature_extractor",
+            ["--SiftExtraction.use_gpu", "--FeatureExtraction.use_gpu"],
+        )
+        extractor_max_image_size_option = self._resolve_supported_option(
+            "feature_extractor",
+            ["--SiftExtraction.max_image_size", "--FeatureExtraction.max_image_size"],
+        )
 
         logger.info(
             f"SphereSfM Panorama: {len(image_files)} images at {width}x{height}, "
@@ -373,155 +968,100 @@ class SphereSfMIntegrator:
         )
         
         try:
-            # Step 1: Create database
-            if progress_callback:
-                progress_callback("Creating database...")
-            
-            result = self._run_command([
-                "database_creator",
-                "--database_path", str(database_path)
-            ], progress_callback)
-            
-            if result.returncode != 0:
-                return fail_with_cleanup(f'Database creation failed: {self._format_cmd_error(result)}')
-            
             # Step 2: Feature extraction
-            if progress_callback:
-                progress_callback(f"Extracting features ({camera_model})...")
-            
-            extractor_args = [
-                "feature_extractor",
-                "--database_path", str(database_path),
-                "--image_path", str(frames_dir),
-                "--ImageReader.camera_model", camera_model,
-                "--ImageReader.single_camera", "1",
-                # Note: camera_params left empty → COLMAP auto-detects for all models
-            ]
-
-            # For SPHERE / SIMPLE_SPHERE: pass known f=1 intrinsics to avoid auto-cal failure
-            if is_sphere_model:
-                extractor_args.extend(["--ImageReader.camera_params", f"1,{width},{height}"])
-
-            # Add mask if available
-            if masks_dir and masks_dir.exists():
-                mask_file = masks_dir / "camera_mask.png"
-                if mask_file.exists():
-                    extractor_args.extend(["--ImageReader.camera_mask_path", str(mask_file)])
-            
-            extractor_args.extend([
-                "--SiftExtraction.use_gpu", gpu_flag,
-                "--SiftExtraction.max_image_size", str(max_image_size),
-                "--SiftExtraction.max_num_features", str(max_num_features),
-                "--SiftExtraction.max_num_orientations", "2",
-                "--SiftExtraction.peak_threshold", "0.00667",
-                "--SiftExtraction.edge_threshold", "10.0",
-            ])
-
-            # Append any extra CLI args supplied by the user
             if extra_args.strip():
-                extractor_args.extend(extra_args.split())
-            
-            result = self._run_command(extractor_args, progress_callback)
-            
-            if result.returncode != 0:
-                return fail_with_cleanup(f'Feature extraction failed: {self._format_cmd_error(result)}')
+                logger.debug("Global SphereSfM extra args appended to feature_extractor")
+
+            result, extractor_error = self._run_feature_extractor_with_fallback(
+                database_path=database_path,
+                frames_dir=frames_dir,
+                masks_dir=masks_dir,
+                output_dir=output_dir,
+                camera_model=camera_model,
+                is_sphere_model=is_sphere_model,
+                width=width,
+                height=height,
+                gpu_flag=gpu_flag,
+                max_image_size=max_image_size,
+                max_num_features=max_num_features,
+                feature_flags=feature_flags,
+                extra_args=extra_args,
+                extractor_use_gpu_option=extractor_use_gpu_option,
+                extractor_max_image_size_option=extractor_max_image_size_option,
+                progress_callback=progress_callback,
+            )
+            if extractor_error:
+                return fail_with_cleanup(extractor_error)
             
             # Step 3: Feature matching
             if progress_callback:
                 progress_callback(f"Matching features ({matching_method})...")
 
             # Build matching command based on chosen method
+            if matching_method == 'exhaustive':
+                matching_cmd = "exhaustive_matcher"
+            elif matching_method == 'vocab_tree':
+                matching_cmd = "vocab_tree_matcher"
+            else:
+                matching_cmd = "sequential_matcher"
+
+            matcher_user_flags = self._filter_supported_cli_args(
+                matching_cmd,
+                _split_cli_flags(matcher_flags or DEFAULT_SPHERESFM_MATCHER_FLAGS),
+            )
+            global_extra_flags = self._filter_supported_cli_args(
+                matching_cmd,
+                _split_cli_flags(extra_args),
+            )
+
+            matcher_use_gpu_option = self._resolve_supported_option(
+                matching_cmd,
+                ["--SiftMatching.use_gpu", "--FeatureMatching.use_gpu"],
+            )
+            matcher_max_num_matches_option = self._resolve_supported_option(
+                matching_cmd,
+                ["--SiftMatching.max_num_matches", "--FeatureMatching.max_num_matches"],
+            )
             sift_match_flags = [
-                "--SiftMatching.use_gpu", gpu_flag,
-                "--SiftMatching.max_ratio", "0.8",
-                "--SiftMatching.max_distance", "0.7",
-                "--SiftMatching.cross_check", "1",
-                "--SiftMatching.max_num_matches", str(max_num_features),
-                "--SiftMatching.max_error", "4.0",
-                "--SiftMatching.confidence", "0.999",
-                "--SiftMatching.max_num_trials", "10000",
-                "--SiftMatching.min_inlier_ratio", "0.25",
+                matcher_use_gpu_option, gpu_flag,
+                matcher_max_num_matches_option, str(max(DEFAULT_SPHERESFM_RUNTIME_MAX_NUM_MATCHES, max_num_features)),
                 "--SiftMatching.min_num_inliers", str(min_num_matches),
             ]
 
             if matching_method == 'exhaustive':
-                matching_cmd = "exhaustive_matcher"
                 matching_args = [matching_cmd, "--database_path", str(database_path)] + sift_match_flags
             elif matching_method == 'vocab_tree':
-                matching_cmd = "vocab_tree_matcher"
                 matching_args = [matching_cmd, "--database_path", str(database_path)] + sift_match_flags
-            else:  # sequential (default — best for video sequences)
-                matching_cmd = "sequential_matcher"
+            else:
                 matching_args = [
                     matching_cmd,
                     "--database_path", str(database_path),
                     "--SequentialMatching.overlap", str(sequential_overlap),
-                    "--SequentialMatching.quadratic_overlap", "1",
-                    "--SequentialMatching.loop_detection", "0",
                 ] + sift_match_flags
+
+            matching_args.extend(matcher_user_flags)
+            matching_args.extend(global_extra_flags)
             
             result = self._run_command(matching_args, progress_callback)
             
             if result.returncode != 0:
-                if matching_method != 'exhaustive':
-                    # Try exhaustive matching as fallback
-                    logger.warning(f"{matching_cmd} failed, falling back to exhaustive_matcher...")
-                    fallback_args = ["exhaustive_matcher", "--database_path", str(database_path)] + sift_match_flags
-                    result = self._run_command(fallback_args, progress_callback)
-                if result.returncode != 0:
-                    return fail_with_cleanup(f'Feature matching failed: {self._format_cmd_error(result)}')
+                return fail_with_cleanup(f'Feature matching failed: {self._format_cmd_error(result)}')
             
             # Step 4: Incremental mapping
-            if progress_callback:
-                progress_callback("Running reconstruction (mapper)...")
-            
-            mapper_args = [
-                "mapper",
-                "--database_path", str(database_path),
-                "--image_path", str(frames_dir),
-                "--output_path", str(sparse_path),
-                # BA: for SPHERE keep focal fixed (f=1); for other models let COLMAP refine
-                "--Mapper.ba_refine_focal_length", "0" if is_sphere_model else "1",
-                "--Mapper.ba_refine_principal_point", "0" if is_sphere_model else "1",
-                "--Mapper.ba_refine_extra_params", "0" if is_sphere_model else "1",
-                # Initialization
-                "--Mapper.init_min_num_inliers", "100",
-                "--Mapper.init_num_trials", "200",
-                "--Mapper.init_max_error", "4",
-                "--Mapper.init_max_forward_motion", "0.95",
-                "--Mapper.init_min_tri_angle", "16",
-                # Registration
-                "--Mapper.abs_pose_min_num_inliers", "30",
-                "--Mapper.abs_pose_max_error", "12",
-                "--Mapper.abs_pose_min_inlier_ratio", "0.25",
-                "--Mapper.max_reg_trials", "3",
-                # Triangulation
-                "--Mapper.tri_min_angle", "1.5",
-                "--Mapper.tri_max_transitivity", "1",
-                "--Mapper.tri_ignore_two_view_tracks", "1",
-                # Filters
-                "--Mapper.filter_max_reproj_error", "4",
-                "--Mapper.filter_min_tri_angle", "1.5",
-                "--Mapper.multiple_models", "1",
-                "--Mapper.min_num_matches", str(min_num_matches),
-            ]
+            result, mapper_error = self._run_mapper_with_fallback(
+                database_path=database_path,
+                frames_dir=frames_dir,
+                sparse_path=sparse_path,
+                mapper_flags=mapper_flags,
+                extra_args=extra_args,
+                min_num_matches=min_num_matches,
+                is_sphere_model=is_sphere_model,
+                progress_callback=progress_callback,
+            )
+            if mapper_error:
+                return fail_with_cleanup(mapper_error)
 
-            # --Mapper.sphere_camera is only valid for SPHERE/SIMPLE_SPHERE AND only in SphereSfM build
-            if is_sphere_model and self.supports_sphere_camera_mapper:
-                mapper_args.extend(["--Mapper.sphere_camera", "1"])
-            elif is_sphere_model:
-                logger.warning("Binary does not expose --Mapper.sphere_camera; continuing without it.")
-            # For non-sphere models (FULL_OPENCV, OPENCV_FISHEYE, etc.) — never add sphere_camera flag
-            
-            result = self._run_command(mapper_args, progress_callback)
-            
-            if result.returncode != 0:
-                return fail_with_cleanup(f'Mapper failed: {self._format_cmd_error(result)}')
-            
-            # Check if reconstruction was created
             model_path = sparse_path / "0"
-            if not model_path.exists():
-                return fail_with_cleanup('No reconstruction model created')
             
             # Convert binary model to text format for easier analysis
             cameras_bin = model_path / "cameras.bin"

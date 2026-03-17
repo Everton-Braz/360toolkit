@@ -117,13 +117,13 @@ def _test_torch_cuda():
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from ..extraction import FrameExtractor
-from ..extraction.sdk_extractor import SDKExtractor
-from ..transforms import E2PTransform, E2CTransform
-from .metadata_handler import MetadataHandler
-from ..utils.resource_path import get_resource_path
-from ..utils.color_correction import apply_color_corrections
-from ..config.defaults import (
+from src.extraction import FrameExtractor
+from src.extraction.sdk_extractor import SDKExtractor
+from src.transforms import E2PTransform, E2CTransform
+from src.pipeline.metadata_handler import MetadataHandler
+from src.utils.resource_path import get_resource_path
+from src.utils.color_correction import apply_color_corrections
+from src.config.defaults import (
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
     DEFAULT_OUTPUT_WIDTH, DEFAULT_OUTPUT_HEIGHT
 )
@@ -289,6 +289,93 @@ class PipelineWorker(QThread):
             self.config['enable_stage2'] = False
             self.config['enable_stage3'] = True
             logger.info(f"[OK] Set masking input: {folder_path}")
+
+    @staticmethod
+    def _image_patterns() -> tuple[str, ...]:
+        return ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
+
+    def _dir_has_images(self, folder: Optional[Path], recursive: bool = True) -> bool:
+        if not folder or not folder.exists() or not folder.is_dir():
+            return False
+        iterator = folder.rglob if recursive else folder.glob
+        return any(iterator(pattern) for pattern in self._image_patterns())
+
+    def _detect_project_image_source(self, output_root: Path, folder: Optional[Path]) -> str:
+        if folder is None:
+            return 'custom'
+        try:
+            resolved = folder.resolve()
+        except Exception:
+            resolved = folder
+        if resolved == (output_root / 'perspective_views'):
+            return 'perspective'
+        if resolved == (output_root / 'extracted_frames'):
+            return 'equirect'
+        return 'custom'
+
+    def _resolve_project_image_dir(
+        self,
+        output_root: Path,
+        source: str,
+        alignment_mode: str = 'perspective_reconstruction',
+    ) -> Optional[Path]:
+        perspective_dir = output_root / 'perspective_views'
+        equirect_dir = output_root / 'extracted_frames'
+
+        if source == 'perspective':
+            return perspective_dir if self._dir_has_images(perspective_dir) else None
+        if source == 'equirect':
+            return equirect_dir if self._dir_has_images(equirect_dir) else None
+
+        ordered = [equirect_dir, perspective_dir] if alignment_mode == 'panorama_sfm' else [perspective_dir, equirect_dir]
+        for folder in ordered:
+            if self._dir_has_images(folder):
+                return folder
+        return None
+
+    def _resolve_project_masks_dir(
+        self,
+        output_root: Path,
+        source: str,
+        image_source: str,
+    ) -> Optional[Path]:
+        mask_dirs = {
+            'perspective': output_root / 'masks_perspective',
+            'equirect': output_root / 'masks_equirect',
+            'custom': output_root / 'masks_custom',
+        }
+        legacy_dir = output_root / 'masks'
+
+        def _existing(folder: Optional[Path]) -> Optional[Path]:
+            if folder and folder.exists() and any(folder.rglob('*.png')):
+                return folder
+            return None
+
+        if source in ('match_images', 'match_reconstruction'):
+            source = image_source
+        if source == 'none':
+            return None
+        if source in mask_dirs:
+            return _existing(mask_dirs[source]) or _existing(legacy_dir)
+
+        ordered = []
+        if image_source in mask_dirs:
+            ordered.append(mask_dirs[image_source])
+        ordered.extend([legacy_dir, mask_dirs['perspective'], mask_dirs['equirect'], mask_dirs['custom']])
+        for folder in ordered:
+            existing = _existing(folder)
+            if existing:
+                return existing
+        return None
+
+    def _sync_legacy_masks_dir(self, source_dir: Path, output_root: Path):
+        legacy_dir = output_root / 'masks'
+        if source_dir == legacy_dir or not source_dir.exists():
+            return
+        import shutil
+        if legacy_dir.exists():
+            shutil.rmtree(legacy_dir)
+        shutil.copytree(source_dir, legacy_dir)
     
     def run(self):
         """Execute the pipeline"""
@@ -1390,22 +1477,39 @@ class PipelineWorker(QThread):
                 except Exception:
                     pass
 
+            output_root = Path(self.config['output_dir'])
+            requested_source = self.config.get('stage3_image_source', 'auto')
             # Determine input directory based on mask_target setting
             mask_target = self.config.get('mask_target', 'split')
             skip_transform = self.config.get('skip_transform', False)
-            
-            if mask_target == 'equirect' or skip_transform:
-                # Use extraction output (equirectangular frames) for masking
-                input_dir = Path(self.config['output_dir']) / 'extracted_frames'
-                if mask_target == 'equirect':
-                    logger.info("[Equirect Masking] Masking equirectangular frames for Rig SfM workflow")
-                else:
-                    logger.info("[Direct Masking] Using extracted frames (equirectangular/fisheye) for masking")
+            stage3_input = self.config.get('stage3_input_dir')
+
+            if stage3_input:
+                input_dir = Path(stage3_input)
+                resolved_source = self._detect_project_image_source(output_root, input_dir)
+                logger.info(f"[Masking] Using specified input: {input_dir}")
             else:
-                # Use split output (perspective images) - traditional workflow
-                input_dir = Path(self.config.get('stage3_input_dir', 
-                                               str(Path(self.config['output_dir']) / 'perspective_views')))
-                logger.info(f"[Split Masking] Masking perspective views: {input_dir}")
+                if requested_source == 'equirect' or (requested_source == 'auto' and (mask_target == 'equirect' or skip_transform)):
+                    input_dir = output_root / 'extracted_frames'
+                    resolved_source = 'equirect'
+                    logger.info("[Equirect Masking] Masking extracted equirectangular frames")
+                elif requested_source == 'perspective':
+                    input_dir = output_root / 'perspective_views'
+                    resolved_source = 'perspective'
+                    logger.info(f"[Split Masking] Masking perspective views: {input_dir}")
+                else:
+                    input_dir = self._resolve_project_image_dir(output_root, 'auto')
+                    resolved_source = self._detect_project_image_source(output_root, input_dir)
+                    logger.info(f"[Masking] Auto-selected input: {input_dir}")
+
+            if not input_dir or not input_dir.exists():
+                return {
+                    'success': False,
+                    'error': 'Masking input directory not found',
+                    'masks_created': 0,
+                    'skipped': 0,
+                    'failed': 0
+                }
             
             # Initialize masker if not done
             if self.masker is None:
@@ -1693,7 +1797,12 @@ class PipelineWorker(QThread):
                     input_dir = Path(stage3_input)
                     logger.info(f"Using specified masking input: {input_dir}")
             
-            output_dir = Path(self.config['output_dir']) / 'masks'
+            masks_subdir = {
+                'perspective': 'masks_perspective',
+                'equirect': 'masks_equirect',
+                'custom': 'masks_custom',
+            }.get(resolved_source, 'masks_custom')
+            output_dir = output_root / masks_subdir
             save_visualization = self.config.get('save_visualization', False)
             
             def progress_callback(current, total, message):
@@ -1717,7 +1826,13 @@ class PipelineWorker(QThread):
                 progress_callback=progress_callback,
                 cancellation_check=cancellation_check
             )
-            
+
+            if result.get('masks_created', 0) > 0 and output_dir.exists():
+                self._sync_legacy_masks_dir(output_dir, output_root)
+
+            result['input_dir'] = str(input_dir)
+            result['mask_source'] = resolved_source
+            result['masks_dir'] = str(output_dir)
             result['success'] = True
             return result
         
@@ -1838,33 +1953,35 @@ class PipelineWorker(QThread):
                                if p.is_file() and p.suffix.lower() in _img_exts]
                      logger.info(f"[Reconstruction] Flattened {len(_moved)} images into extracted_frames root")
 
-             if alignment_mode == ALIGNMENT_MODE_RIG_SFM and perspective_views_dir.exists():
-                 # Perspective reconstruction should consume Stage 2 output directly
-                 input_dir = perspective_views_dir
-                 logger.info(f"[Reconstruction] Using Stage 2 perspective views: {input_dir}")
-             elif self.config.get('enable_stage1', True):
-                 input_dir = extracted_frames_dir
+             requested_image_source = self.config.get('stage4_image_source', 'auto')
+             manual_stage4_input = self.config.get('stage4_input_dir')
+             if manual_stage4_input:
+                 input_dir = Path(manual_stage4_input)
+                 reconstruction_image_source = self._detect_project_image_source(output_root, input_dir)
+                 logger.info(f"[Reconstruction] Using specified input: {input_dir}")
              else:
-                 # Auto-discovery fallback
-                 discovered = self.discover_stage_input_folder(2, self.config['output_dir'])
-                 if discovered:
-                     input_dir = discovered
+                 input_dir = self._resolve_project_image_dir(output_root, requested_image_source, alignment_mode)
+                 reconstruction_image_source = self._detect_project_image_source(output_root, input_dir)
+                 if input_dir:
+                     logger.info(f"[Reconstruction] Using {reconstruction_image_source} images: {input_dir}")
                  else:
-                     return {'success': False, 'error': 'Reconstruction input not found'}
+                     discovered = self.discover_stage_input_folder(2, self.config['output_dir'])
+                     if discovered:
+                         input_dir = discovered
+                         reconstruction_image_source = self._detect_project_image_source(output_root, input_dir)
+                     else:
+                         return {'success': False, 'error': 'Reconstruction input not found'}
              
              output_dir = Path(self.config['output_dir']) / 'reconstruction'
              
              # Determine masks directory for reconstruction input type
-             masks_dir = None
+             requested_mask_source = self.config.get('stage4_mask_source', 'auto')
+             masks_dir = self._resolve_project_masks_dir(output_root, requested_mask_source, reconstruction_image_source)
              mask_target = self.config.get('mask_target', 'split')
-             if self.config.get('stage3_enabled', False):
-                 potential_masks_dir = Path(self.config['output_dir']) / 'masks'
-                 if potential_masks_dir.exists():
-                     masks_dir = potential_masks_dir
-                     if alignment_mode == ALIGNMENT_MODE_RIG_SFM:
-                         logger.info(f"[Reconstruction] Using perspective masks: {masks_dir}")
-                     elif mask_target == 'equirect':
-                         logger.info(f"[Reconstruction] Using equirectangular masks: {masks_dir}")
+             if masks_dir:
+                 logger.info(f"[Reconstruction] Using masks from: {masks_dir}")
+             else:
+                 logger.info("[Reconstruction] No masks selected for reconstruction")
 
              logger.info(f"[Reconstruction] Using alignment mode: {alignment_mode}")
              
@@ -1896,6 +2013,7 @@ class PipelineWorker(QThread):
                  reuse_colmap_database=self.config.get('reuse_colmap_database', True),
                  use_rig_sfm=(alignment_mode == ALIGNMENT_MODE_RIG_SFM),
                  use_gpu=self.config.get('use_gpu_colmap', self.config.get('use_gpu', True)),
+                 strict_gpu_only=self.config.get('strict_gpu_only', False),
                  # SphereSfM-specific params from UI
                  spheresfm_camera_model=_sfm_p.get('camera_model', 'SPHERE'),
                  spheresfm_use_gpu=self.config.get('use_gpu_spheresfm', False),
@@ -1904,6 +2022,9 @@ class PipelineWorker(QThread):
                  spheresfm_max_num_features=int(_sfm_p.get('max_num_features', 8192)),
                  spheresfm_sequential_overlap=int(_sfm_p.get('sequential_overlap', 10)),
                  spheresfm_min_num_matches=int(_sfm_p.get('min_num_matches', 15)),
+                 spheresfm_feature_flags=str(_sfm_p.get('feature_flags', '')),
+                 spheresfm_matcher_flags=str(_sfm_p.get('matcher_flags', '')),
+                 spheresfm_mapper_flags=str(_sfm_p.get('mapper_flags', '')),
                  spheresfm_extra_args=str(_sfm_p.get('extra_args', '')),
              )
              
@@ -1918,6 +2039,9 @@ class PipelineWorker(QThread):
                  output_dir=output_dir,
                  progress_callback=progress_callback
              )
+
+             result['reconstruction_image_source'] = reconstruction_image_source
+             result['reconstruction_masks_dir'] = str(masks_dir) if masks_dir else None
 
              sparse_dir = Path(result['colmap_output']) if result.get('success') and result.get('colmap_output') else None
              if sparse_dir and sparse_dir.exists() and (
@@ -1938,23 +2062,26 @@ class PipelineWorker(QThread):
                      sparse_dir = Path(result['colmap_output'])
                      realityscan_dir = output_dir / 'realityscan_export'
 
+                     requested_export_image_source = self.config.get('export_image_source', 'auto')
+                     requested_export_mask_source = self.config.get('export_mask_source', 'auto')
+
                      # Determine images directory (prefer actual reconstruction input/output with files)
                      result_images_dir = Path(result['perspectives_dir']) if result.get('perspectives_dir') else (output_dir / 'images')
-                     images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
+                     if requested_export_image_source == 'reconstruction':
+                         images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
+                     else:
+                         images_dir = self._resolve_project_image_dir(output_root, requested_export_image_source, alignment_mode)
+                         if not images_dir:
+                             images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
 
                      # Determine masks directory for export
                      export_masks_dir = None
                      if self.config.get('export_include_masks', True):
-                         if mask_target == 'equirect' and masks_dir:
-                             export_masks_dir = masks_dir
-                         else:
-                             perspective_masks = output_dir / 'masks'
-                             if perspective_masks.exists():
-                                 export_masks_dir = perspective_masks
-                             else:
-                                 split_masks = Path(self.config['output_dir']) / 'masks'
-                                 if split_masks.exists():
-                                     export_masks_dir = split_masks
+                         export_masks_dir = self._resolve_project_masks_dir(
+                             output_root,
+                             requested_export_mask_source,
+                             reconstruction_image_source,
+                         ) or masks_dir
 
                      database_path = output_dir / 'database.db'
                      if not database_path.exists():
@@ -1987,8 +2114,14 @@ class PipelineWorker(QThread):
                      from .export_formats import RealityScanExporter
 
                      sparse_dir = Path(result['colmap_output'])
+                     requested_export_image_source = self.config.get('export_image_source', 'auto')
                      result_images_dir = Path(result['perspectives_dir']) if result.get('perspectives_dir') else (output_dir / 'images')
-                     sidecar_images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
+                     if requested_export_image_source == 'reconstruction':
+                         sidecar_images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
+                     else:
+                         sidecar_images_dir = self._resolve_project_image_dir(output_root, requested_export_image_source, alignment_mode)
+                         if not sidecar_images_dir:
+                             sidecar_images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
 
                      exporter = RealityScanExporter(
                          colmap_dir=str(sparse_dir),
@@ -2019,20 +2152,26 @@ class PipelineWorker(QThread):
                      sparse_dir = Path(result['colmap_output'])
                      lichtfeld_dir = output_dir / 'lichtfeld_export'
                      
+                     requested_export_image_source = self.config.get('export_image_source', 'auto')
+                     requested_export_mask_source = self.config.get('export_mask_source', 'auto')
+
                      # Determine images directory (prefer actual reconstruction input/output with files)
                      result_images_dir = Path(result['perspectives_dir']) if result.get('perspectives_dir') else (output_dir / 'images')
-                     images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
+                     if requested_export_image_source == 'reconstruction':
+                         images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
+                     else:
+                         images_dir = self._resolve_project_image_dir(output_root, requested_export_image_source, alignment_mode)
+                         if not images_dir:
+                             images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
                      
                      # Determine masks directory for export
                      export_masks_dir = None
                      if self.config.get('export_include_masks', True):
-                         if mask_target == 'equirect' and masks_dir:
-                             export_masks_dir = masks_dir
-                         else:
-                             # Check for split masks
-                             split_masks = Path(self.config['output_dir']) / 'masks'
-                             if split_masks.exists():
-                                 export_masks_dir = split_masks
+                         export_masks_dir = self._resolve_project_masks_dir(
+                             output_root,
+                             requested_export_mask_source,
+                             reconstruction_image_source,
+                         ) or masks_dir
                      
                      exporter = LichtfeldExporter(
                          colmap_dir=str(sparse_dir),
@@ -2070,23 +2209,31 @@ class PipelineWorker(QThread):
 
             output_root = Path(self.config['output_dir'])
             realityscan_dir = output_root / 'realityscan_export'
+            alignment_mode = self.config.get('alignment_mode', 'perspective_reconstruction')
 
-            images_dir = output_root / 'perspective_views'
-            if not images_dir.exists():
+            requested_export_image_source = self.config.get('export_image_source', 'auto')
+            images_dir = self._resolve_project_image_dir(output_root, requested_export_image_source, alignment_mode)
+            if requested_export_image_source == 'reconstruction' and not images_dir:
+                images_dir = self._resolve_project_image_dir(output_root, 'auto', alignment_mode)
+
+            if not images_dir:
                 discovered = self.discover_stage_input_folder(3, self.config['output_dir'])
                 if discovered:
                     images_dir = discovered
                 else:
                     return {
                         'success': False,
-                        'error': 'RealityScan export requires split images. Run Stage 2 first or set stage3_input_dir.'
+                        'error': 'RealityScan export requires images. Run Stage 2 or Stage 1 first, or choose an explicit source.'
                     }
 
             export_masks_dir = None
             if self.config.get('export_include_masks', True):
-                masks_dir = output_root / 'masks'
-                if masks_dir.exists():
-                    export_masks_dir = masks_dir
+                image_source = self._detect_project_image_source(output_root, images_dir)
+                export_masks_dir = self._resolve_project_masks_dir(
+                    output_root,
+                    self.config.get('export_mask_source', 'auto'),
+                    image_source,
+                )
 
             ok = export_for_realityscan(
                 colmap_dir=None,

@@ -15,6 +15,10 @@ if __name__ == '__main__':
 
 import logging
 
+from src.config.defaults import APP_NAME, APP_VERSION
+from src.utils.app_paths import get_log_file_path
+from src.utils.resource_path import get_resource_path
+
 
 def _bootstrap_windows_dlls() -> None:
     if os.name != "nt":
@@ -46,17 +50,32 @@ def _bootstrap_windows_dlls() -> None:
 
 _bootstrap_windows_dlls()
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('360toolkit.log'),
-        logging.StreamHandler()
-    ]
-)
+def _configure_logging() -> None:
+    log_path = get_log_file_path()
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_path, encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
+
+
+_configure_logging()
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_app_icon_path() -> Path | None:
+    icon_candidates = [
+        get_resource_path('resources/images/logo-favicon.ico'),
+        get_resource_path('resources/images/logo-favicon.jpg'),
+    ]
+    for candidate in icon_candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def run_cli_mode():
@@ -95,7 +114,7 @@ def run_cli_mode():
         logging.getLogger().setLevel(logging.DEBUG)
     
     logger.info("=" * 60)
-    logger.info("360toolkit v1.3.0 - CLI Mode")
+    logger.info(f"{APP_NAME} v{APP_VERSION} - CLI Mode")
     logger.info("=" * 60)
     
     # Build camera config
@@ -144,7 +163,11 @@ def run_cli_mode():
     
     # Need QApplication for PipelineWorker (QThread)
     from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtGui import QIcon
     app = QApplication(sys.argv)
+    app_icon = _resolve_app_icon_path()
+    if app_icon is not None:
+        app.setWindowIcon(QIcon(str(app_icon)))
     
     from src.pipeline.batch_orchestrator import PipelineWorker
     
@@ -199,7 +222,7 @@ def main():
         return run_cli_mode()
     
     logger.info("=" * 60)
-    logger.info("Starting 360toolkit v1.3.0")
+    logger.info(f"Starting {APP_NAME} v{APP_VERSION}")
     logger.info("=" * 60)
     
     try:
@@ -210,13 +233,16 @@ def main():
         
         from PyQt6.QtWidgets import QApplication
         from PyQt6.QtCore import Qt
-        from PyQt6.QtGui import QFont
+        from PyQt6.QtGui import QFont, QIcon
         from src.ui.main_window import MainWindow
         
         # Create Qt application
         app = QApplication(sys.argv)
         app.setApplicationName("360toolkit")
         app.setOrganizationName("360toolkit Development Team")
+        app_icon = _resolve_app_icon_path()
+        if app_icon is not None:
+            app.setWindowIcon(QIcon(str(app_icon)))
         
         # Set default font size for better readability on high-DPI
         font = app.font()
@@ -225,6 +251,8 @@ def main():
         
         # Create and show main window
         window = MainWindow()
+        if app_icon is not None:
+            window.setWindowIcon(QIcon(str(app_icon)))
         window.show()
         
         logger.info("Application window opened")
