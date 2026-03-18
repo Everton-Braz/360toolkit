@@ -19,8 +19,10 @@ import tempfile
 import re
 import urllib.request
 import sqlite3
+import shlex
 
-from src.utils.colmap_paths import build_colmap_cli_context, get_colmap_runtime_dirs, resolve_default_colmap_path
+from src.utils.dependency_provisioning import ensure_colmap_downloaded
+from src.utils.colmap_paths import build_colmap_cli_context, get_colmap_runtime_dirs, normalize_colmap_executable, resolve_default_colmap_path
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,16 @@ def _import_pycolmap():
     """Lazy import of pycolmap to avoid DLL crash at module-level."""
     import pycolmap
     return pycolmap
+
+
+def _split_cli_flags(flags: str) -> List[str]:
+    raw = str(flags or '').strip()
+    if not raw:
+        return []
+    try:
+        return shlex.split(raw, posix=False)
+    except ValueError:
+        return raw.split()
 
 
 def _register_windows_dll_dirs(dll_dirs: List[Path]) -> None:
@@ -144,7 +156,7 @@ class RigColmapIntegrator:
     def _read_colmap_version(self, colmap_bin: str) -> str:
         try:
             run_cwd, run_env = self._get_cli_env(colmap_bin)
-            for cmd in ([colmap_bin, "--version"], [colmap_bin, "version"]):
+            for cmd in ([colmap_bin, "help"], [colmap_bin, "--version"], [colmap_bin, "version"]):
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
@@ -465,11 +477,17 @@ class RigColmapIntegrator:
     def _resolve_colmap_binary(self) -> str:
         explicit_colmap = getattr(self.settings, 'colmap_path', None)
         if explicit_colmap:
-            return str(explicit_colmap)
+            normalized = normalize_colmap_executable(explicit_colmap)
+            if normalized and normalized.exists():
+                return str(normalized)
+            logger.warning("[RigSfM] Ignoring invalid configured COLMAP path: %s", explicit_colmap)
 
         custom = getattr(self.settings, 'sphere_alignment_path', None)
         if custom:
-            return str(custom)
+            normalized = normalize_colmap_executable(custom)
+            if normalized and normalized.exists():
+                return str(normalized)
+            logger.warning("[RigSfM] Ignoring invalid custom alignment path: %s", custom)
 
         # Prefer bundled COLMAP binary in project (Windows build used by this app)
         try:
@@ -479,6 +497,12 @@ class RigColmapIntegrator:
                 return str(bundled_colmap)
         except Exception:
             pass
+
+        try:
+            downloaded_colmap = ensure_colmap_downloaded()
+            return str(downloaded_colmap)
+        except Exception as exc:
+            logger.warning("[RigSfM] Lazy COLMAP download failed: %s", exc)
 
         return "colmap"
 
@@ -680,6 +704,15 @@ class RigColmapIntegrator:
             return ["--ImageReader.single_camera_per_image", "1"]
         return ["--ImageReader.single_camera_per_folder", "1"]
 
+    def _colmap_feature_flag_args(self) -> List[str]:
+        return _split_cli_flags(getattr(self.settings, 'colmap_feature_flags', '')) + _split_cli_flags(getattr(self.settings, 'colmap_extra_args', ''))
+
+    def _colmap_matcher_flag_args(self) -> List[str]:
+        return _split_cli_flags(getattr(self.settings, 'colmap_matcher_flags', '')) + _split_cli_flags(getattr(self.settings, 'colmap_extra_args', ''))
+
+    def _colmap_mapper_flag_args(self) -> List[str]:
+        return _split_cli_flags(getattr(self.settings, 'colmap_mapper_flags', '')) + _split_cli_flags(getattr(self.settings, 'colmap_extra_args', ''))
+
     def _build_cli_matcher_args(
         self,
         database_path: Path,
@@ -708,7 +741,8 @@ class RigColmapIntegrator:
             learned_matcher = selected_matcher_type in {"ALIKED_LIGHTGLUE", "SIFT_LIGHTGLUE"}
             vocab_tree_path = str(getattr(self.settings, 'vocab_tree_path', '') or '').strip()
             allow_loop_detection = (not learned_matcher) or bool(vocab_tree_path)
-            overlap = "8" if stable else "12"
+            configured_overlap = int(getattr(self.settings, 'colmap_sequential_overlap', 10) or 10)
+            overlap = str(min(configured_overlap, 8) if stable else configured_overlap)
             loop_detection = "0" if (stable or not allow_loop_detection) else "1"
             matcher_args = [
                 "sequential_matcher",
@@ -724,6 +758,7 @@ class RigColmapIntegrator:
         if selected_matcher_type:
             matcher_args += ["--FeatureMatching.type", selected_matcher_type]
             matcher_args += selected_matcher_model_args
+        matcher_args += self._colmap_matcher_flag_args()
         return matcher_args
 
     def _run_hloc_aliked_lightglue_to_db(
@@ -1445,10 +1480,14 @@ class RigColmapIntegrator:
                         "--FeatureExtraction.gpu_index", gpu_idx_str,
                     ]
                     feature_args += camera_grouping_args
+                    feature_args += ["--ImageReader.camera_model", str(getattr(self.settings, 'colmap_camera_model', 'PINHOLE'))]
+                    feature_args += ["--FeatureExtraction.max_image_size", str(int(getattr(self.settings, 'colmap_max_image_size', 3200) or 3200))]
+                    feature_args += ["--SiftExtraction.max_num_features", str(int(getattr(self.settings, 'colmap_max_num_features', 8192) or 8192))]
                     if extraction_type is not None:
                         feature_args += ["--FeatureExtraction.type", extraction_type]
                     if perspectives_mask_dir.exists() and self._count_images_recursive(perspectives_mask_dir) > 0:
                         feature_args += ["--ImageReader.mask_path", str(perspectives_mask_dir)]
+                    feature_args += self._colmap_feature_flag_args()
 
                     matcher_model_args: List[str] = []
                     if use_lightglue_aliked:
@@ -1468,6 +1507,11 @@ class RigColmapIntegrator:
                             continue
 
                     try:
+                        feature_args = [feature_args[0]] + self._filter_supported_cli_args(
+                            colmap_bin,
+                            "feature_extractor",
+                            feature_args[1:],
+                        )
                         self._run_cli(
                             colmap_bin,
                             feature_args,
@@ -1531,11 +1575,26 @@ class RigColmapIntegrator:
                 reader_options = {}
                 if perspectives_mask_dir.exists() and self._count_images_recursive(perspectives_mask_dir) > 0:
                     reader_options["mask_path"] = str(perspectives_mask_dir)
+                extraction_options = pycolmap.FeatureExtractionOptions()
+                extraction_options.max_image_size = int(getattr(self.settings, 'colmap_max_image_size', 3200) or 3200)
+                extraction_options.use_gpu = bool(getattr(self.settings, 'use_gpu', True))
+                extraction_options.gpu_index = str(getattr(self.settings, 'gpu_index', -1))
+                extraction_options.sift.max_num_features = int(getattr(self.settings, 'colmap_max_num_features', 8192) or 8192)
+                pycolmap_device = pycolmap.Device.cuda if extraction_options.use_gpu else pycolmap.Device.cpu
+                logger.info(
+                    "[RigSfM] pycolmap feature extraction device=%s gpu_index=%s max_image_size=%s max_features=%s",
+                    'cuda' if extraction_options.use_gpu else 'cpu',
+                    extraction_options.gpu_index,
+                    extraction_options.max_image_size,
+                    extraction_options.sift.max_num_features,
+                )
                 pycolmap.extract_features(
                     str(database_path),
                     str(perspectives_dir),
                     reader_options=reader_options,
-                    camera_mode=pycolmap.CameraMode.SINGLE
+                    camera_mode=pycolmap.CameraMode.SINGLE,
+                    extraction_options=extraction_options,
+                    device=pycolmap_device,
                 )
             
             if reusing_existing_database:
@@ -1652,9 +1711,20 @@ class RigColmapIntegrator:
                 if progress_callback:
                     progress_callback("Matching features...")
 
+                matching_options = pycolmap.FeatureMatchingOptions()
+                matching_options.use_gpu = bool(getattr(self.settings, 'use_gpu', True))
+                matching_options.gpu_index = str(getattr(self.settings, 'gpu_index', -1))
+                pycolmap_device = pycolmap.Device.cuda if matching_options.use_gpu else pycolmap.Device.cpu
+                logger.info(
+                    "[RigSfM] pycolmap feature matching device=%s gpu_index=%s",
+                    'cuda' if matching_options.use_gpu else 'cpu',
+                    matching_options.gpu_index,
+                )
                 pycolmap.match_sequential(
                     str(database_path),
-                    pairing_options=pycolmap.SequentialPairingOptions(loop_detection=True)
+                    matching_options=matching_options,
+                    pairing_options=pycolmap.SequentialPairingOptions(loop_detection=True),
+                    device=pycolmap_device,
                 )
             
             # 5. Mapping
@@ -1720,7 +1790,7 @@ class RigColmapIntegrator:
                         "--database_path", str(database_path),
                         "--image_path", str(perspectives_dir),
                         "--output_path", str(sparse_path),
-                    ] + global_mapper_optional_args,
+                    ] + global_mapper_optional_args + self._colmap_mapper_flag_args(),
                     progress_callback,
                     "Running GLOMAP global mapper..."
                 )
@@ -1745,7 +1815,7 @@ class RigColmapIntegrator:
                             "--Mapper.ba_refine_focal_length", "0",
                             "--Mapper.ba_refine_principal_point", "0",
                             "--Mapper.ba_refine_extra_params", "0",
-                        ],
+                        ] + self._colmap_mapper_flag_args(),
                         progress_callback,
                         "Triangulating 3D points (COLMAP point_triangulator after GLOMAP)..."
                     )
@@ -1764,7 +1834,7 @@ class RigColmapIntegrator:
                             "--Mapper.ba_refine_focal_length", "0",
                             "--Mapper.ba_refine_principal_point", "0",
                             "--Mapper.ba_refine_extra_params", "0",
-                        ],
+                        ] + self._colmap_mapper_flag_args(),
                         progress_callback,
                         "Running incremental mapping fallback (reuse database)..."
                     )
@@ -1787,7 +1857,7 @@ class RigColmapIntegrator:
                         "--Mapper.ba_refine_focal_length", "0",
                         "--Mapper.ba_refine_principal_point", "0",
                         "--Mapper.ba_refine_extra_params", "0",
-                    ],
+                    ] + self._colmap_mapper_flag_args(),
                     progress_callback,
                     "Running incremental mapping (COLMAP CLI)..."
                 )

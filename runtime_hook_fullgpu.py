@@ -1,13 +1,44 @@
 """
-Runtime hook for 360ToolkitGS - Full GPU Version
-Sets up paths for PyTorch CUDA, ONNX Runtime CUDA, SDK, and FFmpeg
+Runtime hook for 360ToolkitGS.
+Sets up paths for ONNX Runtime CUDA, SDK, FFmpeg, and optional PyTorch assets.
 """
 
 import os
 import sys
+import glob
 
 # Fix OpenMP DLL conflict (libomp.dll vs libiomp5md.dll)
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+_DLL_DIR_HANDLES = []
+
+
+def _remember_dll_directory(path: str) -> None:
+    """Keep add_dll_directory handles alive for the lifetime of the process."""
+    if not hasattr(os, 'add_dll_directory'):
+        return
+    try:
+        _DLL_DIR_HANDLES.append(os.add_dll_directory(path))
+    except (OSError, FileNotFoundError):
+        pass
+
+
+def _has_full_torch_runtime(base_path: str) -> bool:
+    """Return True only when a real torch package is bundled, not just torch/lib."""
+    torch_dir = os.path.join(base_path, 'torch')
+    if not os.path.isdir(torch_dir):
+        return False
+
+    package_markers = [
+        os.path.join(torch_dir, '__init__.py'),
+        os.path.join(torch_dir, '__init__.pyc'),
+        os.path.join(torch_dir, 'version.py'),
+        os.path.join(torch_dir, 'version.pyc'),
+    ]
+    if any(os.path.exists(marker) for marker in package_markers):
+        return True
+
+    return bool(glob.glob(os.path.join(torch_dir, '_C*.pyd')))
 
 # ==============================================================================
 # CRITICAL: Preload MKL/BLAS DLLs for numpy in frozen app (Python 3.10+ Windows)
@@ -16,19 +47,17 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 # ==============================================================================
 if getattr(sys, 'frozen', False) and sys.platform == 'win32':
     _base = sys._MEIPASS
+    _has_torch_runtime = _has_full_torch_runtime(_base)
     # Add _internal to DLL search path
     if hasattr(os, 'add_dll_directory'):
-        try:
-            os.add_dll_directory(_base)
-        except (OSError, FileNotFoundError):
-            pass
+        _remember_dll_directory(_base)
+        _numpy_libs = os.path.join(_base, 'numpy.libs')
+        if os.path.isdir(_numpy_libs):
+            _remember_dll_directory(_numpy_libs)
         # Also add torch/lib subdir
         _torch_lib = os.path.join(_base, 'torch', 'lib')
-        if os.path.isdir(_torch_lib):
-            try:
-                os.add_dll_directory(_torch_lib)
-            except (OSError, FileNotFoundError):
-                pass
+        if _has_torch_runtime and os.path.isdir(_torch_lib):
+            _remember_dll_directory(_torch_lib)
     
     # Preload MKL DLLs in correct order via ctypes
     import ctypes
@@ -59,7 +88,7 @@ if getattr(sys, 'frozen', False) and sys.platform == 'win32':
     # torch._C.pyd tries to resolve its dependencies.
     # ======================================================================
     _torch_lib = os.path.join(_base, 'torch', 'lib')
-    if os.path.isdir(_torch_lib):
+    if _has_torch_runtime and os.path.isdir(_torch_lib):
         # Load in dependency order: base deps first, then torch libs
         _torch_dlls = [
             # CUDA runtime (no torch dependency, pure NVIDIA)
@@ -94,6 +123,46 @@ if getattr(sys, 'frozen', False) and sys.platform == 'win32':
                 except OSError:
                     pass  # Non-critical: some DLLs may fail but torch might still work
 
+    # ======================================================================
+    # CRITICAL: Preload ONNX Runtime + CUDA dependency DLLs via ctypes.
+    # Same pattern as MKL/torch above: force DLLs into the process module
+    # table so that onnxruntime_pybind11_state.pyd's implicit deps resolve.
+    # ======================================================================
+    _ort_capi = os.path.join(_base, 'onnxruntime', 'capi')
+    if os.path.isdir(_ort_capi):
+        _onnx_cuda_dlls = [
+            # CUDA runtime deps from _internal root
+            (_base, 'cudart64_12.dll'),
+            (_base, 'zlibwapi.dll'),
+            (_base, 'cublasLt64_12.dll'),
+            (_base, 'cublas64_12.dll'),
+            (_base, 'cufft64_11.dll'),
+            (_base, 'cudnn64_9.dll'),
+            (_base, 'cudnn_ops64_9.dll'),
+            (_base, 'cudnn_cnn64_9.dll'),
+            (_base, 'cudnn_adv64_9.dll'),
+            (_base, 'cudnn_graph64_9.dll'),
+            (_base, 'cudnn_heuristic64_9.dll'),
+            (_base, 'cudnn_engines_precompiled64_9.dll'),
+            (_base, 'cudnn_engines_runtime_compiled64_9.dll'),
+            # ONNX Runtime core from capi/
+            (_ort_capi, 'onnxruntime.dll'),
+            (_ort_capi, 'onnxruntime_providers_shared.dll'),
+            (_ort_capi, 'onnxruntime_providers_cuda.dll'),
+            (_ort_capi, 'onnxruntime_providers_tensorrt.dll'),
+        ]
+        _ort_loaded = 0
+        for _dir, _dll in _onnx_cuda_dlls:
+            _dll_path = os.path.join(_dir, _dll)
+            if os.path.exists(_dll_path):
+                try:
+                    ctypes.CDLL(_dll_path)
+                    _ort_loaded += 1
+                except OSError:
+                    pass
+        if _ort_loaded:
+            print(f"[OK] Preloaded {_ort_loaded} CUDA/ONNX DLLs via ctypes")
+
 # ==============================================================================
 # torch.distributed: INCLUDED in PYZ archive but PYZ-patched to a minimal stub.
 # The stub's is_available() returns False, so no distributed code runs.
@@ -122,19 +191,23 @@ def setup_bundled_paths():
     ffmpeg_path = os.path.join(base_path, 'ffmpeg')
     onnx_capi_path = os.path.join(base_path, 'onnxruntime', 'capi')
     torch_lib_path = os.path.join(base_path, 'torch', 'lib')
+    has_torch_runtime = _has_full_torch_runtime(base_path)
+    numpy_libs_path = os.path.join(base_path, 'numpy.libs')
     numpy_core_path = os.path.join(base_path, 'numpy', 'core')
     numpy_linalg_path = os.path.join(base_path, 'numpy', 'linalg')
     
     # Build PATH with all DLL locations
     dll_paths = [
         internal_path,          # Main binaries + MKL DLLs
-        torch_lib_path,         # PyTorch CUDA DLLs
         sdk_bin_path,           # Insta360 SDK
         ffmpeg_path,            # FFmpeg
         onnx_capi_path,         # ONNX Runtime CUDA
+        numpy_libs_path,        # NumPy/OpenBLAS runtime DLLs
         numpy_core_path,        # NumPy core
         numpy_linalg_path,      # NumPy linalg
     ]
+    if has_torch_runtime:
+        dll_paths.insert(1, torch_lib_path)
     
     # Add CUDA from system if available
     cuda_paths = [
@@ -157,15 +230,12 @@ def setup_bundled_paths():
     # Windows: Add DLL directories explicitly (Python 3.8+)
     if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
         for p in new_paths:
-            try:
-                os.add_dll_directory(p)
-            except (OSError, FileNotFoundError):
-                pass
+            _remember_dll_directory(p)
     
     return base_path, app_path
 
-def setup_torch_env():
-    """Set environment variables for PyTorch CUDA performance.
+def setup_torch_env(base_path: str):
+    """Set environment variables for PyTorch CUDA performance when bundled.
     
     IMPORTANT: Do NOT import torch here! In PyInstaller frozen apps, importing
     torch in a runtime hook can cause C-extension double-initialization errors
@@ -174,6 +244,12 @@ def setup_torch_env():
     Instead, we set environment variables that torch will pick up when it's
     actually imported by the application code (in _detect_gpu or _test_torch_cuda).
     """
+    torch_lib_path = os.path.join(base_path, 'torch', 'lib')
+    if not (_has_full_torch_runtime(base_path) and os.path.isdir(torch_lib_path)):
+        os.environ['_360TK_RUNTIME_HOOK'] = '1'
+        print("[OK] ONNX-only runtime detected; skipping PyTorch environment setup")
+        return False
+
     # Set memory allocation strategy for CUDA
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
     
@@ -187,23 +263,18 @@ def setup_torch_env():
     return True
 
 def setup_onnx_cuda():
-    """Configure ONNX Runtime for GPU inference."""
-    try:
-        import onnxruntime as ort
-        
-        providers = ort.get_available_providers()
-        
-        if 'CUDAExecutionProvider' in providers:
-            print(f"[GPU] ONNX Runtime CUDA available")
-            return True
-        elif 'TensorrtExecutionProvider' in providers:
-            print(f"[GPU] ONNX Runtime TensorRT available")
-            return True
-        else:
-            print(f"[CPU] ONNX Runtime providers: {providers}")
-    except Exception as e:
-        print(f"[WARN] ONNX Runtime setup: {e}")
-    
+    """Defer ONNX Runtime probing until normal application startup."""
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
+    ort_capi_path = os.path.join(base_path, 'onnxruntime', 'capi')
+    if os.path.isdir(ort_capi_path):
+        print("[OK] ONNX Runtime packaged (probe deferred to app startup)")
+        return True
+
+    print("[WARN] ONNX Runtime packaged files not found")
     return False
 
 def setup_sdk_path():
@@ -220,11 +291,8 @@ def setup_sdk_path():
 try:
     base_path, app_path = setup_bundled_paths()
     setup_sdk_path()
-    setup_torch_env()
-    onnx_gpu = setup_onnx_cuda()
-    
-    if onnx_gpu:
-        print("[OK] ONNX Runtime GPU available")
+    setup_torch_env(base_path)
+    setup_onnx_cuda()
     
     print("[OK] Runtime hook complete - DLL paths configured")
         

@@ -8,6 +8,7 @@ import sys
 import os
 import logging
 import shlex
+import importlib
 from pathlib import Path
 from datetime import datetime
 
@@ -44,6 +45,7 @@ from src.ui.widgets import (
     MediaProcessingPanel,
 )
 from src.ui.preview_panels import EquirectPreviewWidget
+from src.utils.runtime_backends import has_bundled_onnx_runtime, has_usable_torch_runtime, is_usable_torch_module
 
 logger = logging.getLogger(__name__)
 
@@ -350,44 +352,57 @@ class MainWindow(QMainWindow):
         The runtime hook only sets DLL paths and env vars - torch import
         is deferred here to avoid C-extension double-initialization errors.
         """
+        import importlib.util
         import logging
-        import sys as _sys
         gpu_logger = logging.getLogger(__name__)
         try:
-            import torch
-            
-            gpu_logger.info(f"[GPU Detect] PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}")
-            if torch.cuda.is_available():
-                # Configure PyTorch performance (normally done in runtime hook)
-                torch.backends.cuda.matmul.allow_tf32 = True
-                torch.backends.cudnn.allow_tf32 = True
-                torch.backends.cudnn.benchmark = True
-                
-                name = torch.cuda.get_device_name(0)
-                gpu_logger.info(f"[GPU Detect] GPU: {name}")
-                # Try tensor test for real compatibility
-                try:
-                    t = torch.zeros(1, device='cuda') + 1
-                    del t
-                    gpu_logger.info(f"[GPU Detect] CUDA kernel test PASSED - full GPU acceleration enabled")
-                    self.gpu_status_label.setText(f"  GPU: {name}")
-                    self.gpu_status_label.setProperty("status", "ok")
-                    self._refresh_widget_style(self.gpu_status_label)
-                except Exception as e:
-                    gpu_logger.warning(f"[GPU Detect] CUDA kernel test FAILED: {e}")
-                    self.gpu_status_label.setText(f"  GPU: {name} (CPU mode)")
-                    self.gpu_status_label.setProperty("status", "warn")
-                    self._refresh_widget_style(self.gpu_status_label)
-            else:
-                gpu_logger.info("[GPU Detect] CUDA not available - CPU only mode")
-                self.gpu_status_label.setText("  GPU: CPU only")
+            if has_bundled_onnx_runtime():
+                self.gpu_status_label.setText("  GPU: ONNX packaged, checked on use")
                 self.gpu_status_label.setProperty("status", "warn")
                 self._refresh_widget_style(self.gpu_status_label)
+                return
+
+            if importlib.util.find_spec('onnxruntime') is not None:
+                try:
+                    import onnxruntime as ort
+                    providers = ort.get_available_providers()
+                    gpu_logger.info("[GPU Detect] ONNX Runtime providers: %s", providers)
+                    if 'CUDAExecutionProvider' in providers:
+                        self.gpu_status_label.setText("  GPU: CUDA ready (ONNX/COLMAP)")
+                        self.gpu_status_label.setProperty("status", "ok")
+                        self._refresh_widget_style(self.gpu_status_label)
+                        return
+                except Exception as onnx_error:
+                    gpu_logger.warning("[GPU Detect] ONNX Runtime unavailable: %s", onnx_error)
+
+            if has_usable_torch_runtime():
+                try:
+                    import torch
+                    if not is_usable_torch_module(torch):
+                        raise ImportError("incomplete torch runtime")
+                    gpu_logger.info("[GPU Detect] PyTorch %s, CUDA available: %s", torch.__version__, torch.cuda.is_available())
+                    if torch.cuda.is_available():
+                        name = torch.cuda.get_device_name(0)
+                        self.gpu_status_label.setText(f"  GPU: {name}")
+                        self.gpu_status_label.setProperty("status", "ok")
+                        self._refresh_widget_style(self.gpu_status_label)
+                        return
+                except Exception as torch_error:
+                    gpu_logger.warning("[GPU Detect] PyTorch probe unavailable: %s", torch_error)
+
+            if Path(os.environ.get('WINDIR', 'C:/Windows')).joinpath('System32', 'nvcuda.dll').exists():
+                self.gpu_status_label.setText("  GPU: NVIDIA driver detected")
+                self.gpu_status_label.setProperty("status", "warn")
+                self._refresh_widget_style(self.gpu_status_label)
+                return
+
+            gpu_logger.info("[GPU Detect] No CUDA-capable runtime backend available")
+            self.gpu_status_label.setText("  GPU: CPU only")
+            self.gpu_status_label.setProperty("status", "warn")
+            self._refresh_widget_style(self.gpu_status_label)
         except Exception as e:
-            import traceback
-            gpu_logger.warning(f"[GPU Detect] PyTorch not available: {e}")
-            gpu_logger.warning(f"[GPU Detect] Full traceback:\n{traceback.format_exc()}")
-            self.gpu_status_label.setText("  GPU: PyTorch N/A")
+            gpu_logger.warning(f"[GPU Detect] Runtime backend probe failed: {e}")
+            self.gpu_status_label.setText("  GPU: Backend probe failed")
             self.gpu_status_label.setProperty("status", "error")
             self._refresh_widget_style(self.gpu_status_label)
     
@@ -1064,17 +1079,17 @@ class MainWindow(QMainWindow):
 
         self.masking_engine_combo = QComboBox()
         self.masking_engine_combo.addItem("YOLO (ONNX) - Fast", "yolo_onnx")
-        self.masking_engine_combo.addItem("YOLO (PyTorch) - Full", "yolo_pytorch")
-        self.masking_engine_combo.addItem("SAM ViT-B - Best Quality", "sam_vitb")
-        self.masking_engine_combo.addItem("YOLO+SAM Hybrid - Best", "hybrid")
-        self.masking_engine_combo.setCurrentIndex(3)
+        self.masking_engine_combo.setCurrentIndex(0)
         self.masking_engine_combo.setMinimumWidth(280)
         self.masking_engine_combo.currentIndexChanged.connect(self.on_masking_engine_changed)
         card_model.addWidget(FormRow("Masking Engine:", self.masking_engine_combo))
         
-        self.engine_description_label = QLabel("NMS-free inference | 3-4x faster | CUDA accelerated")
+        self.engine_description_label = QLabel("ONNX-first runtime | smallest packaged build | CUDA when available")
         self.engine_description_label.setProperty("role", "mutedSmall")
         card_model.addWidget(self.engine_description_label)
+        self.masking_runtime_label = QLabel("Runtime: detecting ONNX / PyTorch backends...")
+        self.masking_runtime_label.setProperty("role", "mutedSmall")
+        card_model.addWidget(self.masking_runtime_label)
         
         # Model size
         self.model_size_container = QWidget()
@@ -1084,7 +1099,7 @@ class MainWindow(QMainWindow):
         self.model_size_combo.addItem("Nano (10MB) - Fastest", "nano")
         self.model_size_combo.addItem("Small (40MB) - Balanced", "small")
         self.model_size_combo.addItem("Medium (90MB) - Best", "medium")
-        self.model_size_combo.setCurrentIndex(2)
+        self.model_size_combo.setCurrentIndex(1)
         self.model_size_combo.setFixedWidth(240)
         ms_layout.addWidget(FormRow("Model Size:", self.model_size_combo))
         card_model.addWidget(self.model_size_container)
@@ -1097,7 +1112,7 @@ class MainWindow(QMainWindow):
         self.confidence_spin.setSingleStep(0.05)
         self.confidence_spin.setFixedWidth(80)
         conf_row.addWidget(self.confidence_spin)
-        conf_hint = QLabel("(0.5-0.7 recommended)")
+        conf_hint = QLabel("(common range: 0.5-0.7)")
         conf_hint.setProperty("role", "muted")
         conf_row.addWidget(conf_hint)
         conf_row.addStretch()
@@ -1189,7 +1204,7 @@ class MainWindow(QMainWindow):
         # ── Tool selector ─────────────────────────────────────────────────────
         card_tool = CardWidget("Reconstruction Tool")
         self.recon_tool_combo = QComboBox()
-        self.recon_tool_combo.addItem("COLMAP + ALIKED  (Perspective — Recommended)", "colmap")
+        self.recon_tool_combo.addItem("COLMAP / pycolmap  (Perspective)", "colmap")
         self.recon_tool_combo.addItem("SphereSfM  (Panorama SfM — Equirectangular)", "spheresfm")
         self.recon_tool_combo.setCurrentIndex(0)
         self.recon_tool_combo.setMinimumWidth(340)
@@ -1198,6 +1213,10 @@ class MainWindow(QMainWindow):
         self.recon_tool_desc = QLabel("Perspective Reconstruction | COLMAP GPU on split images | Universal output")
         self.recon_tool_desc.setProperty("role", "mutedSmall")
         card_tool.addWidget(self.recon_tool_desc)
+        self.recon_backend_label = QLabel("Backend: detecting pycolmap / external COLMAP CLI availability...")
+        self.recon_backend_label.setProperty("role", "mutedSmall")
+        self.recon_backend_label.setWordWrap(True)
+        card_tool.addWidget(self.recon_backend_label)
 
         _open_settings_btn = QPushButton("Manage in Settings")
         _open_settings_btn.setFixedWidth(160)
@@ -1220,14 +1239,19 @@ class MainWindow(QMainWindow):
         card_colmap.addWidget(self.use_gpu_colmap_check)
 
         self.colmap_feature_extractor_combo = QComboBox()
-        self.colmap_feature_extractor_combo.addItem("ALIKED (Learned — Recommended)", "aliked")
-        self.colmap_feature_extractor_combo.addItem("SIFT (Classic)", "sift")
+        self.colmap_feature_extractor_combo.addItem("Automatic", "auto")
         self.colmap_feature_extractor_combo.setCurrentIndex(0)
-        self.colmap_feature_extractor_combo.setMinimumWidth(280)
-        card_colmap.addWidget(FormRow("Feature Extractor:", self.colmap_feature_extractor_combo))
+        self.colmap_feature_extractor_combo.setVisible(False)
+
+        colmap_hint = QLabel(
+            "Learned-vs-classic extraction is handled automatically. Use the main options below and pass version-specific flags directly to the customer-installed binary when needed."
+        )
+        colmap_hint.setProperty("role", "mutedSmall")
+        colmap_hint.setWordWrap(True)
+        card_colmap.addWidget(colmap_hint)
 
         self.mapping_backend_combo = QComboBox()
-        self.mapping_backend_combo.addItem("GLOMAP — Global Mapper (Recommended)", "glomap")
+        self.mapping_backend_combo.addItem("GLOMAP — Global Mapper", "glomap")
         self.mapping_backend_combo.addItem("COLMAP Incremental", "colmap")
         self.mapping_backend_combo.setCurrentIndex(0)
         self.mapping_backend_combo.setMinimumWidth(280)
@@ -1254,7 +1278,7 @@ class MainWindow(QMainWindow):
         self.colmap_max_image_size_spin.setRange(512, 9999)
         self.colmap_max_image_size_spin.setValue(3200)
         self.colmap_max_image_size_spin.setSuffix(" px")
-        self.colmap_max_image_size_spin.setToolTip("--ImageReader.max_image_size")
+        self.colmap_max_image_size_spin.setToolTip("--FeatureExtraction.max_image_size")
         _cp_nums.addWidget(QLabel("Max Image Size:"), 0, 0)
         _cp_nums.addWidget(self.colmap_max_image_size_spin, 0, 1)
         self.colmap_max_features_spin = QSpinBox()
@@ -1289,26 +1313,47 @@ class MainWindow(QMainWindow):
 
         self.enable_hloc_fallback_check = QCheckBox("Enable HLOC fallback (ALIKED + LightGlue)")
         self.enable_hloc_fallback_check.setChecked(True)
-        card_colmap.addWidget(self.enable_hloc_fallback_check)
+        self.enable_hloc_fallback_check.setVisible(False)
 
         self.prefer_colmap_learned_check = QCheckBox("Prefer COLMAP built-in ALIKED (over HLOC)")
         self.prefer_colmap_learned_check.setChecked(False)
-        card_colmap.addWidget(self.prefer_colmap_learned_check)
+        self.prefer_colmap_learned_check.setVisible(False)
 
         self.require_learned_pipeline_check = QCheckBox("All-or-fail: require learned pipeline")
         self.require_learned_pipeline_check.setChecked(False)
-        card_colmap.addWidget(self.require_learned_pipeline_check)
+        self.require_learned_pipeline_check.setVisible(False)
 
         _sep_c3 = _make_divider()
         card_colmap.addWidget(_sep_c3)
 
+        self.colmap_feature_flags_edit = QLineEdit()
+        self.colmap_feature_flags_edit.setPlaceholderText(
+            "e.g. --ImageReader.camera_model PINHOLE --ImageReader.max_image_size 3200"
+        )
+        card_colmap.addWidget(FormRow("Feature Flags:", self.colmap_feature_flags_edit))
+
+        self.colmap_matcher_flags_edit = QLineEdit()
+        self.colmap_matcher_flags_edit.setPlaceholderText(
+            "e.g. --SequentialMatching.overlap 10 --SequentialMatching.loop_detection 0"
+        )
+        card_colmap.addWidget(FormRow("Matcher Flags:", self.colmap_matcher_flags_edit))
+
+        self.colmap_mapper_flags_edit = QLineEdit()
+        self.colmap_mapper_flags_edit.setPlaceholderText(
+            "e.g. --Mapper.min_num_matches 15 --Mapper.ba_refine_focal_length 0"
+        )
+        card_colmap.addWidget(FormRow("Mapper Flags:", self.colmap_mapper_flags_edit))
+
         self.colmap_extra_args_edit = QLineEdit()
         self.colmap_extra_args_edit.setPlaceholderText(
-            "e.g. --SiftExtraction.first_octave -1 --mapper.abs_pose_min_inlier_ratio 0.25"
+            "Optional global overrides appended to COLMAP commands"
         )
-        card_colmap.addWidget(FormRow("Extra Arguments:", self.colmap_extra_args_edit))
-        _colmap_extra_hint = QLabel("Passed directly to COLMAP. Separate flags with spaces.")
+        card_colmap.addWidget(FormRow("Global Overrides:", self.colmap_extra_args_edit))
+        _colmap_extra_hint = QLabel(
+            "These flags are passed directly to the selected COLMAP binary. Keep them compatible with the installed version."
+        )
         _colmap_extra_hint.setProperty("role", "mutedSmall")
+        _colmap_extra_hint.setWordWrap(True)
         card_colmap.addWidget(_colmap_extra_hint)
 
         _cp_layout.addWidget(card_colmap)
@@ -1333,7 +1378,7 @@ class MainWindow(QMainWindow):
         card_sphere.addWidget(self.use_gpu_spheresfm_check)
 
         self.sphere_camera_model_combo = QComboBox()
-        self.sphere_camera_model_combo.addItem("SPHERE (Recommended)", "SPHERE")
+        self.sphere_camera_model_combo.addItem("SPHERE", "SPHERE")
         self.sphere_camera_model_combo.addItem("SIMPLE_SPHERE", "SIMPLE_SPHERE")
         self.sphere_camera_model_combo.addItem("FULL_OPENCV (Fisheye)", "FULL_OPENCV")
         self.sphere_camera_model_combo.setCurrentIndex(0)
@@ -1346,7 +1391,7 @@ class MainWindow(QMainWindow):
         card_sphere.addWidget(FormRow("Feature Extractor:", self.sphere_feature_extractor_combo))
 
         self.sphere_matching_combo = QComboBox()
-        self.sphere_matching_combo.addItem("Sequential (ordered frames — recommended)", "sequential")
+        self.sphere_matching_combo.addItem("Sequential (ordered frames)", "sequential")
         self.sphere_matching_combo.addItem("Exhaustive (all pairs)", "exhaustive")
         self.sphere_matching_combo.addItem("Vocab Tree (large sets)", "vocab_tree")
         self.sphere_matching_combo.setCurrentIndex(0)  # Sequential is best for video sequences
@@ -1398,11 +1443,29 @@ class MainWindow(QMainWindow):
         card_sphere.addWidget(_sep_s3)
 
         _sphere_tuning_hint = QLabel(
-            "Advanced tuning is exposed as form controls instead of raw command-line flags."
+            "Use the main controls here and pass any version-specific SphereSfM flags directly below."
         )
         _sphere_tuning_hint.setWordWrap(True)
         _sphere_tuning_hint.setProperty("role", "mutedSmall")
         card_sphere.addWidget(_sphere_tuning_hint)
+
+        self.sphere_feature_flags_edit = QLineEdit()
+        self.sphere_feature_flags_edit.setPlaceholderText(
+            "e.g. --ImageReader.single_camera 1 --SiftExtraction.max_num_orientations 2"
+        )
+        card_sphere.addWidget(FormRow("Feature Flags:", self.sphere_feature_flags_edit))
+
+        self.sphere_matcher_flags_edit = QLineEdit()
+        self.sphere_matcher_flags_edit.setPlaceholderText(
+            "e.g. --SequentialMatching.overlap 10 --SiftMatching.max_ratio 0.8"
+        )
+        card_sphere.addWidget(FormRow("Matcher Flags:", self.sphere_matcher_flags_edit))
+
+        self.sphere_mapper_flags_edit = QLineEdit()
+        self.sphere_mapper_flags_edit.setPlaceholderText(
+            "e.g. --Mapper.init_min_num_inliers 50 --Mapper.multiple_models 0"
+        )
+        card_sphere.addWidget(FormRow("Mapper Flags:", self.sphere_mapper_flags_edit))
 
         feature_group = QGroupBox("Feature Extraction Tuning")
         feature_layout = QGridLayout(feature_group)
@@ -1629,6 +1692,9 @@ class MainWindow(QMainWindow):
         mapper_layout.addWidget(self.sphere_filter_min_tri_angle_spin, 9, 1)
 
         card_sphere.addWidget(mapper_group)
+        feature_group.setVisible(False)
+        matcher_group.setVisible(False)
+        mapper_group.setVisible(False)
 
         _sp_layout.addWidget(card_sphere)
         _sp_layout.addStretch()
@@ -2160,6 +2226,9 @@ class MainWindow(QMainWindow):
     
     def on_settings_changed(self):
         self.apply_theme()
+        self._detect_gpu()
+        self._update_masking_runtime_status()
+        self._update_reconstruction_backend_status()
         sdk_path = self.settings.get_sdk_path()
         ffmpeg_path = self.settings.get_ffmpeg_path()
         spheresfm_path = self.settings.get_spheresfm_path()
@@ -2280,6 +2349,9 @@ class MainWindow(QMainWindow):
                 'sequential_overlap': self.colmap_overlap_spin.value(),
                 'matching_method': self.colmap_matching_combo.currentData(),
                 'feature_extractor': self.colmap_feature_extractor_combo.currentData(),
+                    'feature_flags': self.colmap_feature_flags_edit.text().strip(),
+                    'matcher_flags': self.colmap_matcher_flags_edit.text().strip(),
+                    'mapper_flags': self.colmap_mapper_flags_edit.text().strip(),
                 'extra_args': self.colmap_extra_args_edit.text().strip(),
             },
             'spheresfm_params': {
@@ -2534,6 +2606,23 @@ class MainWindow(QMainWindow):
                 backend_idx = self.mapping_backend_combo.findData(config['mapping_backend'])
                 if backend_idx >= 0:
                     self.mapping_backend_combo.setCurrentIndex(backend_idx)
+            if 'colmap_params' in config:
+                colmap_params = config['colmap_params']
+                camera_idx = self.colmap_camera_model_combo.findData(colmap_params.get('camera_model', 'PINHOLE'))
+                if camera_idx >= 0:
+                    self.colmap_camera_model_combo.setCurrentIndex(camera_idx)
+                self.colmap_single_camera_check.setChecked(bool(colmap_params.get('single_camera', False)))
+                self.colmap_max_image_size_spin.setValue(int(colmap_params.get('max_image_size', 3200)))
+                self.colmap_max_features_spin.setValue(int(colmap_params.get('max_num_features', 8192)))
+                self.colmap_min_matches_spin.setValue(int(colmap_params.get('min_num_matches', 15)))
+                self.colmap_overlap_spin.setValue(int(colmap_params.get('sequential_overlap', 10)))
+                matching_idx = self.colmap_matching_combo.findData(colmap_params.get('matching_method', 'exhaustive'))
+                if matching_idx >= 0:
+                    self.colmap_matching_combo.setCurrentIndex(matching_idx)
+                self.colmap_feature_flags_edit.setText(str(colmap_params.get('feature_flags', '')))
+                self.colmap_matcher_flags_edit.setText(str(colmap_params.get('matcher_flags', '')))
+                self.colmap_mapper_flags_edit.setText(str(colmap_params.get('mapper_flags', '')))
+                self.colmap_extra_args_edit.setText(str(colmap_params.get('extra_args', '')))
             if 'spheresfm_params' in config:
                 sfm_params = config['spheresfm_params']
                 camera_idx = self.sphere_camera_model_combo.findData(sfm_params.get('camera_model', 'SPHERE'))
@@ -2612,21 +2701,15 @@ class MainWindow(QMainWindow):
     
     def on_masking_engine_changed(self, index: int):
         engine = self.masking_engine_combo.currentData()
-        if engine == "sam_vitb":
-            self.model_size_container.setVisible(False)
-            self.engine_description_label.setText("Superior segmentation quality | Best edge precision")
-            self.confidence_spin.setEnabled(False)
-        elif engine == "hybrid":
-            self.model_size_container.setVisible(False)
-            self.engine_description_label.setText("YOLO detection + SAM segmentation | Pixel-perfect edges")
+        if engine == "yolo_onnx":
+            self.model_size_container.setVisible(True)
             self.confidence_spin.setEnabled(True)
+            self.engine_description_label.setText("ONNX-first runtime | smallest packaged build | CUDA when available")
         else:
             self.model_size_container.setVisible(True)
             self.confidence_spin.setEnabled(True)
-            if engine == "yolo_onnx":
-                self.engine_description_label.setText("NMS-free inference | 3-4x faster | CUDA accelerated")
-            else:
-                self.engine_description_label.setText("Full-featured YOLO | PyTorch backend")
+            self.engine_description_label.setText("Masking runtime selected from legacy config")
+        self._update_masking_runtime_status()
 
     def _on_cuda_toggled(self, enabled: bool):
         """Enable or disable CUDA for masking operations at runtime.
@@ -2665,7 +2748,7 @@ class MainWindow(QMainWindow):
         self.recon_params_stack.setCurrentIndex(index)
         if index == 0:
             self.recon_tool_desc.setText(
-                "Perspective reconstruction on split images using COLMAP GPU."
+                "Perspective reconstruction on split images using pycolmap, with external COLMAP CLI/GLOMAP when available."
             )
             self.output_info_label.setText(
                 "Output: <output_dir>/reconstruction/sparse/0/"
@@ -2677,7 +2760,49 @@ class MainWindow(QMainWindow):
             self.output_info_label.setText(
                 "Output: <output_dir>/reconstruction/sparse/0/  (SphereSfM SPHERE model)"
             )
+        self._update_reconstruction_backend_status()
         self._update_recon_stack_height()
+
+    def _update_masking_runtime_status(self):
+        if not hasattr(self, 'masking_runtime_label'):
+            return
+
+        details = []
+        try:
+            if has_bundled_onnx_runtime():
+                details.append('ONNX Runtime: packaged (checked on use)')
+            elif importlib.util.find_spec('onnxruntime') is not None:
+                import onnxruntime as ort
+                providers = ort.get_available_providers()
+                details.append('ONNX Runtime: CUDA ready' if 'CUDAExecutionProvider' in providers else 'ONNX Runtime: CPU only')
+            else:
+                details.append('ONNX Runtime: unavailable')
+        except Exception as exc:
+            details.append(f'ONNX Runtime: error ({exc})')
+
+        details.append('PyTorch: installed' if has_usable_torch_runtime() else 'PyTorch: not bundled')
+        self.masking_runtime_label.setText(' | '.join(details))
+
+    def _update_reconstruction_backend_status(self):
+        if not hasattr(self, 'recon_backend_label'):
+            return
+
+        details = []
+        details.append('pycolmap: available' if importlib.util.find_spec('pycolmap') is not None else 'pycolmap: unavailable')
+
+        colmap_path = self.settings.get_colmap_gpu_path()
+        if colmap_path and colmap_path.exists():
+            details.append(f'COLMAP CLI: {colmap_path.name}')
+        else:
+            details.append('COLMAP CLI: auto-download/system lookup')
+
+        spheresfm_path = self.settings.get_spheresfm_path()
+        if spheresfm_path and spheresfm_path.exists():
+            details.append(f'SphereSfM: {spheresfm_path.name}')
+        else:
+            details.append('SphereSfM: auto-download/system lookup')
+
+        self.recon_backend_label.setText('Backend: ' + ' | '.join(details))
 
     def _update_recon_stack_height(self):
         if not hasattr(self, 'recon_params_stack'):
@@ -2721,6 +2846,8 @@ class MainWindow(QMainWindow):
         return str(value)
 
     def _build_spheresfm_feature_flags(self) -> str:
+        if hasattr(self, 'sphere_feature_flags_edit') and self.sphere_feature_flags_edit.text().strip():
+            return self.sphere_feature_flags_edit.text().strip()
         parts = [
             "--ImageReader.single_camera", "1" if self.sphere_single_camera_check.isChecked() else "0",
             "--SiftExtraction.max_num_orientations", str(self.sphere_max_orientations_spin.value()),
@@ -2730,6 +2857,8 @@ class MainWindow(QMainWindow):
         return " ".join(parts)
 
     def _build_spheresfm_matcher_flags(self) -> str:
+        if hasattr(self, 'sphere_matcher_flags_edit') and self.sphere_matcher_flags_edit.text().strip():
+            return self.sphere_matcher_flags_edit.text().strip()
         parts = [
             "--SequentialMatching.quadratic_overlap", "1" if self.sphere_quadratic_overlap_check.isChecked() else "0",
             "--SequentialMatching.loop_detection", "1" if self.sphere_loop_detection_check.isChecked() else "0",
@@ -2744,6 +2873,8 @@ class MainWindow(QMainWindow):
         return " ".join(parts)
 
     def _build_spheresfm_mapper_flags(self) -> str:
+        if hasattr(self, 'sphere_mapper_flags_edit') and self.sphere_mapper_flags_edit.text().strip():
+            return self.sphere_mapper_flags_edit.text().strip()
         parts = [
             "--Mapper.ba_refine_focal_length", "1" if self.sphere_refine_focal_check.isChecked() else "0",
             "--Mapper.ba_refine_principal_point", "1" if self.sphere_refine_principal_point_check.isChecked() else "0",
@@ -2767,6 +2898,13 @@ class MainWindow(QMainWindow):
         return " ".join(parts)
 
     def _apply_spheresfm_flag_config(self, sfm_params: dict):
+        if hasattr(self, 'sphere_feature_flags_edit'):
+            self.sphere_feature_flags_edit.setText(str(sfm_params.get('feature_flags', DEFAULT_SPHERESFM_FEATURE_FLAGS)))
+        if hasattr(self, 'sphere_matcher_flags_edit'):
+            self.sphere_matcher_flags_edit.setText(str(sfm_params.get('matcher_flags', DEFAULT_SPHERESFM_MATCHER_FLAGS)))
+        if hasattr(self, 'sphere_mapper_flags_edit'):
+            self.sphere_mapper_flags_edit.setText(str(sfm_params.get('mapper_flags', DEFAULT_SPHERESFM_MAPPER_FLAGS)))
+
         feature_values = self._parse_cli_flag_values(str(sfm_params.get('feature_flags', DEFAULT_SPHERESFM_FEATURE_FLAGS)))
         matcher_values = self._parse_cli_flag_values(str(sfm_params.get('matcher_flags', DEFAULT_SPHERESFM_MATCHER_FLAGS)))
         mapper_values = self._parse_cli_flag_values(str(sfm_params.get('mapper_flags', DEFAULT_SPHERESFM_MAPPER_FLAGS)))
@@ -3253,6 +3391,9 @@ class MainWindow(QMainWindow):
                     'sequential_overlap': self.colmap_overlap_spin.value(),
                     'matching_method': self.colmap_matching_combo.currentData(),
                     'feature_extractor': self.colmap_feature_extractor_combo.currentData(),
+                    'feature_flags': self.colmap_feature_flags_edit.text().strip(),
+                    'matcher_flags': self.colmap_matcher_flags_edit.text().strip(),
+                    'mapper_flags': self.colmap_mapper_flags_edit.text().strip(),
                     'extra_args': self.colmap_extra_args_edit.text().strip(),
                 },
                 'spheresfm_params': {

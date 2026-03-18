@@ -17,6 +17,8 @@ import logging
 from typing import Optional, Tuple, List, Dict
 import sys
 
+from ..utils.runtime_backends import is_usable_torch_module
+
 # Defer torch/ultralytics imports to avoid PyInstaller analysis issues
 # These will be imported at runtime when actually needed
 TORCH_AVAILABLE = False
@@ -30,6 +32,8 @@ if not getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
     # Either running in normal Python OR running from frozen exe
     try:
         import torch
+        if not is_usable_torch_module(torch):
+            raise ImportError("incomplete torch runtime")
         try:
             import torch.distributed as _dist
             if not hasattr(_dist, 'ProcessGroup'):

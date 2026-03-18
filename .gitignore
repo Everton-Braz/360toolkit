@@ -91,3 +91,54 @@ downloads/
 
 # User settings (machine-specific)
 src/config/user_settings.json
+
+# Virtual environments (dotfiles variant)
+.venv/
+.env/
+
+# Windows Sandbox configs (machine-specific)
+*.wsb
+
+# Planning / prompt docs (not source code)
+plan-*.md
+plan-*.prompt.md
+
+# Root-level one-off diagnostic / utility scripts
+check_colmap_db.py
+check_gpu_compatibility.py
+check_metadata.py
+diagnose_gpu_bottleneck.py
+monitor_gpu_usage.py
+setup_gpu_environment.py
+verify_build_gpu.py
+verify_gpu_build.py
+verify_gpu_realtime.py
+verify_optimizations.py
+verify_rig_sfm.py
+extract_more_frames.py
+export_to_lichtfeld.py
+rename_masks_for_lichtfeld.py
+show_masking_options.py
+fix_gpu_support.bat
+update_pytorch_for_rtx50.bat
+run_full_pipeline.py
+
+# Root-level one-off test scripts (SphereSfM / diagnostics)
+test_spheresfm_lenient.py
+test_spheresfm_sequential.py
+test_spheresfm_mandarabyyoo.py
+test_production_fix.py
+test_cpu_worker.py
+test_build_functionality.py
+test_transform_direct.py
+
+# Internal planning / session notes (not product docs)
+GPU_OPTIMIZATION_REPORT.md
+GPU_SETUP_GUIDE.md
+SETUP_MULTI_GPU.md
+ENVIRONMENT_INFO.md
+GPU_COMPATIBILITY.md
+PERFORMANCE_OPTIMIZATION_PLAN.md
+PREMIUM_FEATURES_STRATEGY.md
+BUILD_OPTIONS.md
+build_gpu_fix.txt

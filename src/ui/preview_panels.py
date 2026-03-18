@@ -912,9 +912,17 @@ class EquirectPreviewWidget(QWidget):
         has_path = bool(self._video_path)
         self._extract_btn.setEnabled(has_path)
         if has_path:
-            self._status_lbl.setText("Ready — extracting preview frame…")
-            if self._video_path.lower().endswith(('.insv', '.mp4')):
+            suffix = Path(self._video_path).suffix.lower()
+            if suffix == '.insv':
+                self._status_lbl.setText("Ready — extracting preview frame…")
                 self._extract_preview()
+            elif suffix in {'.mp4', '.mov', '.avi', '.mkv'}:
+                self._status_lbl.setText("Ready — loading video still preview…")
+                self._extract_preview()
+            elif suffix in {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}:
+                self.load_image_path(self._video_path)
+            else:
+                self._status_lbl.setText("Load input file to enable preview")
         else:
             self._status_lbl.setText("Load input file to enable preview")
 
@@ -1023,6 +1031,11 @@ class EquirectPreviewWidget(QWidget):
             self._status_lbl.setText("Input file not found")
             return
 
+        suffix = Path(path).suffix.lower()
+        if suffix in {'.mp4', '.mov', '.avi', '.mkv'}:
+            self._load_standard_video_preview(path)
+            return
+
         if self._sdk is None:
             try:
                 from ..extraction.sdk_extractor import SDKExtractor
@@ -1047,6 +1060,25 @@ class EquirectPreviewWidget(QWidget):
         self._sdk_worker.failed.connect(self._on_sdk_failed)
         self._sdk_worker.finished.connect(lambda: self._extract_btn.setEnabled(True))
         self._sdk_worker.start()
+
+    def _load_standard_video_preview(self, path: str):
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            self._status_lbl.setText("Could not open video preview")
+            return
+
+        ok, frame = cap.read()
+        cap.release()
+        if not ok or frame is None:
+            self._status_lbl.setText("Could not read preview frame")
+            return
+
+        self._fisheye_mode = False
+        self._fisheye_labels = []
+        self._status_lbl.setText(
+            f"Video still preview: {Path(path).name}  ({frame.shape[1]}×{frame.shape[0]})"
+        )
+        self._store_orig(frame)
 
     def _extract_lens_preview(self):
         """Extract and display fisheye lens preview(s) using FFmpeg."""

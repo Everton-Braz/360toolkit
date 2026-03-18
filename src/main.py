@@ -20,6 +20,9 @@ from src.utils.app_paths import get_log_file_path
 from src.utils.resource_path import get_resource_path
 
 
+_DLL_DIR_HANDLES: list = []
+
+
 def _bootstrap_windows_dlls() -> None:
     if os.name != "nt":
         return
@@ -38,7 +41,7 @@ def _bootstrap_windows_dlls() -> None:
             dir_str = str(dll_dir)
             try:
                 if hasattr(os, "add_dll_directory"):
-                    os.add_dll_directory(dir_str)
+                    _DLL_DIR_HANDLES.append(os.add_dll_directory(dir_str))
             except Exception:
                 pass
             if dir_str not in existing_path:

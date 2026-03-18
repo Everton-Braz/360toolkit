@@ -177,14 +177,14 @@ class SettingsDialog(QDialog):
         ffmpeg_group.setLayout(ffmpeg_layout)
         layout.addWidget(ffmpeg_group)
 
-        # Reconstruction binaries configuration
-        recon_group = QGroupBox("Reconstruction Binaries")
+        # Reconstruction backend configuration
+        recon_group = QGroupBox("Reconstruction Backends")
         recon_layout = QVBoxLayout()
 
         # SphereSfM path input
         spheresfm_path_layout = QHBoxLayout()
         self.spheresfm_path_edit = QLineEdit()
-        self.spheresfm_path_edit.setPlaceholderText("Path to SphereSfM colmap.exe")
+        self.spheresfm_path_edit.setPlaceholderText("Optional path to SphereSfM colmap.exe (leave empty for auto-detect / download)")
         spheresfm_path_layout.addWidget(self.spheresfm_path_edit, stretch=1)
 
         self.spheresfm_browse_btn = QPushButton("Browse...")
@@ -210,7 +210,7 @@ class SettingsDialog(QDialog):
         # COLMAP GPU path input
         colmap_path_layout = QHBoxLayout()
         self.colmap_path_edit = QLineEdit()
-        self.colmap_path_edit.setPlaceholderText("Path to COLMAP GPU colmap.exe / colmap.bat")
+        self.colmap_path_edit.setPlaceholderText("Optional path to external COLMAP colmap.exe / colmap.bat (leave empty for auto-detect / download)")
         colmap_path_layout.addWidget(self.colmap_path_edit, stretch=1)
 
         self.colmap_browse_btn = QPushButton("Browse...")

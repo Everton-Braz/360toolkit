@@ -42,6 +42,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 CONDA_PREFIX = os.environ.get('CONDA_PREFIX', '')
 SITE_PACKAGES = os.path.join(CONDA_PREFIX, 'Lib', 'site-packages') if CONDA_PREFIX else ''
 _TORCH_DIR = os.path.join(SITE_PACKAGES, 'torch') if SITE_PACKAGES else ''
+BUNDLE_TORCH_RUNTIME = os.environ.get('TOOLKIT_BUNDLE_TORCH_RUNTIME', '0') == '1'
 
 _backed_up_files = []  # List of (original_path, backup_path)
 
@@ -95,7 +96,7 @@ def _patch_file(rel_path, new_content=None, replacements=None):
         return changed
     return False
 
-if _TORCH_DIR and os.path.isdir(_TORCH_DIR):
+if BUNDLE_TORCH_RUNTIME and _TORCH_DIR and os.path.isdir(_TORCH_DIR):
     print("\n[PRE-BUILD] Patching torch source files for frozen app...")
     
     # 1. torch/__init__.py - Split the big from-import block
@@ -232,8 +233,10 @@ def is_available():
     ])
     
     print(f"  Total: {len(_backed_up_files)} files patched (will restore after build)\n")
-else:
+elif BUNDLE_TORCH_RUNTIME:
     print("[WARN] Torch directory not found, skipping source patches")
+else:
+    print("[INFO] Torch runtime bundling disabled; skipping source patches")
 
 # ============================================================================
 # CONFIGURATION - Update these paths for your system
@@ -261,6 +264,7 @@ BUILD_VARIANT = os.environ.get('TOOLKIT_RELEASE_VARIANT', 'full-bundled').strip(
 BUILD_NAME = os.environ.get('TOOLKIT_BUILD_NAME', '360ToolkitGS')
 BUILD_VERSION = os.environ.get('TOOLKIT_BUILD_VERSION', '1.3.0')
 BUNDLE_EXTERNAL_TOOLS = os.environ.get('TOOLKIT_BUNDLE_EXTERNAL_TOOLS', '1') == '1'
+BUNDLE_RECONSTRUCTION_TOOLS = os.environ.get('TOOLKIT_BUNDLE_RECONSTRUCTION_TOOLS', '0') == '1'
 
 # ============================================================================
 # PyQt6 path
@@ -275,8 +279,10 @@ print(f"{'='*70}")
 print(f"Python: {sys.version}")
 print(f"Conda: {CONDA_PREFIX}")
 print(f"Variant: {BUILD_VARIANT}")
+print(f"Bundle torch runtime: {BUNDLE_TORCH_RUNTIME}")
 print(f"SDK: {SDK_PATH}")
 print(f"FFmpeg: {FFMPEG_EXE}")
+print(f"Bundle reconstruction tools: {BUNDLE_RECONSTRUCTION_TOOLS}")
 print(f"PyQt6: {pyqt6_path}")
 print(f"Target GPUs: RTX 20xx/30xx/40xx/50xx")
 print(f"{'='*70}\n")
@@ -321,23 +327,23 @@ elif BUNDLE_EXTERNAL_TOOLS:
     print(f"[WARN] FFmpeg not found at {FFMPEG_EXE}")
 
 # SphereSfM binaries
-if BUNDLE_EXTERNAL_TOOLS and SPHERE_SFM_DIR.exists():
+if BUNDLE_RECONSTRUCTION_TOOLS and SPHERE_SFM_DIR.exists():
     datas.append((str(SPHERE_SFM_DIR), 'bin/SphereSfM'))
     print(f"[OK] SphereSfM: {SPHERE_SFM_DIR}")
 
 # COLMAP binaries
-if BUNDLE_EXTERNAL_TOOLS and COLMAP_DIR.exists():
+if BUNDLE_RECONSTRUCTION_TOOLS and COLMAP_DIR.exists():
     datas.append((str(COLMAP_DIR), 'bin/COLMAP-windows-latest-CUDA-cuDSS-GUI'))
     print(f"[OK] COLMAP: {COLMAP_DIR}")
 
-# YOLO models (bundle if present)
-for model_file in ['yolov8m-seg.pt', 'yolov8m.pt', 'yolov8n-seg.pt', 'yolov8n-seg.onnx', 'yolov8s-seg.onnx', 'yolov8m-seg.onnx']:
+# ONNX masking models (bundle if present)
+for model_file in ['yolo26n-seg.onnx', 'yolo26s-seg.onnx', 'yolo26m-seg.onnx', 'yolov8n-seg.onnx', 'yolov8s-seg.onnx', 'yolov8m-seg.onnx']:
     if os.path.exists(model_file):
         datas.append((model_file, '.'))
         print(f"[OK] Model: {model_file}")
 
 # SAM model
-if os.path.exists('sam_vit_b_01ec64.pth'):
+if BUNDLE_TORCH_RUNTIME and os.path.exists('sam_vit_b_01ec64.pth'):
     datas.append(('sam_vit_b_01ec64.pth', '.'))
     print(f"[OK] SAM model: sam_vit_b_01ec64.pth")
 
@@ -355,21 +361,24 @@ binaries = []
 # AND as datas to torch/lib (so torch's _load_dll_libraries() finds them)
 # PyInstaller deduplicates binaries by filename, so we use datas for torch/lib
 print("\nCollecting PyTorch DLLs...")
-try:
-    import torch
-    torch_lib = os.path.join(os.path.dirname(torch.__file__), 'lib')
-    if os.path.exists(torch_lib):
-        all_dlls = glob.glob(os.path.join(torch_lib, '*.dll'))
-        for dll in all_dlls:
-            binaries.append((dll, '.'))  # Root for general DLL search
-        # CRITICAL: Also copy ALL DLLs to torch/lib as DATA entries
-        # This prevents PyInstaller dedup from removing asmjit.dll, fbgemm.dll, etc.
-        for dll in all_dlls:
-            datas.append((dll, 'torch/lib'))
-        print(f"  Total: {len(all_dlls)} DLLs from torch/lib (to root + torch/lib)")
-    print(f"  PyTorch CUDA: {torch.version.cuda}")
-except ImportError:
-    print("[WARN] PyTorch not found")
+if BUNDLE_TORCH_RUNTIME:
+    try:
+        import torch
+        torch_lib = os.path.join(os.path.dirname(torch.__file__), 'lib')
+        if os.path.exists(torch_lib):
+            all_dlls = glob.glob(os.path.join(torch_lib, '*.dll'))
+            for dll in all_dlls:
+                binaries.append((dll, '.'))  # Root for general DLL search
+            # CRITICAL: Also copy ALL DLLs to torch/lib as DATA entries
+            # This prevents PyInstaller dedup from removing asmjit.dll, fbgemm.dll, etc.
+            for dll in all_dlls:
+                datas.append((dll, 'torch/lib'))
+            print(f"  Total: {len(all_dlls)} DLLs from torch/lib (to root + torch/lib)")
+        print(f"  PyTorch CUDA: {torch.version.cuda}")
+    except ImportError:
+        print("[WARN] PyTorch not found")
+else:
+    print("  Skipped for ONNX-only packaged runtime")
 
 # Conda Library/bin dependencies  
 if CONDA_PREFIX:
@@ -460,6 +469,15 @@ excludes = [
     # no circular imports occur because the stub doesn't import torch.
 ]
 
+if not BUNDLE_TORCH_RUNTIME:
+    excludes += [
+        'torch', 'torch.cuda', 'torch.nn', 'torch.nn.functional',
+        'torchvision', 'torchvision.ops',
+        'ultralytics', 'ultralytics.nn', 'ultralytics.utils',
+        'ultralytics.models', 'ultralytics.engine',
+        'segment_anything',
+    ]
+
 # ============================================================================
 # HIDDEN IMPORTS
 # ============================================================================
@@ -468,23 +486,13 @@ hiddenimports = [
     'numpy', 'numpy.core', 'numpy.core._multiarray_umath',
     'numpy.linalg', 'numpy.linalg._umath_linalg',
     'numpy.fft', 'numpy.random', 'cv2', 'PIL', 'piexif',
+    'onnxruntime', 'onnxruntime.capi', 'onnxruntime.capi.onnxruntime_pybind11_state',
     
     # Stdlib modules needed at runtime
     'readline',
     
     # PyQt6
     'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'PyQt6.sip',
-    
-    # PyTorch (for masking GPU support)
-    'torch', 'torch.cuda', 'torch.nn', 'torch.nn.functional',
-    'torchvision', 'torchvision.ops',
-    
-    # Ultralytics YOLOv8
-    'ultralytics', 'ultralytics.nn', 'ultralytics.utils',
-    'ultralytics.models', 'ultralytics.engine',
-    
-    # SAM (Segment Anything)
-    'segment_anything',
     
     # SfM/COLMAP
     'pycolmap', 'scipy', 'scipy.spatial', 'scipy.spatial.transform',
@@ -499,6 +507,15 @@ hiddenimports = [
     'src.utils',
 ]
 
+if BUNDLE_TORCH_RUNTIME:
+    hiddenimports += [
+        'torch', 'torch.cuda', 'torch.nn', 'torch.nn.functional',
+        'torchvision', 'torchvision.ops',
+        'ultralytics', 'ultralytics.nn', 'ultralytics.utils',
+        'ultralytics.models', 'ultralytics.engine',
+        'segment_anything',
+    ]
+
 # Add all PyQt6 submodules available 
 try:
     hiddenimports += collect_submodules('PyQt6')
@@ -506,45 +523,48 @@ except Exception:
     pass
 
 # Add ultralytics submodules
-try:
-    hiddenimports += collect_submodules('ultralytics')
-except Exception:
-    pass
+if BUNDLE_TORCH_RUNTIME:
+    try:
+        hiddenimports += collect_submodules('ultralytics')
+    except Exception:
+        pass
 
 # CRITICAL: Collect ALL torch submodules so PyInstaller's FrozenImporter
 # can resolve torch's own internal imports (from torch import nn, etc.)
 # Without this, torch's __init__.py fails with circular import errors.
 # torch.distributed is INCLUDED — its __init__.py is PYZ-patched to a
 # minimal stub so the import succeeds without circular imports.
-try:
-    torch_submodules = collect_submodules('torch')
-    hiddenimports += torch_submodules
-    print(f"[OK] torch: {len(torch_submodules)} submodules collected")
-except Exception as e:
-    print(f"[WARN] torch submodules: {e}")
+if BUNDLE_TORCH_RUNTIME:
+    try:
+        torch_submodules = collect_submodules('torch')
+        hiddenimports += torch_submodules
+        print(f"[OK] torch: {len(torch_submodules)} submodules collected")
+    except Exception as e:
+        print(f"[WARN] torch submodules: {e}")
 
 # Collect torch data files for CUDA support
-try:
-    torch_datas = collect_data_files('torch')
-    # Filter out torch/distributed/ data files.
-    # These create an on-disk directory that acts as a namespace package,
-    # conflicting with PYZ archive imports. The post-build patches handle
-    # all references to torch.distributed in torch's source code.
-    pre_filter = len(torch_datas)
-    torch_datas = [(src, dst) for src, dst in torch_datas 
-                   if not (dst.startswith('torch\\distributed\\') or
-                           dst.startswith('torch/distributed/') or
-                           dst == 'torch\\distributed' or
-                           dst == 'torch/distributed' or
-                           # Also catch nested paths like torch\distributed\optim
-                           '\\distributed\\' in dst.replace('/', '\\'))
-                   or ('include\\' in dst.replace('/', '\\') or 
-                       'csrc\\' in dst.replace('/', '\\') or 
-                       'testing\\' in dst.replace('/', '\\'))]
-    print(f"[OK] torch data files: {len(torch_datas)} (filtered {pre_filter - len(torch_datas)} distributed)")
-    datas += torch_datas
-except Exception:
-    pass
+if BUNDLE_TORCH_RUNTIME:
+    try:
+        torch_datas = collect_data_files('torch')
+        # Filter out torch/distributed/ data files.
+        # These create an on-disk directory that acts as a namespace package,
+        # conflicting with PYZ archive imports. The post-build patches handle
+        # all references to torch.distributed in torch's source code.
+        pre_filter = len(torch_datas)
+        torch_datas = [(src, dst) for src, dst in torch_datas 
+                       if not (dst.startswith('torch\\distributed\\') or
+                               dst.startswith('torch/distributed/') or
+                               dst == 'torch\\distributed' or
+                               dst == 'torch/distributed' or
+                               # Also catch nested paths like torch\distributed\optim
+                               '\\distributed\\' in dst.replace('/', '\\'))
+                       or ('include\\' in dst.replace('/', '\\') or 
+                           'csrc\\' in dst.replace('/', '\\') or 
+                           'testing\\' in dst.replace('/', '\\'))]
+        print(f"[OK] torch data files: {len(torch_datas)} (filtered {pre_filter - len(torch_datas)} distributed)")
+        datas += torch_datas
+    except Exception:
+        pass
 
 # Collect numpy binaries (MKL/BLAS dependencies)
 try:
@@ -563,6 +583,15 @@ try:
     print(f"[OK] cv2: {len(cv2_bins)} binaries collected")
 except Exception as e:
     print(f"[WARN] cv2 collect: {e}")
+
+# Collect ONNX Runtime binaries (capi DLLs/providers)
+try:
+    ort_datas, ort_bins = collect_all('onnxruntime')[:2]
+    datas += ort_datas
+    binaries += ort_bins
+    print(f"[OK] onnxruntime: {len(ort_bins)} binaries collected")
+except Exception as e:
+    print(f"[WARN] onnxruntime collect: {e}")
 
 # ============================================================================
 # ANALYSIS
@@ -660,26 +689,76 @@ print("Post-build: Fixing DLL placement...")
 # DLLs that must be in torch/lib/ for torch's _load_dll_libraries()
 # CRITICAL: Some DLLs like libiomp5md.dll exist in both conda Library/bin and
 # torch/lib/ but are DIFFERENT versions. torch needs its own larger LLVM version.
-torch_lib_fixes = {}
-try:
-    import torch as _torch
-    _src_torch_lib = os.path.join(os.path.dirname(_torch.__file__), 'lib')
-    # DLLs missing from torch/lib due to dedup AND version-mismatched DLLs
-    fix_dlls = ['cudart64_12.dll', 'libiomp5md.dll', 'nvrtc64_120_0.dll',
-                'nvrtc-builtins64_128.dll', 'nvJitLink_120_0.dll',
-                'caffe2_nvrtc.dll', 'cublas64_12.dll', 'cublasLt64_12.dll']
-    for dll_name in fix_dlls:
-        src = os.path.join(_src_torch_lib, dll_name)
-        if os.path.exists(src):
-            torch_lib_fixes[dll_name] = src
-except ImportError:
-    pass
+if BUNDLE_TORCH_RUNTIME:
+    torch_lib_fixes = {}
+    try:
+        import torch as _torch
+        _src_torch_lib = os.path.join(os.path.dirname(_torch.__file__), 'lib')
+        # DLLs missing from torch/lib due to dedup AND version-mismatched DLLs
+        fix_dlls = ['cudart64_12.dll', 'libiomp5md.dll', 'nvrtc64_120_0.dll',
+                    'nvrtc-builtins64_128.dll', 'nvJitLink_120_0.dll',
+                    'caffe2_nvrtc.dll', 'cublas64_12.dll', 'cublasLt64_12.dll']
+        for dll_name in fix_dlls:
+            src = os.path.join(_src_torch_lib, dll_name)
+            if os.path.exists(src):
+                torch_lib_fixes[dll_name] = src
+    except ImportError:
+        pass
 
-for dll_name, src_path in torch_lib_fixes.items():
-    dst = os.path.join(torch_lib_dest, dll_name)
-    # Always overwrite - the deduped version might be the wrong one (e.g. libiomp5md.dll)
-    shutil.copy2(src_path, dst)
-    print(f"  [FIX] Copied {dll_name} -> torch/lib/ ({os.path.getsize(src_path):,} bytes)")
+    for dll_name, src_path in torch_lib_fixes.items():
+        dst = os.path.join(torch_lib_dest, dll_name)
+        # Always overwrite - the deduped version might be the wrong one (e.g. libiomp5md.dll)
+        shutil.copy2(src_path, dst)
+        print(f"  [FIX] Copied {dll_name} -> torch/lib/ ({os.path.getsize(src_path):,} bytes)")
+
+# DLLs needed by ONNX Runtime CUDA provider even when torch runtime is not bundled.
+ort_capi_dir = os.path.join(dist_internal, 'onnxruntime', 'capi')
+if os.path.exists(os.path.join(ort_capi_dir, 'onnxruntime_providers_cuda.dll')):
+    try:
+        import torch as _torch
+        _src_torch_lib = os.path.join(os.path.dirname(_torch.__file__), 'lib')
+    except ImportError:
+        _src_torch_lib = ''
+
+    onnx_cuda_fix_dlls = [
+        'cudart64_12.dll',
+        'cublas64_12.dll',
+        'cublasLt64_12.dll',
+        'cufft64_11.dll',
+        'cudnn64_9.dll',
+        'cudnn_adv64_9.dll',
+        'cudnn_cnn64_9.dll',
+        'cudnn_engines_precompiled64_9.dll',
+        'cudnn_engines_runtime_compiled64_9.dll',
+        'cudnn_graph64_9.dll',
+        'cudnn_heuristic64_9.dll',
+        'cudnn_ops64_9.dll',
+        'zlibwapi.dll',
+    ]
+
+    search_roots = []
+    if _src_torch_lib and os.path.isdir(_src_torch_lib):
+        search_roots.append(_src_torch_lib)
+    if CONDA_PREFIX:
+        search_roots.append(os.path.join(CONDA_PREFIX, 'Library', 'bin'))
+
+    copied_onnx_cuda = 0
+    for dll_name in onnx_cuda_fix_dlls:
+        dst = os.path.join(dist_internal, dll_name)
+        if os.path.exists(dst):
+            continue
+        for search_root in search_roots:
+            src = os.path.join(search_root, dll_name)
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                copied_onnx_cuda += 1
+                print(f"  [FIX] Copied {dll_name} -> _internal/ for ONNX CUDA")
+                break
+
+    if copied_onnx_cuda == 0:
+        print("  [WARN] ONNX CUDA provider present but no extra CUDA runtime DLLs were copied")
+    else:
+        print(f"  [OK] ONNX CUDA runtime DLLs copied: {copied_onnx_cuda}")
 
 # DLLs that must be in root _internal/ for numpy BLAS
 if CONDA_PREFIX:
@@ -740,10 +819,11 @@ if BUNDLE_EXTERNAL_TOOLS and os.path.isdir(sdk_bin_dist) and SDK_PATH.exists():
 # that can shadow the PYZ modules. Delete it to ensure FrozenImporter
 # serves our patched distributed stub from the PYZ archive.
 # ============================================================================
-torch_dist_dir = os.path.join(dist_internal, 'torch', 'distributed')
-if os.path.isdir(torch_dist_dir):
-    shutil.rmtree(torch_dist_dir)
-    print(f"  [CLEAN] Removed torch/distributed/ directory (prevents namespace package shadowing)")
+if BUNDLE_TORCH_RUNTIME:
+    torch_dist_dir = os.path.join(dist_internal, 'torch', 'distributed')
+    if os.path.isdir(torch_dist_dir):
+        shutil.rmtree(torch_dist_dir)
+        print(f"  [CLEAN] Removed torch/distributed/ directory (prevents namespace package shadowing)")
 
 print(f"\n{'='*70}")
 print(f"Build spec created for {BUILD_NAME} v{BUILD_VERSION}")

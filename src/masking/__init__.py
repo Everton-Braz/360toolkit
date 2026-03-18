@@ -15,6 +15,8 @@ The module automatically selects the appropriate backend:
 import logging
 import importlib.util
 
+from src.utils.runtime_backends import has_usable_torch_runtime
+
 logger = logging.getLogger(__name__)
 
 # Check which backends are available
@@ -22,7 +24,7 @@ _TORCH_AVAILABLE = False
 _ONNX_AVAILABLE = False
 _SAM_AVAILABLE = False
 
-_TORCH_AVAILABLE = importlib.util.find_spec('torch') is not None
+_TORCH_AVAILABLE = has_usable_torch_runtime()
 _ONNX_AVAILABLE = importlib.util.find_spec('onnxruntime') is not None
 _SAM_AVAILABLE = importlib.util.find_spec('segment_anything') is not None
 _YOLO_AVAILABLE = importlib.util.find_spec('ultralytics') is not None

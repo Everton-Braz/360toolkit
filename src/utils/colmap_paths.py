@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+from src.utils.dependency_provisioning import get_downloaded_colmap_candidates
 from src.utils.resource_path import get_base_path
 
 
@@ -22,6 +23,7 @@ def preferred_colmap_candidates(project_root: Path | None = None) -> List[Path]:
         legacy_root / "colmap.exe",
         legacy_root / "colmap.bat",
         legacy_root / "colmap.cmd",
+        *get_downloaded_colmap_candidates(),
     ]
 
 

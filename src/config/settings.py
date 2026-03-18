@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 
 from src.utils.colmap_paths import build_colmap_cli_context, normalize_colmap_executable, preferred_colmap_candidates
+from src.utils.dependency_provisioning import get_downloaded_colmap_candidates, get_downloaded_spheresfm_candidates
 from src.utils.app_paths import get_settings_file_path
 from src.utils.resource_path import get_base_path
 
@@ -81,6 +82,11 @@ class SettingsManager:
             self.settings['colmap_gpu_path'] = str(normalized_colmap)
             self.settings['colmap_path'] = str(normalized_colmap)
             self.save_settings()
+        elif self.settings.get('colmap_gpu_path') or self.settings.get('colmap_path'):
+            self.settings['colmap_gpu_path'] = None
+            self.settings['colmap_path'] = None
+            self.settings['colmap_auto_detected'] = False
+            self.save_settings()
 
     def _refresh_bundled_reconstruction_paths(self) -> None:
         """Prefer executables shipped with the current frozen build over stale saved paths."""
@@ -144,6 +150,45 @@ class SettingsManager:
             logger.info(f"Settings saved to {self.settings_file}")
         except Exception as e:
             logger.error(f"Failed to save settings: {e}")
+
+    def _bundled_sdk_candidates(self) -> List[Path]:
+        """Return bundled/local SDK candidates in preferred search order."""
+        app_dir = get_base_path()
+        return [
+            app_dir / "sdk",
+            app_dir / "sdk" / "MediaSDK",
+            app_dir / "sdk" / "MediaSDK-3.1.0.0-20250904-win64" / "MediaSDK",
+            app_dir / "sdk" / "MediaSDK-3.0.5-20250619-win64" / "MediaSDK",
+            app_dir / "bin" / "sdk",
+            app_dir / "bin" / "sdk" / "MediaSDK",
+        ]
+
+    def _bundled_ffmpeg_candidates(self) -> List[Path]:
+        """Return bundled/local FFmpeg candidates in preferred search order."""
+        app_dir = get_base_path()
+        return [
+            app_dir / "ffmpeg" / "ffmpeg.exe",
+            app_dir / "ffmpeg.exe",
+            app_dir / "ffmpeg" / "bin" / "ffmpeg.exe",
+            app_dir.parent / "ffmpeg" / "ffmpeg.exe",
+            app_dir.parent / "ffmpeg" / "bin" / "ffmpeg.exe",
+        ]
+
+    def _detect_bundled_sdk(self) -> Optional[Path]:
+        """Return the first valid bundled/local SDK path."""
+        for candidate in self._bundled_sdk_candidates():
+            if self.is_sdk_valid(candidate):
+                logger.info(f"[OK] SDK found in bundled/local path: {candidate}")
+                return candidate
+        return None
+
+    def _detect_bundled_ffmpeg(self) -> Optional[Path]:
+        """Return the first valid bundled/local FFmpeg path."""
+        for candidate in self._bundled_ffmpeg_candidates():
+            if self.is_ffmpeg_valid(candidate):
+                logger.info(f"[OK] FFmpeg found in bundled/local path: {candidate}")
+                return candidate
+        return None
     
     # === SDK PATH MANAGEMENT ===
     
@@ -152,16 +197,20 @@ class SettingsManager:
         Auto-detect Insta360 MediaSDK installation.
         
         Search order:
-        1. C:/Users/<User>/Documents/Windows_CameraSDK*/MediaSDK*/
-        2. C:/Program Files/Insta360/MediaSDK/
-        3. ../sdk/ relative to app
+        1. Bundled/local app locations (_internal/sdk, sdk/, bin/sdk)
+        2. C:/Users/<User>/Documents/Windows_CameraSDK*/MediaSDK*/
+        3. C:/Program Files/Insta360/MediaSDK/
         
         Returns:
             Path to MediaSDK folder if found, None otherwise
         """
         logger.info("Searching for Insta360 MediaSDK...")
+
+        bundled_sdk = self._detect_bundled_sdk()
+        if bundled_sdk:
+            return bundled_sdk
         
-        # 1. User Documents folder
+        # 2. User Documents folder
         docs = Path.home() / "Documents"
         for sdk_dir in docs.glob("Windows_CameraSDK*"):
             for media_sdk in sdk_dir.glob("MediaSDK*"):
@@ -178,7 +227,7 @@ class SettingsManager:
                     logger.info(f"[OK] SDK found at {nested}")
                     return nested
         
-        # 2. Program Files
+        # 3. Program Files
         program_files = [
             Path("C:/Program Files/Insta360/MediaSDK"),
             Path("C:/Program Files (x86)/Insta360/MediaSDK")
@@ -187,13 +236,6 @@ class SettingsManager:
             if self.is_sdk_valid(pf):
                 logger.info(f"[OK] SDK found at {pf}")
                 return pf
-        
-        # 3. Relative to app
-        app_dir = get_base_path()
-        relative_sdk = app_dir / "sdk"
-        if self.is_sdk_valid(relative_sdk):
-            logger.info(f"[OK] SDK found at {relative_sdk}")
-            return relative_sdk
         
         logger.warning("[X] SDK not found in any standard location")
         return None
@@ -245,8 +287,12 @@ class SettingsManager:
     
     def get_sdk_path(self) -> Optional[Path]:
         """Get current SDK path"""
+        bundled_sdk = self._detect_bundled_sdk()
+        if bundled_sdk:
+            return bundled_sdk
+
         sdk_str = self.settings.get('sdk_path')
-        if sdk_str:
+        if sdk_str and self.is_sdk_valid(sdk_str):
             return Path(sdk_str)
         return None
     
@@ -257,17 +303,21 @@ class SettingsManager:
         Auto-detect FFmpeg installation.
         
         Search order:
-        1. System PATH (shutil.which)
-        2. C:/ffmpeg/bin/ffmpeg.exe
-        3. WinGet installed location (C:/Users/<User>/AppData/Local/Microsoft/WinGet/Packages/...)
-        4. ../ffmpeg/ relative to app
+        1. Bundled/local app locations (_internal/ffmpeg, ffmpeg/)
+        2. System PATH (shutil.which)
+        3. C:/ffmpeg/bin/ffmpeg.exe
+        4. WinGet installed location (C:/Users/<User>/AppData/Local/Microsoft/WinGet/Packages/...)
         
         Returns:
             Path to ffmpeg.exe if found, None otherwise
         """
         logger.info("Searching for FFmpeg...")
+
+        bundled_ffmpeg = self._detect_bundled_ffmpeg()
+        if bundled_ffmpeg:
+            return bundled_ffmpeg
         
-        # 1. System PATH
+        # 2. System PATH
         ffmpeg_in_path = shutil.which('ffmpeg')
         if ffmpeg_in_path:
             ffmpeg_path = Path(ffmpeg_in_path)
@@ -275,7 +325,7 @@ class SettingsManager:
                 logger.info(f"[OK] FFmpeg found in PATH: {ffmpeg_path}")
                 return ffmpeg_path
         
-        # 2. Standard installation
+        # 3. Standard installation
         standard_paths = [
             Path("C:/ffmpeg/bin/ffmpeg.exe"),
             Path("C:/Program Files/ffmpeg/bin/ffmpeg.exe")
@@ -285,7 +335,7 @@ class SettingsManager:
                 logger.info(f"[OK] FFmpeg found at {path}")
                 return path
         
-        # 3. WinGet packages location
+        # 4. WinGet packages location
         winget_base = Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet" / "Packages"
         if winget_base.exists():
             for pkg_dir in winget_base.glob("*FFmpeg*"):
@@ -293,17 +343,6 @@ class SettingsManager:
                     if self.is_ffmpeg_valid(ffmpeg_exe):
                         logger.info(f"[OK] FFmpeg found at {ffmpeg_exe}")
                         return ffmpeg_exe
-        
-        # 4. Relative to app
-        app_dir = get_base_path()
-        relative_candidates = [
-            app_dir / "ffmpeg" / "ffmpeg.exe",
-            app_dir / "ffmpeg" / "bin" / "ffmpeg.exe",
-        ]
-        for relative_ffmpeg in relative_candidates:
-            if self.is_ffmpeg_valid(relative_ffmpeg):
-                logger.info(f"[OK] FFmpeg found at {relative_ffmpeg}")
-                return relative_ffmpeg
         
         logger.warning("[X] FFmpeg not found in any standard location")
         return None
@@ -341,8 +380,12 @@ class SettingsManager:
     
     def get_ffmpeg_path(self) -> Optional[Path]:
         """Get current FFmpeg path"""
+        bundled_ffmpeg = self._detect_bundled_ffmpeg()
+        if bundled_ffmpeg:
+            return bundled_ffmpeg
+
         ffmpeg_str = self.settings.get('ffmpeg_path')
-        if ffmpeg_str:
+        if ffmpeg_str and self.is_ffmpeg_valid(ffmpeg_str):
             return Path(ffmpeg_str)
         return None
 
@@ -362,6 +405,7 @@ class SettingsManager:
             app_dir / "bin" / "SphereSfM" / "colmap.exe",
             app_dir / "bin" / "SphereSfM" / "colmap.bat",
             app_dir / "bin" / "SphereSfM" / "colmap.cmd",
+            *get_downloaded_spheresfm_candidates(),
         ]
 
         docs = Path.home() / "Documents"
@@ -563,6 +607,7 @@ class SettingsManager:
             import subprocess
             run_cwd, run_env = build_colmap_cli_context(colmap_path)
             version_cmds = [
+                [str(colmap_path), 'help'],
                 [str(colmap_path), '--version'],
                 [str(colmap_path), 'version'],
             ]
@@ -598,7 +643,10 @@ class SettingsManager:
             except Exception:
                 normalized_str = str(normalized).lower()
 
-            if '\\dist\\360toolkitgs\\_internal\\' in normalized_str:
+            normalized_str = normalized_str.replace('/', '\\')
+            is_packaged_dist_path = '\\dist\\360toolkitgs' in normalized_str and '\\_internal\\' in normalized_str
+
+            if is_packaged_dist_path:
                 detected = self.auto_detect_colmap()
                 if detected and detected.exists() and detected.is_file():
                     logger.info(
@@ -606,6 +654,11 @@ class SettingsManager:
                         detected,
                     )
                     return detected
+                logger.info(
+                    "Ignoring source-mode COLMAP path from packaged dist runtime: %s",
+                    normalized,
+                )
+                return None
 
         if normalized and normalized.exists() and normalized.is_file():
             return normalized

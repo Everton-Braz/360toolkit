@@ -23,11 +23,15 @@ VARIANTS = {
     "full-bundled": {
         "build_name": "360ToolkitGS",
         "bundle_external_tools": "1",
+        "bundle_reconstruction_tools": "0",
+        "bundle_torch_runtime": "0",
         "display_name": "Full Bundled GPU",
     },
     "customer-managed": {
         "build_name": "360ToolkitGS-Managed",
-        "bundle_external_tools": "0",
+        "bundle_external_tools": "1",
+        "bundle_reconstruction_tools": "0",
+        "bundle_torch_runtime": "0",
         "display_name": "Customer Managed GPU",
     },
 }
@@ -38,10 +42,64 @@ def _zip_directory(source_dir: Path, target_zip: Path) -> None:
     if target_zip.exists():
         target_zip.unlink()
 
-    with zipfile.ZipFile(target_zip, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+    with zipfile.ZipFile(target_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as archive:
         for path in sorted(source_dir.rglob("*")):
             if path.is_file():
                 archive.write(path, path.relative_to(source_dir))
+
+
+def _ensure_release_masking_models() -> None:
+    required_models = [REPO_ROOT / "yolo26s-seg.onnx", REPO_ROOT / "yolov8s-seg.onnx"]
+    if any(model.exists() for model in required_models):
+        return
+
+    dependency_probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import onnx, onnxruntime, onnxscript",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if dependency_probe.returncode != 0:
+        install_command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "onnx",
+            "onnxruntime",
+            "onnxslim==0.1.65",
+            "onnxscript",
+        ]
+        install_result = subprocess.run(install_command, cwd=REPO_ROOT, capture_output=True, text=True)
+        if install_result.returncode != 0:
+            raise SystemExit(
+                "Failed to install ONNX export dependencies for the release build:\n"
+                f"{install_result.stdout}\n{install_result.stderr}"
+            )
+
+    command = [
+        sys.executable,
+        "export_onnx_models.py",
+        "--models",
+        "yolo26s-seg",
+        "yolov8s-seg",
+    ]
+    result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
+    if result.returncode != 0 and not any(model.exists() for model in required_models):
+        raise SystemExit(
+            "Failed to provision ONNX masking models for the release build:\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
+
+    if not any(model.exists() for model in required_models):
+        raise SystemExit("Release build did not produce a usable ONNX masking model")
+
+    available = [model.name for model in required_models if model.exists()]
+    print(f"[OK] Provisioned ONNX masking models: {', '.join(available)}")
 
 
 def _variant_config(variant: str) -> dict[str, str]:
@@ -99,6 +157,32 @@ def _conda_env_prefix(conda_exe: str, env_name: str) -> Path:
     if not prefix.exists():
         raise SystemExit(f"Resolved conda environment prefix does not exist: {prefix}")
     return prefix
+
+
+def _verify_build_env_onnx_cuda(conda_exe: str, env_name: str) -> None:
+    command = [
+        conda_exe,
+        "run",
+        "-n",
+        env_name,
+        "python",
+        "-c",
+        (
+            "import onnxruntime as ort; "
+            "providers = ort.get_available_providers(); "
+            "print('providers', providers); "
+            "raise SystemExit(0 if 'CUDAExecutionProvider' in providers else 2)"
+        ),
+    ]
+    result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        details = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+        raise SystemExit(
+            "PyInstaller build environment does not have ONNX CUDA support enabled. "
+            "Install onnxruntime-gpu in the build environment before packaging.\n"
+            f"{details.strip()}"
+        )
+    print(f"[OK] Build env ONNX providers: {(result.stdout or '').strip()}")
 
 
 def _sync_runtime_dlls(dist_dir: Path, conda_prefix: Path) -> None:
@@ -187,8 +271,11 @@ def _sync_directory_tree(source_dir: Path, destination_dir: Path, label: str) ->
     print(f"[OK] Synced {label}: {copied_files} files -> {destination_dir}")
 
 
-def _sync_external_tool_runtimes(dist_dir: Path) -> None:
+def _sync_external_tool_runtimes(dist_dir: Path, *, bundle_reconstruction_tools: bool) -> None:
     internal_dir = dist_dir / "_internal"
+
+    if not bundle_reconstruction_tools:
+        return
 
     colmap_source_dir = REPO_ROOT / "bin" / "COLMAP-windows-latest-CUDA-cuDSS-GUI"
     colmap_destination_dir = internal_dir / "bin" / "COLMAP-windows-latest-CUDA-cuDSS-GUI"
@@ -207,7 +294,9 @@ def run_pyinstaller(variant: str, env_name: str, clean: bool) -> None:
     conda = shutil.which("conda")
     if not conda:
         raise SystemExit("conda executable not found in PATH")
+    _verify_build_env_onnx_cuda(conda, env_name)
     conda_prefix = _conda_env_prefix(conda, env_name)
+    _ensure_release_masking_models()
     icon_path = _ensure_windows_icon_asset()
 
     env = os.environ.copy()
@@ -217,6 +306,8 @@ def run_pyinstaller(variant: str, env_name: str, clean: bool) -> None:
             "TOOLKIT_BUILD_NAME": build_name,
             "TOOLKIT_BUILD_VERSION": APP_VERSION,
             "TOOLKIT_BUNDLE_EXTERNAL_TOOLS": config["bundle_external_tools"],
+            "TOOLKIT_BUNDLE_RECONSTRUCTION_TOOLS": config["bundle_reconstruction_tools"],
+            "TOOLKIT_BUNDLE_TORCH_RUNTIME": config["bundle_torch_runtime"],
             "TOOLKIT_WINDOWS_ICON": str(icon_path) if icon_path else "",
         }
     )
@@ -231,8 +322,14 @@ def run_pyinstaller(variant: str, env_name: str, clean: bool) -> None:
         raise SystemExit(f"Build finished without expected executable: {exe_path}")
 
     _sync_runtime_dlls(_dist_dir(build_name), conda_prefix)
-    _sync_torch_runtime(_dist_dir(build_name), conda_prefix)
-    _sync_external_tool_runtimes(_dist_dir(build_name))
+
+    if config["bundle_torch_runtime"] == "1":
+        _sync_torch_runtime(_dist_dir(build_name), conda_prefix)
+
+    _sync_external_tool_runtimes(
+        _dist_dir(build_name),
+        bundle_reconstruction_tools=config["bundle_reconstruction_tools"] == "1",
+    )
 
     print(f"[OK] Built {config['display_name']}: {exe_path}")
 

@@ -20,6 +20,8 @@ from datetime import datetime
 from PIL import Image
 import numpy as np
 
+from src.utils.runtime_backends import is_usable_torch_module
+
 # Try to import PyTorch with CUDA support
 HAS_TORCH_TRANSFORM = False
 HAS_TORCH_CUDA = False
@@ -33,6 +35,8 @@ def _test_torch_cuda():
     import sys as _sys
     try:
         import torch as _torch
+        if not is_usable_torch_module(_torch):
+            raise ImportError("incomplete torch runtime")
         torch = _torch
         
         # Check if TorchE2PTransform is available
@@ -73,7 +77,7 @@ def _test_torch_cuda():
                 logger_msg = f"PyTorch CUDA test error: {e}"
         else:
             logger_msg = "PyTorch available but CUDA not detected"
-    except (ImportError, OSError) as e:
+    except (ImportError, OSError, AttributeError) as e:
         # Clean up partially-initialized torch from sys.modules
         for key in list(_sys.modules.keys()):
             if key == 'torch' or key.startswith('torch.'):
@@ -121,6 +125,7 @@ from src.extraction import FrameExtractor
 from src.extraction.sdk_extractor import SDKExtractor
 from src.transforms import E2PTransform, E2CTransform
 from src.pipeline.metadata_handler import MetadataHandler
+from src.utils.dependency_provisioning import resolve_masking_model_path
 from src.utils.resource_path import get_resource_path
 from src.utils.color_correction import apply_color_corrections
 from src.config.defaults import (
@@ -129,6 +134,7 @@ from src.config.defaults import (
 )
 
 logger = logging.getLogger(__name__)
+_DLL_DIR_HANDLES = []
 
 # Log PyTorch/CUDA status
 logger.info(f"[Split GPU] {logger_msg}")
@@ -1634,12 +1640,12 @@ class PipelineWorker(QThread):
                     
                     # Try YOLO26 first, then YOLOv8
                     onnx_model_name = model_map_yolo26.get(model_size, 'yolo26s-seg.onnx')
-                    onnx_path = get_resource_path(onnx_model_name)
+                    onnx_path = resolve_masking_model_path(onnx_model_name)
                     
                     if not onnx_path.exists():
                         # Fallback to YOLOv8
                         onnx_model_name = model_map_yolov8.get(model_size, 'yolov8s-seg.onnx')
-                        onnx_path = get_resource_path(onnx_model_name)
+                        onnx_path = resolve_masking_model_path(onnx_model_name)
                         logger.info(f"YOLO26 not found, falling back to YOLOv8: {onnx_model_name}")
                     else:
                         logger.info(f"Using YOLO26 model (3-4x faster): {onnx_model_name}")
@@ -1652,6 +1658,13 @@ class PipelineWorker(QThread):
                             # CRITICAL FIX: Add DLL directory for ONNX Runtime in frozen app
                             import sys
                             import os
+
+                            def _remember_dll_dir(path: Path) -> None:
+                                if hasattr(os, 'add_dll_directory') and path.exists():
+                                    try:
+                                        _DLL_DIR_HANDLES.append(os.add_dll_directory(str(path)))
+                                    except (OSError, FileNotFoundError):
+                                        pass
                             
                             # Determine base path for frozen app (onedir mode)
                             if getattr(sys, 'frozen', False):
@@ -1664,6 +1677,7 @@ class PipelineWorker(QThread):
                                 # DIAGNOSTIC: List what DLLs we have
                                 logger.info("=== ONNX Runtime DLL Diagnostics ===")
                                 ort_capi_path = internal_dir / 'onnxruntime' / 'capi'
+                                numpy_libs_path = internal_dir / 'numpy.libs'
                                 if ort_capi_path.exists():
                                     logger.info(f"ONNX capi folder exists: {ort_capi_path}")
                                     dlls = list(glob.glob(str(ort_capi_path / '*.dll')))
@@ -1686,16 +1700,64 @@ class PipelineWorker(QThread):
                                 # Add _internal/onnxruntime/capi to DLL search path
                                 if ort_capi_path.exists():
                                     logger.info(f"Adding ONNX DLL path: {ort_capi_path}")
-                                    os.add_dll_directory(str(ort_capi_path))
+                                    _remember_dll_dir(ort_capi_path)
+
+                                if numpy_libs_path.exists():
+                                    logger.info(f"Adding NumPy DLL path: {numpy_libs_path}")
+                                    _remember_dll_dir(numpy_libs_path)
                                 
                                 # Add _internal root (for msvcp140.dll etc)
                                 if internal_dir.exists():
                                     logger.info(f"Adding Internal DLL path: {internal_dir}")
-                                    os.add_dll_directory(str(internal_dir))
+                                    _remember_dll_dir(internal_dir)
                                     
                                 # Add exe dir (just in case)
                                 logger.info(f"Adding Exe DLL path: {exe_dir}")
-                                os.add_dll_directory(str(exe_dir))
+                                _remember_dll_dir(exe_dir)
+
+                                extra_paths = [str(path) for path in (ort_capi_path, numpy_libs_path, internal_dir, exe_dir) if path.exists()]
+                                os.environ['PATH'] = os.pathsep.join(extra_paths + [os.environ.get('PATH', '')])
+
+                                # CRITICAL: Preload CUDA + ONNX DLLs via ctypes before import.
+                                # In frozen apps, implicit DLL dependency resolution for PYD
+                                # secondary deps doesn't reliably use AddDllDirectory paths.
+                                # Loading DLLs into the process first ensures they're found.
+                                import ctypes
+                                _cuda_dlls = [
+                                    # CUDA runtime (no deps)
+                                    (internal_dir, 'cudart64_12.dll'),
+                                    # zlib (needed by cuDNN for weight decompression)
+                                    (internal_dir, 'zlibwapi.dll'),
+                                    # cuBLAS
+                                    (internal_dir, 'cublasLt64_12.dll'),
+                                    (internal_dir, 'cublas64_12.dll'),
+                                    # cuFFT
+                                    (internal_dir, 'cufft64_11.dll'),
+                                    # cuDNN (depends on cudart, zlibwapi)
+                                    (internal_dir, 'cudnn64_9.dll'),
+                                    (internal_dir, 'cudnn_ops64_9.dll'),
+                                    (internal_dir, 'cudnn_cnn64_9.dll'),
+                                    (internal_dir, 'cudnn_adv64_9.dll'),
+                                    (internal_dir, 'cudnn_graph64_9.dll'),
+                                    (internal_dir, 'cudnn_heuristic64_9.dll'),
+                                    (internal_dir, 'cudnn_engines_precompiled64_9.dll'),
+                                    (internal_dir, 'cudnn_engines_runtime_compiled64_9.dll'),
+                                    # ONNX Runtime core (depends on above)
+                                    (ort_capi_path, 'onnxruntime.dll'),
+                                    (ort_capi_path, 'onnxruntime_providers_shared.dll'),
+                                    (ort_capi_path, 'onnxruntime_providers_cuda.dll'),
+                                    (ort_capi_path, 'onnxruntime_providers_tensorrt.dll'),
+                                ]
+                                _preloaded = 0
+                                for _dir, _dll_name in _cuda_dlls:
+                                    _dll_path = _dir / _dll_name
+                                    if _dll_path.exists():
+                                        try:
+                                            ctypes.CDLL(str(_dll_path))
+                                            _preloaded += 1
+                                        except OSError as _e:
+                                            logger.debug(f"ctypes preload skip {_dll_name}: {_e}")
+                                logger.info(f"ctypes preloaded {_preloaded} CUDA/ONNX DLLs")
 
                             logger.info("Attempting to import onnxruntime...")
                             import onnxruntime
@@ -1721,17 +1783,19 @@ class PipelineWorker(QThread):
 
                     if not use_onnx:
                         logger.info(f"ONNX initialization failed ({onnx_error}). Attempting PyTorch fallback.")
-                        
-                        # Lazy import to avoid loading torch during PyInstaller analysis
+
                         try:
-                            from ..masking import MultiCategoryMasker
+                            from ..utils.runtime_backends import has_usable_torch_runtime
+                            if not has_usable_torch_runtime():
+                                raise ImportError("PyTorch runtime not bundled in ONNX-only package")
+                            from ..masking.multi_category_masker import MultiCategoryMasker
                             
                             self.masker = MultiCategoryMasker(
                                 model_size=model_size,
                                 confidence_threshold=confidence,
                                 use_gpu=use_gpu
                             )
-                        except ImportError as e:
+                        except Exception as e:
                             # If we are here, it means we failed to use ONNX AND failed to use PyTorch
                             error_msg = (
                                 f"Masking Initialization Failed: Could not load masking engine.\n"
@@ -1987,6 +2051,7 @@ class PipelineWorker(QThread):
              
              # Read SphereSfM UI params dict (populated by main_window.get_current_config)
              _sfm_p = self.config.get('spheresfm_params', {})
+             _colmap_p = self.config.get('colmap_params', {})
              # Normalise matching method label → key used by sphere_sfm_integration
              _sfm_match_map = {
                  'Exhaustive': 'exhaustive', 'exhaustive': 'exhaustive',
@@ -1995,6 +2060,9 @@ class PipelineWorker(QThread):
              }
              _sfm_match = _sfm_match_map.get(
                  _sfm_p.get('matching_method', 'Sequential'), 'sequential'
+             )
+             _colmap_match = _sfm_match_map.get(
+                 _colmap_p.get('matching_method', 'sequential'), 'sequential'
              )
 
              # Settings
@@ -2005,8 +2073,19 @@ class PipelineWorker(QThread):
                  ),
                  colmap_path=Path(self.config['colmap_path']) if self.config.get('colmap_path') else None,
                  mapping_backend=self.config.get('mapping_backend', 'glomap'),
+                 matching_method=_colmap_match,
+                 colmap_camera_model=str(_colmap_p.get('camera_model', 'PINHOLE')),
+                 colmap_single_camera=bool(_colmap_p.get('single_camera', False)),
+                 colmap_max_image_size=int(_colmap_p.get('max_image_size', 3200)),
+                 colmap_max_num_features=int(_colmap_p.get('max_num_features', 8192)),
+                 colmap_min_num_matches=int(_colmap_p.get('min_num_matches', 15)),
+                 colmap_sequential_overlap=int(_colmap_p.get('sequential_overlap', 10)),
+                 colmap_feature_flags=str(_colmap_p.get('feature_flags', '')),
+                 colmap_matcher_flags=str(_colmap_p.get('matcher_flags', '')),
+                 colmap_mapper_flags=str(_colmap_p.get('mapper_flags', '')),
+                 colmap_extra_args=str(_colmap_p.get('extra_args', '')),
                  use_lightglue_aliked=self.config.get('use_lightglue_aliked', True),
-                 camera_grouping=self.config.get('camera_grouping', 'per_folder'),
+                 camera_grouping='single' if bool(_colmap_p.get('single_camera', False)) else self.config.get('camera_grouping', 'per_folder'),
                  prefer_colmap_learned=self.config.get('prefer_colmap_learned', False),
                  require_learned_pipeline=self.config.get('require_learned_pipeline', False),
                  enable_hloc_fallback=self.config.get('enable_hloc_fallback', True),

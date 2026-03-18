@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Dict, Optional, Callable, List, Tuple
 import os
 
+from src.utils.dependency_provisioning import ensure_spheresfm_downloaded, get_downloaded_spheresfm_candidates
+
 logger = logging.getLogger(__name__)
 
 # Preferred bundled COLMAP release location (user-provided GPU build)
@@ -198,7 +200,12 @@ def _probe_binary(binary_path: Path) -> Tuple[bool, bool]:
         return False, False
 
 
-def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] = None) -> Tuple[Path, List[str]]:
+def resolve_spheresfm_binary_path(
+    settings=None,
+    override_path: Optional[Path] = None,
+    *,
+    allow_download: bool = False,
+) -> Tuple[Path, List[str]]:
     """
     Resolve SphereSfM/COLMAP binary path.
 
@@ -229,6 +236,8 @@ def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] =
 
     add_candidate(DEFAULT_SPHERESFM_RELEASE_PATH)
     add_candidate(LEGACY_SPHERESFM_PATH)
+    for path in get_downloaded_spheresfm_candidates():
+        add_candidate(path)
 
     home = Path.home()
     spheresfm_common_paths = [
@@ -273,6 +282,14 @@ def resolve_spheresfm_binary_path(settings=None, override_path: Optional[Path] =
     if existing_candidates:
         return existing_candidates[0], [str(c) for c in candidates]
 
+    if allow_download:
+        try:
+            downloaded = ensure_spheresfm_downloaded()
+            add_candidate(downloaded)
+            return downloaded, [str(c) for c in candidates]
+        except Exception as exc:
+            logger.warning("[SphereSfM] Lazy download failed: %s", exc)
+
     fallback = candidates[0] if candidates else DEFAULT_SPHERESFM_RELEASE_PATH
     return fallback, [str(c) for c in candidates]
 
@@ -286,7 +303,11 @@ class SphereSfMIntegrator:
     
     def __init__(self, settings, spheresfm_path: Optional[Path] = None):
         self.settings = settings
-        self.spheresfm_path, self.searched_paths = resolve_spheresfm_binary_path(settings, spheresfm_path)
+        self.spheresfm_path, self.searched_paths = resolve_spheresfm_binary_path(
+            settings,
+            spheresfm_path,
+            allow_download=True,
+        )
         self._command_help_cache: Dict[str, str] = {}
         self.supports_sphere_camera_mapper = self._detect_mapper_sphere_support()
         

@@ -41,6 +41,16 @@ class ColmapSettings:
     
     # Matching settings
     matching_method: str = 'sequential'  # 'sequential', 'exhaustive', 'vocab_tree'
+    colmap_camera_model: str = 'PINHOLE'
+    colmap_single_camera: bool = False
+    colmap_max_image_size: int = 3200
+    colmap_max_num_features: int = 8192
+    colmap_min_num_matches: int = 15
+    colmap_sequential_overlap: int = 10
+    colmap_feature_flags: str = ''
+    colmap_matcher_flags: str = ''
+    colmap_mapper_flags: str = ''
+    colmap_extra_args: str = ''
     use_lightglue_aliked: bool = True
     camera_grouping: str = 'per_folder'  # 'single' | 'per_folder' | 'per_image'
     prefer_colmap_learned: bool = False
@@ -90,6 +100,16 @@ class ColmapSettings:
             'mapping_backend': self.mapping_backend,
             'quality': self.quality,
             'matching_method': self.matching_method,
+            'colmap_camera_model': self.colmap_camera_model,
+            'colmap_single_camera': self.colmap_single_camera,
+            'colmap_max_image_size': self.colmap_max_image_size,
+            'colmap_max_num_features': self.colmap_max_num_features,
+            'colmap_min_num_matches': self.colmap_min_num_matches,
+            'colmap_sequential_overlap': self.colmap_sequential_overlap,
+            'colmap_feature_flags': self.colmap_feature_flags,
+            'colmap_matcher_flags': self.colmap_matcher_flags,
+            'colmap_mapper_flags': self.colmap_mapper_flags,
+            'colmap_extra_args': self.colmap_extra_args,
             'use_lightglue_aliked': self.use_lightglue_aliked,
             'camera_grouping': self.camera_grouping,
             'prefer_colmap_learned': self.prefer_colmap_learned,
