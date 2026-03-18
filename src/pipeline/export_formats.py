@@ -1276,3 +1276,83 @@ def export_realityscan_formats(colmap_dir: str, images_dir: str, output_dir: str
     """
     exporter = RealityScanExporter(colmap_dir, output_dir, perspective_dir, camera_config)
     return exporter.export_all(images_dir, perspective_dir, include_xmp, include_csv, include_json)
+
+
+def export_xmp_from_exif(images_dir) -> int:
+    """
+    Write RealityCapture-compatible XMP sidecar files next to each image in *images_dir*,
+    reading camera orientation (yaw/pitch/roll) from EXIF UserComment embedded by Stage 2.
+
+    Returns the number of XMP files written.
+    """
+    import math, json as _json
+
+    images_path = Path(images_dir)
+    img_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
+    xmp_count = 0
+
+    for img_file in sorted(images_path.iterdir()):
+        if not img_file.is_file() or img_file.suffix.lower() not in img_exts:
+            continue
+
+        yaw_deg = pitch_deg = roll_deg = 0.0
+
+        # Try to read EXIF UserComment or Description for yaw/pitch/roll JSON
+        try:
+            from PIL import Image as _Image
+            import piexif
+            img = _Image.open(str(img_file))
+            exif_data = img.info.get('exif', b'')
+            if exif_data:
+                exif_dict = piexif.load(exif_data)
+                comment = exif_dict.get('Exif', {}).get(piexif.ExifIFD.UserComment, b'')
+                if comment:
+                    # Strip UNICODE header if present
+                    if comment[:8] == b'UNICODE\x00':
+                        comment = comment[8:].decode('utf-16-le', errors='ignore')
+                    else:
+                        comment = comment.decode('utf-8', errors='ignore')
+                    meta = _json.loads(comment)
+                    yaw_deg = float(meta.get('yaw', 0.0))
+                    pitch_deg = float(meta.get('pitch', 0.0))
+                    roll_deg = float(meta.get('roll', 0.0))
+        except Exception:
+            pass  # No EXIF — use zero orientation
+
+        # Convert yaw/pitch/roll (ZYX intrinsic, degrees) to rotation matrix
+        cy = math.cos(math.radians(yaw_deg));   sy = math.sin(math.radians(yaw_deg))
+        cp = math.cos(math.radians(pitch_deg)); sp = math.sin(math.radians(pitch_deg))
+        cr = math.cos(math.radians(roll_deg));  sr = math.sin(math.radians(roll_deg))
+
+        # R = Rz(yaw) * Ry(pitch) * Rx(roll)
+        r00 = cy*cp;  r01 = cy*sp*sr - sy*cr;  r02 = cy*sp*cr + sy*sr
+        r10 = sy*cp;  r11 = sy*sp*sr + cy*cr;  r12 = sy*sp*cr - cy*sr
+        r20 = -sp;    r21 = cp*sr;              r22 = cp*cr
+
+        r_str = (f"{r00:.6f} {r01:.6f} {r02:.6f} "
+                 f"{r10:.6f} {r11:.6f} {r12:.6f} "
+                 f"{r20:.6f} {r21:.6f} {r22:.6f}")
+
+        xmp_content = f'''<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+      xmlns:xcr="http://www.capturingreality.com/ns/xcr/1.1#"
+      xmlns:xmp="http://ns.adobe.com/xap/1.0/">
+      <xcr:Rotation>{r_str}</xcr:Rotation>
+      <xcr:PosePrior>initial</xcr:PosePrior>
+      <xmp:CreatorTool>360ToolkitLite</xmp:CreatorTool>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>'''
+
+        xmp_file = img_file.with_suffix('.xmp')
+        try:
+            xmp_file.write_text(xmp_content, encoding='utf-8')
+            xmp_count += 1
+        except Exception as e:
+            logger.warning(f"Could not write XMP for {img_file.name}: {e}")
+
+    logger.info(f"[Export] Wrote {xmp_count} XMP sidecar files in {images_dir}")
+    return xmp_count

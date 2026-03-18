@@ -493,61 +493,21 @@ class PipelineWorker(QThread):
                     self.finished.emit(results)
                     return
             
-            # 3D Reconstruction
-            if self.config.get('use_rig_sfm', False):
-                if self.is_cancelled:
-                    logger.info("Pipeline cancelled before Reconstruction")
-                    results['stages_executed'] = stages_executed
-                    self.finished.emit({'success': False, 'error': 'Cancelled by user'})
-                    return
-                
-                logger.info("=== Starting 3D Reconstruction ===")
-                stage4_result = self._execute_stage4()
-                results['stage4'] = stage4_result
-                stages_executed.append(4)
-                self.stage_complete.emit(4, stage4_result)
-                
-                if not stage4_result.get('success'):
-                    self.error.emit(f"Reconstruction failed: {stage4_result.get('error')}")
-                    results['success'] = False
-                    results['stages_executed'] = stages_executed
-                    self.finished.emit(results)
-                    return
-            elif self.config.get('export_realityscan', False):
+            # RealityCapture Export
+            if self.config.get('export_realityscan', False):
                 if self.is_cancelled:
                     logger.info("Pipeline cancelled before RealityScan export")
                     results['stages_executed'] = stages_executed
                     self.finished.emit({'success': False, 'error': 'Cancelled by user'})
                     return
 
-                logger.info("=== Starting RealityScan Export (No COLMAP) ===")
+                logger.info("=== Starting RealityCapture Export ===")
                 export_result = self._execute_realityscan_export_only()
                 results['realityscan_export'] = export_result
                 self.stage_complete.emit(4, export_result)
 
                 if not export_result.get('success'):
-                    self.error.emit(f"RealityScan export failed: {export_result.get('error')}")
-                    results['success'] = False
-                    results['stages_executed'] = stages_executed
-                    self.finished.emit(results)
-                    return
-
-            # Training (Lichtfeld Studio)
-            if self.config.get('train_lighting', False):
-                if self.is_cancelled:
-                    logger.info("Pipeline cancelled before Training")
-                    results['stages_executed'] = stages_executed
-                    self.finished.emit({'success': False, 'error': 'Cancelled by user'})
-                    return
-                
-                logger.info("=== Starting Training (Lichtfeld Studio) ===")
-                stage5_result = self._execute_stage5(results.get('stage4', {}))
-                results['stage5'] = stage5_result
-                stages_executed.append(5)
-                self.stage_complete.emit(5, stage5_result)
-                
-                if not stage5_result.get('success'):
-                    self.error.emit(f"Training failed: {stage5_result.get('error')}")
+                    self.error.emit(f"RealityCapture export failed: {export_result.get('error')}")
                     results['success'] = False
                     results['stages_executed'] = stages_executed
                     self.finished.emit(results)
@@ -1904,397 +1864,16 @@ class PipelineWorker(QThread):
             logger.error(f"Masking error: {e}")
             return {'success': False, 'error': str(e)}
 
-    def _execute_stage4(self) -> Dict:
-        """Execute 3D Reconstruction (Panorama SfM or Perspective Reconstruction)"""
-        try:
-             def _count_images_in_dir(path: Path) -> int:
-                 if not path or not path.exists() or not path.is_dir():
-                     return 0
-                 exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
-                 return sum(1 for p in path.rglob('*') if p.is_file() and p.suffix.lower() in exts)
-
-             def _resolve_export_images_dir(preferred: Path, fallback: Path) -> Path:
-                 if preferred and preferred.exists() and _count_images_in_dir(preferred) > 0:
-                     return preferred
-                 return fallback
-
-             def _should_apply_lfs_rotation(images_dir: Path) -> bool:
-                 try:
-                     if not images_dir.exists():
-                         return False
-                     image_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
-                     sample = next((p for p in images_dir.rglob('*') if p.is_file() and p.suffix.lower() in image_exts), None)
-                     if sample is None:
-                         return False
-                     image = cv2.imread(str(sample))
-                     if image is None:
-                         return False
-                     height, width = image.shape[:2]
-                     if height <= 0:
-                         return False
-                     aspect = width / float(height)
-                     return abs(aspect - 2.0) < 0.08
-                 except Exception:
-                     return False
-
-             def _ensure_colmap_text_model(model_dir: Path) -> bool:
-                 cameras_txt = model_dir / 'cameras.txt'
-                 images_txt = model_dir / 'images.txt'
-                 if cameras_txt.exists() and images_txt.exists():
-                     return True
-
-                 if not ((model_dir / 'cameras.bin').exists() and (model_dir / 'images.bin').exists()):
-                     return False
-
-                 colmap_bin = self.config.get('colmap_path') or self.config.get('sphere_alignment_path')
-                 if not colmap_bin:
-                     import shutil
-                     colmap_bin = shutil.which('colmap')
-
-                 if not colmap_bin:
-                     logger.warning("[Reconstruction] Could not find COLMAP binary to convert model BIN->TXT")
-                     return False
-
-                 try:
-                     logger.info(f"[Reconstruction] Converting COLMAP model to TXT: {model_dir}")
-                     conv = subprocess.run(
-                         [
-                             str(colmap_bin),
-                             'model_converter',
-                             '--input_path', str(model_dir),
-                             '--output_path', str(model_dir),
-                             '--output_type', 'TXT',
-                         ],
-                         capture_output=True,
-                         text=True,
-                     )
-                     if conv.returncode != 0:
-                         logger.warning(f"[Reconstruction] model_converter failed: {conv.stderr[-1200:]}")
-                         return False
-                     return cameras_txt.exists() and images_txt.exists()
-                 except Exception as conv_error:
-                     logger.warning(f"[Reconstruction] Failed to convert model BIN->TXT: {conv_error}")
-                     return False
-
-             # Lazy import
-             from .colmap_stage import ColmapStage, ColmapSettings, ALIGNMENT_MODE_SPHERE_SFM, ALIGNMENT_MODE_RIG_SFM, ALIGNMENT_MODE_POSE_TRANSFER
-             
-             # Determine alignment mode from config
-             alignment_mode = self.config.get('alignment_mode', ALIGNMENT_MODE_RIG_SFM)
-
-             # Determine input directory based on reconstruction workflow
-             output_root = Path(self.config['output_dir'])
-             perspective_views_dir = output_root / 'perspective_views'
-             extracted_frames_dir = output_root / 'extracted_frames'
-
-             # --- Flatten lens subfolders if present (legacy or fisheye extraction) ---
-             # If extracted_frames has lens_1/lens_2 subdirs but no direct images,
-             # move files to extracted_frames root with _lens1/_lens2 suffixes.
-             if extracted_frames_dir.exists():
-                 _img_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
-                 _direct_images = [p for p in extracted_frames_dir.iterdir()
-                                   if p.is_file() and p.suffix.lower() in _img_exts]
-                 _lens_dirs = {
-                     d.name: d for d in extracted_frames_dir.iterdir()
-                     if d.is_dir() and d.name in ('lens_1', 'lens_2', 'lens1', 'lens2')
-                 }
-                 if not _direct_images and _lens_dirs:
-                     logger.info("[Reconstruction] Flattening lens subfolders into extracted_frames root...")
-                     _suffix_map = {'lens_1': 'lens1', 'lens_2': 'lens2', 'lens1': 'lens1', 'lens2': 'lens2'}
-                     for _lens_dir in _lens_dirs.values():
-                         _lens_sfx = _suffix_map.get(_lens_dir.name, _lens_dir.name)
-                         for _src in sorted(_lens_dir.glob('*')):
-                             if _src.is_file() and _src.suffix.lower() in _img_exts:
-                                 _dst = extracted_frames_dir / f"{_src.stem}_{_lens_sfx}{_src.suffix}"
-                                 import shutil as _shutil
-                                 _shutil.move(str(_src), str(_dst))
-                         # Remove empty lens subdir
-                         try:
-                             _lens_dir.rmdir()
-                         except OSError:
-                             pass
-                     _moved = [p for p in extracted_frames_dir.iterdir()
-                               if p.is_file() and p.suffix.lower() in _img_exts]
-                     logger.info(f"[Reconstruction] Flattened {len(_moved)} images into extracted_frames root")
-
-             requested_image_source = self.config.get('stage4_image_source', 'auto')
-             manual_stage4_input = self.config.get('stage4_input_dir')
-             if manual_stage4_input:
-                 input_dir = Path(manual_stage4_input)
-                 reconstruction_image_source = self._detect_project_image_source(output_root, input_dir)
-                 logger.info(f"[Reconstruction] Using specified input: {input_dir}")
-             else:
-                 input_dir = self._resolve_project_image_dir(output_root, requested_image_source, alignment_mode)
-                 reconstruction_image_source = self._detect_project_image_source(output_root, input_dir)
-                 if input_dir:
-                     logger.info(f"[Reconstruction] Using {reconstruction_image_source} images: {input_dir}")
-                 else:
-                     discovered = self.discover_stage_input_folder(2, self.config['output_dir'])
-                     if discovered:
-                         input_dir = discovered
-                         reconstruction_image_source = self._detect_project_image_source(output_root, input_dir)
-                     else:
-                         return {'success': False, 'error': 'Reconstruction input not found'}
-             
-             output_dir = Path(self.config['output_dir']) / 'reconstruction'
-             
-             # Determine masks directory for reconstruction input type
-             requested_mask_source = self.config.get('stage4_mask_source', 'auto')
-             masks_dir = self._resolve_project_masks_dir(output_root, requested_mask_source, reconstruction_image_source)
-             mask_target = self.config.get('mask_target', 'split')
-             if masks_dir:
-                 logger.info(f"[Reconstruction] Using masks from: {masks_dir}")
-             else:
-                 logger.info("[Reconstruction] No masks selected for reconstruction")
-
-             logger.info(f"[Reconstruction] Using alignment mode: {alignment_mode}")
-             
-             # Read SphereSfM UI params dict (populated by main_window.get_current_config)
-             _sfm_p = self.config.get('spheresfm_params', {})
-             _colmap_p = self.config.get('colmap_params', {})
-             # Normalise matching method label → key used by sphere_sfm_integration
-             _sfm_match_map = {
-                 'Exhaustive': 'exhaustive', 'exhaustive': 'exhaustive',
-                 'Sequential': 'sequential', 'sequential': 'sequential',
-                 'Vocab Tree': 'vocab_tree', 'vocab_tree': 'vocab_tree',
-             }
-             _sfm_match = _sfm_match_map.get(
-                 _sfm_p.get('matching_method', 'Sequential'), 'sequential'
-             )
-             _colmap_match = _sfm_match_map.get(
-                 _colmap_p.get('matching_method', 'sequential'), 'sequential'
-             )
-
-             # Settings
-             settings = ColmapSettings(
-                 alignment_mode=alignment_mode,
-                 sphere_alignment_path=Path(self.config['spheresfm_path']) if self.config.get('spheresfm_path') else (
-                     Path(self.config['sphere_alignment_path']) if self.config.get('sphere_alignment_path') else None
-                 ),
-                 colmap_path=Path(self.config['colmap_path']) if self.config.get('colmap_path') else None,
-                 mapping_backend=self.config.get('mapping_backend', 'glomap'),
-                 matching_method=_colmap_match,
-                 colmap_camera_model=str(_colmap_p.get('camera_model', 'PINHOLE')),
-                 colmap_single_camera=bool(_colmap_p.get('single_camera', False)),
-                 colmap_max_image_size=int(_colmap_p.get('max_image_size', 3200)),
-                 colmap_max_num_features=int(_colmap_p.get('max_num_features', 8192)),
-                 colmap_min_num_matches=int(_colmap_p.get('min_num_matches', 15)),
-                 colmap_sequential_overlap=int(_colmap_p.get('sequential_overlap', 10)),
-                 colmap_feature_flags=str(_colmap_p.get('feature_flags', '')),
-                 colmap_matcher_flags=str(_colmap_p.get('matcher_flags', '')),
-                 colmap_mapper_flags=str(_colmap_p.get('mapper_flags', '')),
-                 colmap_extra_args=str(_colmap_p.get('extra_args', '')),
-                 use_lightglue_aliked=self.config.get('use_lightglue_aliked', True),
-                 camera_grouping='single' if bool(_colmap_p.get('single_camera', False)) else self.config.get('camera_grouping', 'per_folder'),
-                 prefer_colmap_learned=self.config.get('prefer_colmap_learned', False),
-                 require_learned_pipeline=self.config.get('require_learned_pipeline', False),
-                 enable_hloc_fallback=self.config.get('enable_hloc_fallback', True),
-                 reuse_colmap_database=self.config.get('reuse_colmap_database', True),
-                 use_rig_sfm=(alignment_mode == ALIGNMENT_MODE_RIG_SFM),
-                 use_gpu=self.config.get('use_gpu_colmap', self.config.get('use_gpu', True)),
-                 strict_gpu_only=self.config.get('strict_gpu_only', False),
-                 # SphereSfM-specific params from UI
-                 spheresfm_camera_model=_sfm_p.get('camera_model', 'SPHERE'),
-                 spheresfm_use_gpu=self.config.get('use_gpu_spheresfm', False),
-                 spheresfm_matching_method=_sfm_match,
-                 spheresfm_max_image_size=int(_sfm_p.get('max_image_size', 3200)),
-                 spheresfm_max_num_features=int(_sfm_p.get('max_num_features', 8192)),
-                 spheresfm_sequential_overlap=int(_sfm_p.get('sequential_overlap', 10)),
-                 spheresfm_min_num_matches=int(_sfm_p.get('min_num_matches', 15)),
-                 spheresfm_feature_flags=str(_sfm_p.get('feature_flags', '')),
-                 spheresfm_matcher_flags=str(_sfm_p.get('matcher_flags', '')),
-                 spheresfm_mapper_flags=str(_sfm_p.get('mapper_flags', '')),
-                 spheresfm_extra_args=str(_sfm_p.get('extra_args', '')),
-             )
-             
-             stage = ColmapStage(settings)
-             
-             def progress_callback(msg):
-                 self.progress.emit(0, 0, f"Reconstruction: {msg}")
-                 
-             result = stage.run(
-                 frames_dir=input_dir,
-                 masks_dir=masks_dir,  # Pass masks if equirectangular masking was used
-                 output_dir=output_dir,
-                 progress_callback=progress_callback
-             )
-
-             result['reconstruction_image_source'] = reconstruction_image_source
-             result['reconstruction_masks_dir'] = str(masks_dir) if masks_dir else None
-
-             sparse_dir = Path(result['colmap_output']) if result.get('success') and result.get('colmap_output') else None
-             if sparse_dir and sparse_dir.exists() and (
-                 self.config.get('export_sidecars', False)
-                 or self.config.get('export_lichtfeld', True)
-                 or self.config.get('export_realityscan', False)
-             ):
-                 _ensure_colmap_text_model(sparse_dir)
-
-             # Export to RealityScan if enabled
-             if result.get('success') and self.config.get('export_realityscan', False):
-                 try:
-                     logger.info("[Reconstruction] Exporting to RealityScan format...")
-                     self.progress.emit(0, 0, "Reconstruction: Exporting to RealityScan...")
-
-                     from src.premium.pose_transfer_integration import export_for_realityscan
-
-                     sparse_dir = Path(result['colmap_output'])
-                     realityscan_dir = output_dir / 'realityscan_export'
-
-                     requested_export_image_source = self.config.get('export_image_source', 'auto')
-                     requested_export_mask_source = self.config.get('export_mask_source', 'auto')
-
-                     # Determine images directory (prefer actual reconstruction input/output with files)
-                     result_images_dir = Path(result['perspectives_dir']) if result.get('perspectives_dir') else (output_dir / 'images')
-                     if requested_export_image_source == 'reconstruction':
-                         images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
-                     else:
-                         images_dir = self._resolve_project_image_dir(output_root, requested_export_image_source, alignment_mode)
-                         if not images_dir:
-                             images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
-
-                     # Determine masks directory for export
-                     export_masks_dir = None
-                     if self.config.get('export_include_masks', True):
-                         export_masks_dir = self._resolve_project_masks_dir(
-                             output_root,
-                             requested_export_mask_source,
-                             reconstruction_image_source,
-                         ) or masks_dir
-
-                     database_path = output_dir / 'database.db'
-                     if not database_path.exists():
-                         alt_db = output_dir / 'sparse' / 'database.db'
-                         if alt_db.exists():
-                             database_path = alt_db
-                     rs_success = export_for_realityscan(
-                         colmap_dir=str(sparse_dir),
-                         images_dir=str(images_dir),
-                         masks_dir=str(export_masks_dir) if export_masks_dir else None,
-                         output_dir=str(realityscan_dir),
-                         database_path=str(database_path) if database_path.exists() else None,
-                     )
-
-                     if rs_success:
-                         logger.info(f"[Reconstruction] RealityScan export complete: {realityscan_dir}")
-                         result['realityscan_export'] = str(realityscan_dir)
-                     else:
-                         logger.warning("[Reconstruction] RealityScan export failed")
-
-                 except Exception as e:
-                     logger.error(f"[Reconstruction] RealityScan export error: {e}", exc_info=True)
-
-             # Optional sidecar export (XMP metadata alongside aligned images)
-             if result.get('success') and self.config.get('export_sidecars', False):
-                 try:
-                     logger.info("[Reconstruction] Exporting XMP sidecar metadata...")
-                     self.progress.emit(0, 0, "Reconstruction: Exporting sidecar metadata...")
-
-                     from .export_formats import RealityScanExporter
-
-                     sparse_dir = Path(result['colmap_output'])
-                     requested_export_image_source = self.config.get('export_image_source', 'auto')
-                     result_images_dir = Path(result['perspectives_dir']) if result.get('perspectives_dir') else (output_dir / 'images')
-                     if requested_export_image_source == 'reconstruction':
-                         sidecar_images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
-                     else:
-                         sidecar_images_dir = self._resolve_project_image_dir(output_root, requested_export_image_source, alignment_mode)
-                         if not sidecar_images_dir:
-                             sidecar_images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
-
-                     exporter = RealityScanExporter(
-                         colmap_dir=str(sparse_dir),
-                         output_dir=str(output_dir)
-                     )
-
-                     if exporter.parse_colmap_text():
-                         xmp_ok = exporter.export_xmp_sidecars(str(sidecar_images_dir), use_perspective=False)
-                         if xmp_ok:
-                             logger.info(f"[Reconstruction] XMP sidecar export complete: {sidecar_images_dir}")
-                             result['xmp_sidecars_dir'] = str(sidecar_images_dir)
-                         else:
-                             logger.warning("[Reconstruction] XMP sidecar export completed with no files")
-                     else:
-                         logger.warning("[Reconstruction] Could not parse COLMAP text model for sidecar export")
-
-                 except Exception as e:
-                     logger.error(f"[Reconstruction] Sidecar export error: {e}", exc_info=True)
-             
-             # Export to LichtFeld Studio if enabled
-             if result.get('success') and self.config.get('export_lichtfeld', True):
-                 try:
-                     logger.info("[Reconstruction] Exporting to LichtFeld Studio format...")
-                     self.progress.emit(0, 0, "Reconstruction: Exporting to LichtFeld Studio...")
-                     
-                     from .export_formats import LichtfeldExporter
-                     
-                     sparse_dir = Path(result['colmap_output'])
-                     lichtfeld_dir = output_dir / 'lichtfeld_export'
-                     
-                     requested_export_image_source = self.config.get('export_image_source', 'auto')
-                     requested_export_mask_source = self.config.get('export_mask_source', 'auto')
-
-                     # Determine images directory (prefer actual reconstruction input/output with files)
-                     result_images_dir = Path(result['perspectives_dir']) if result.get('perspectives_dir') else (output_dir / 'images')
-                     if requested_export_image_source == 'reconstruction':
-                         images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
-                     else:
-                         images_dir = self._resolve_project_image_dir(output_root, requested_export_image_source, alignment_mode)
-                         if not images_dir:
-                             images_dir = _resolve_export_images_dir(result_images_dir, input_dir)
-                     
-                     # Determine masks directory for export
-                     export_masks_dir = None
-                     if self.config.get('export_include_masks', True):
-                         export_masks_dir = self._resolve_project_masks_dir(
-                             output_root,
-                             requested_export_mask_source,
-                             reconstruction_image_source,
-                         ) or masks_dir
-                     
-                     exporter = LichtfeldExporter(
-                         colmap_dir=str(sparse_dir),
-                         output_dir=str(lichtfeld_dir)
-                     )
-
-                     apply_fix_rotation = bool(self.config.get('lichtfeld_fix_rotation', True))
-                     logger.info(f"[Reconstruction] LichtFeld rotation fix: {'ON' if apply_fix_rotation else 'OFF'}")
-                     
-                     export_success = exporter.export(
-                         images_dir=str(images_dir),
-                         fix_rotation=apply_fix_rotation,
-                         masks_dir=str(export_masks_dir) if export_masks_dir else None
-                     )
-                     
-                     if export_success:
-                         logger.info(f"[Reconstruction] LichtFeld Studio export complete: {lichtfeld_dir}")
-                         result['lichtfeld_export'] = str(lichtfeld_dir)
-                     else:
-                         logger.warning("[Reconstruction] LichtFeld Studio export failed")
-                 
-                 except Exception as e:
-                     logger.error(f"[Reconstruction] LichtFeld export error: {e}", exc_info=True)
-             
-             return result
-
-        except Exception as e:
-            logger.error(f"Reconstruction error: {e}", exc_info=True)
-            return {'success': False, 'error': str(e)}
-
     def _execute_realityscan_export_only(self) -> Dict:
-        """Export split/masked images for RealityScan without requiring COLMAP output."""
+        """Export split/masked images for RealityCapture without COLMAP."""
+        import shutil as _shutil
         try:
-            from src.premium.pose_transfer_integration import export_for_realityscan
-
             output_root = Path(self.config['output_dir'])
             realityscan_dir = output_root / 'realityscan_export'
             alignment_mode = self.config.get('alignment_mode', 'perspective_reconstruction')
 
-            requested_export_image_source = self.config.get('export_image_source', 'auto')
-            images_dir = self._resolve_project_image_dir(output_root, requested_export_image_source, alignment_mode)
-            if requested_export_image_source == 'reconstruction' and not images_dir:
-                images_dir = self._resolve_project_image_dir(output_root, 'auto', alignment_mode)
-
+            # Find images directory
+            images_dir = self._resolve_project_image_dir(output_root, 'auto', alignment_mode)
             if not images_dir:
                 discovered = self.discover_stage_input_folder(3, self.config['output_dir'])
                 if discovered:
@@ -2302,9 +1881,10 @@ class PipelineWorker(QThread):
                 else:
                     return {
                         'success': False,
-                        'error': 'RealityScan export requires images. Run Stage 2 or Stage 1 first, or choose an explicit source.'
+                        'error': 'RealityCapture export requires images. Run Stage 1 or 2 first.',
                     }
 
+            # Find masks directory
             export_masks_dir = None
             if self.config.get('export_include_masks', True):
                 image_source = self._detect_project_image_source(output_root, images_dir)
@@ -2314,66 +1894,48 @@ class PipelineWorker(QThread):
                     image_source,
                 )
 
-            ok = export_for_realityscan(
-                colmap_dir=None,
-                images_dir=str(images_dir),
-                masks_dir=str(export_masks_dir) if export_masks_dir else None,
-                output_dir=str(realityscan_dir),
-                database_path=None,
-                flat_folder=True,
-            )
+            # Create output structure
+            out_images = realityscan_dir / 'images'
+            out_images.mkdir(parents=True, exist_ok=True)
 
-            if not ok:
-                return {'success': False, 'error': 'RealityScan export-only failed'}
+            # Copy images
+            img_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
+            copied = 0
+            for p in sorted(images_dir.rglob('*')):
+                if p.is_file() and p.suffix.lower() in img_exts:
+                    _shutil.copy2(str(p), str(out_images / p.name))
+                    copied += 1
 
-            image_count = 0
-            if realityscan_dir.exists():
-                image_count = len([p for p in realityscan_dir.glob('*.*') if p.is_file()])
+            # Copy masks if available
+            mask_count = 0
+            if export_masks_dir and export_masks_dir.exists():
+                out_masks = realityscan_dir / 'masks'
+                out_masks.mkdir(parents=True, exist_ok=True)
+                for p in sorted(export_masks_dir.rglob('*')):
+                    if p.is_file() and p.suffix.lower() in img_exts:
+                        _shutil.copy2(str(p), str(out_masks / p.name))
+                        mask_count += 1
 
+            # Write XMP sidecars using orientation from EXIF (yaw/pitch/roll embedded by Stage 2)
+            try:
+                from .export_formats import export_xmp_from_exif
+                export_xmp_from_exif(out_images)
+            except Exception as xmp_err:
+                logger.warning(f"[Export] XMP sidecar generation skipped: {xmp_err}")
+
+            logger.info(f"[Export] RealityCapture export: {copied} images, {mask_count} masks -> {realityscan_dir}")
             return {
                 'success': True,
                 'realityscan_export': str(realityscan_dir),
-                'images_exported': image_count,
-                'mode': 'images_masks_only'
+                'images_exported': copied,
+                'masks_exported': mask_count,
+                'mode': 'images_masks_only',
             }
+
         except Exception as e:
-            logger.error(f"RealityScan export-only error: {e}", exc_info=True)
+            logger.error(f"RealityCapture export error: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
 
-    def _execute_stage5(self, stage4_result: Dict) -> Dict:
-        """Execute Training (Lichtfeld Studio)"""
-        try:
-            from .lichtfeld_stage import LichtfeldTrainingStage
-            
-            # Get COLMAP model path
-            colmap_model = None
-            if stage4_result.get('success') and stage4_result.get('colmap_output'):
-                colmap_model = Path(stage4_result['colmap_output'])
-            
-            # Fallback path if reconstruction wasn't just run but we want to train on existing
-            if not colmap_model:
-                 possible_path = Path(self.config['output_dir']) / 'reconstruction' / 'sparse' / '0'
-                 if possible_path.exists():
-                     colmap_model = possible_path
-            
-            if not colmap_model or not colmap_model.exists():
-                return {'success': False, 'error': 'No aligned COLMAP model found for training'}
-            
-            # Images path (perspectives used in alignment)
-            # Rig SfM puts them in reconstruction/images
-            images_path = Path(self.config['output_dir']) / 'reconstruction' / 'images'
-            if not images_path.exists():
-                # Try finding from result
-                 if stage4_result.get('perspectives_dir'):
-                     images_path = Path(stage4_result['perspectives_dir'])
-            
-            stage = LichtfeldTrainingStage(lichtfeld_path=self.config.get('lichtfeld_path'))
-            return stage.run(colmap_model, images_path)
-            
-        except Exception as e:
-            logger.error(f"Training error: {e}", exc_info=True)
-            return {'success': False, 'error': str(e)}
-    
     def _get_default_cameras(self) -> List[Dict]:
         """Get default 8-camera horizontal configuration"""
         cameras = []

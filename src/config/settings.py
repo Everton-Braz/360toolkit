@@ -10,7 +10,10 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 
-from src.utils.colmap_paths import build_colmap_cli_context, normalize_colmap_executable, preferred_colmap_candidates
+# colmap_paths removed in simple-version — stub functions to avoid NameErrors
+def build_colmap_cli_context(*args, **kwargs): return None
+def normalize_colmap_executable(*args, **kwargs): return None
+def preferred_colmap_candidates(*args, **kwargs): return []
 from src.utils.dependency_provisioning import get_downloaded_colmap_candidates, get_downloaded_spheresfm_candidates
 from src.utils.app_paths import get_settings_file_path
 from src.utils.resource_path import get_base_path
@@ -42,8 +45,6 @@ class SettingsManager:
         self.settings_file = Path(settings_file)
         self.settings = self._load_settings()
 
-        self._refresh_bundled_reconstruction_paths()
-        
         # Auto-detect paths if not configured
         if not self.settings.get('sdk_path') or not self.is_sdk_valid(self.settings.get('sdk_path')):
             logger.info("SDK path not configured or invalid, running auto-detection...")
@@ -59,36 +60,7 @@ class SettingsManager:
                 self.settings['ffmpeg_path'] = str(detected_ffmpeg)
                 self.settings['ffmpeg_auto_detected'] = True
 
-        legacy_colmap = self.settings.get('colmap_path')
-        if legacy_colmap and not self.settings.get('colmap_gpu_path'):
-            self.settings['colmap_gpu_path'] = legacy_colmap
-
-        if not self.settings.get('spheresfm_path') or not self.is_colmap_valid(self.settings.get('spheresfm_path')):
-            logger.info("SphereSfM path not configured or invalid, running auto-detection...")
-            detected_spheresfm = self.auto_detect_spheresfm()
-            if detected_spheresfm:
-                self.settings['spheresfm_path'] = str(detected_spheresfm)
-                self.settings['spheresfm_auto_detected'] = True
-
-        if not self.settings.get('colmap_gpu_path') or not self.is_colmap_valid(self.settings.get('colmap_gpu_path')):
-            logger.info("COLMAP GPU path not configured or invalid, running auto-detection...")
-            detected_colmap = self.auto_detect_colmap()
-            if detected_colmap:
-                self.settings['colmap_gpu_path'] = str(detected_colmap)
-                self.settings['colmap_auto_detected'] = True
-
-        normalized_colmap = self._normalize_colmap_setting()
-        if normalized_colmap is not None:
-            self.settings['colmap_gpu_path'] = str(normalized_colmap)
-            self.settings['colmap_path'] = str(normalized_colmap)
-            self.save_settings()
-        elif self.settings.get('colmap_gpu_path') or self.settings.get('colmap_path'):
-            self.settings['colmap_gpu_path'] = None
-            self.settings['colmap_path'] = None
-            self.settings['colmap_auto_detected'] = False
-            self.save_settings()
-
-    def _refresh_bundled_reconstruction_paths(self) -> None:
+    def _refresh_bundled_reconstruction_paths_REMOVED(self) -> None:  # removed in simple-version
         """Prefer executables shipped with the current frozen build over stale saved paths."""
         if not getattr(sys, 'frozen', False):
             return

@@ -7,7 +7,7 @@ This version:
 - Bundles PyTorch with CUDA 12.8 (supports sm_50 through sm_120)
 - RTX 30xx (sm_86), RTX 40xx (sm_89), RTX 50xx (sm_120) - ALL NATIVE
 - Bundles Ultralytics YOLOv8 + SAM for hybrid masking
-- Bundles Insta360 SDK + FFmpeg + SphereSfM/COLMAP
+- Bundles Insta360 SDK + FFmpeg
 - GPU auto-detection with graceful CPU fallback
 """
 
@@ -494,16 +494,11 @@ hiddenimports = [
     # PyQt6
     'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets', 'PyQt6.sip',
     
-    # SfM/COLMAP
-    'pycolmap', 'scipy', 'scipy.spatial', 'scipy.spatial.transform',
-    
     # Our modules
     'src', 'src.main', 'src.ui', 'src.ui.main_window',
     'src.pipeline', 'src.pipeline.batch_orchestrator',
     'src.extraction', 'src.transforms', 'src.masking',
     'src.config', 'src.config.defaults', 'src.config.settings',
-    'src.premium', 'src.premium.sphere_sfm_integration',
-    'src.premium.pose_transfer_integration',
     'src.utils',
 ]
 

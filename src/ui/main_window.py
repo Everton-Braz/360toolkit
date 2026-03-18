@@ -262,8 +262,6 @@ class MainWindow(QMainWindow):
         self.page_stack.addWidget(self._create_stage2_persp_page())   # 2
         self.page_stack.addWidget(self._create_stage2_cube_page())    # 3
         self.page_stack.addWidget(self._create_stage3_page())         # 4
-        self.page_stack.addWidget(self._create_stage4_page())         # 5
-        self.page_stack.addWidget(self._create_stage5_page())         # 6
         content_layout.addWidget(self.page_stack, stretch=1)
 
         body.addWidget(content_wrapper)
@@ -314,8 +312,6 @@ class MainWindow(QMainWindow):
             ("Perspective Split",    "2"),
             ("Cubemap Split",        "2"),
             ("AI Masking",           "3"),
-            ("3D Reconstruction",    "4"),
-            ("Training",             "5"),
         ]
         
         self.nav_group = QButtonGroup(self)
@@ -595,31 +591,6 @@ class MainWindow(QMainWindow):
         card3.addWidget(self.run_stage3_btn)
         grid.addWidget(card3, 1, 0)
         
-        # 3D Reconstruction
-        card4 = CardWidget("3D Reconstruction")
-        self.stage4_enable = QCheckBox("Enable COLMAP reconstruction")
-        self.stage4_enable.setChecked(True)
-        self.stage4_enable.toggled.connect(self._update_overview_stage_summary)
-        card4.addWidget(self.stage4_enable)
-        self.run_stage4_btn = QPushButton("Configure Reconstruction")
-        self.run_stage4_btn.setFixedHeight(36)
-        self.run_stage4_btn.clicked.connect(lambda: self._open_stage_page(5))
-        self.run_stage4_btn.setObjectName("stageSecondaryButton")
-        card4.addWidget(self.run_stage4_btn)
-        grid.addWidget(card4, 1, 1)
-        
-        # Training
-        card5 = CardWidget("Training")
-        self.stage5_enable = QCheckBox("Enable Gaussian Splatting training")
-        self.stage5_enable.setChecked(False)
-        self.stage5_enable.toggled.connect(self._update_overview_stage_summary)
-        card5.addWidget(self.stage5_enable)
-        self.run_stage5_btn = QPushButton("Configure Training")
-        self.run_stage5_btn.setFixedHeight(36)
-        self.run_stage5_btn.clicked.connect(lambda: self._open_stage_page(6))
-        self.run_stage5_btn.setObjectName("stageSecondaryButton")
-        card5.addWidget(self.run_stage5_btn)
-        grid.addWidget(card5, 0, 2)
         
         layout.addLayout(grid)
 
@@ -1142,688 +1113,6 @@ class MainWindow(QMainWindow):
         return self._scroll_wrap(page)
     
     # ========================================================================
-    # PAGE 5: 3D RECONSTRUCTION
-    # ========================================================================
-    def _create_stage4_page(self) -> QScrollArea:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(10)
-
-        def _make_divider() -> QFrame:
-            divider = QFrame()
-            divider.setFrameShape(QFrame.Shape.HLine)
-            divider.setProperty("role", "divider")
-            divider.setFixedHeight(1)
-            divider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            return divider
-        
-        layout.addWidget(StageHeader(
-            "3D Reconstruction",
-            "Reconstruct camera poses and 3D structure. Required for Gaussian Splatting and photogrammetry."
-        ))
-
-        card_sources = CardWidget("Data Sources")
-        self.recon_image_source_combo = QComboBox()
-        self.recon_image_source_combo.addItem("Auto", "auto")
-        self.recon_image_source_combo.addItem("Perspective Views", "perspective")
-        self.recon_image_source_combo.addItem("Equirect / Extracted Frames", "equirect")
-        card_sources.addWidget(FormRow("Reconstruction Images:", self.recon_image_source_combo))
-
-        self.recon_mask_source_combo = QComboBox()
-        self.recon_mask_source_combo.addItem("Auto", "auto")
-        self.recon_mask_source_combo.addItem("Match Reconstruction Images", "match_images")
-        self.recon_mask_source_combo.addItem("Perspective Masks", "perspective")
-        self.recon_mask_source_combo.addItem("Equirect Masks", "equirect")
-        self.recon_mask_source_combo.addItem("No Masks", "none")
-        card_sources.addWidget(FormRow("Reconstruction Masks:", self.recon_mask_source_combo))
-
-        self.export_image_source_combo = QComboBox()
-        self.export_image_source_combo.addItem("Auto", "auto")
-        self.export_image_source_combo.addItem("Use Reconstruction Images", "reconstruction")
-        self.export_image_source_combo.addItem("Perspective Views", "perspective")
-        self.export_image_source_combo.addItem("Equirect / Extracted Frames", "equirect")
-        card_sources.addWidget(FormRow("Export Images:", self.export_image_source_combo))
-
-        self.export_mask_source_combo = QComboBox()
-        self.export_mask_source_combo.addItem("Auto", "auto")
-        self.export_mask_source_combo.addItem("Match Reconstruction Masks", "match_reconstruction")
-        self.export_mask_source_combo.addItem("Perspective Masks", "perspective")
-        self.export_mask_source_combo.addItem("Equirect Masks", "equirect")
-        self.export_mask_source_combo.addItem("No Masks", "none")
-        card_sources.addWidget(FormRow("Export Masks:", self.export_mask_source_combo))
-
-        source_hint = QLabel(
-            "Choose sources here when running stages separately so reconstruction and exports stay on the same image and mask set."
-        )
-        source_hint.setProperty("role", "mutedSmall")
-        source_hint.setWordWrap(True)
-        card_sources.addWidget(source_hint)
-        layout.addWidget(card_sources)
-
-        # ── Tool selector ─────────────────────────────────────────────────────
-        card_tool = CardWidget("Reconstruction Tool")
-        self.recon_tool_combo = QComboBox()
-        self.recon_tool_combo.addItem("COLMAP / pycolmap  (Perspective)", "colmap")
-        self.recon_tool_combo.addItem("SphereSfM  (Panorama SfM — Equirectangular)", "spheresfm")
-        self.recon_tool_combo.setCurrentIndex(0)
-        self.recon_tool_combo.setMinimumWidth(340)
-        card_tool.addWidget(FormRow("Tool:", self.recon_tool_combo))
-
-        self.recon_tool_desc = QLabel("Perspective Reconstruction | COLMAP GPU on split images | Universal output")
-        self.recon_tool_desc.setProperty("role", "mutedSmall")
-        card_tool.addWidget(self.recon_tool_desc)
-        self.recon_backend_label = QLabel("Backend: detecting pycolmap / external COLMAP CLI availability...")
-        self.recon_backend_label.setProperty("role", "mutedSmall")
-        self.recon_backend_label.setWordWrap(True)
-        card_tool.addWidget(self.recon_backend_label)
-
-        _open_settings_btn = QPushButton("Manage in Settings")
-        _open_settings_btn.setFixedWidth(160)
-        _open_settings_btn.clicked.connect(self.open_settings)
-        card_tool.addWidget(_open_settings_btn)
-        layout.addWidget(card_tool)
-
-        # ── Stacked parameter pages ────────────────────────────────────────────
-        self.recon_params_stack = QStackedWidget()
-
-        # ══ Page 0: COLMAP ══
-        _colmap_page = QWidget()
-        _cp_layout = QVBoxLayout(_colmap_page)
-        _cp_layout.setContentsMargins(0, 0, 0, 0)
-        _cp_layout.setSpacing(8)
-        card_colmap = CardWidget("COLMAP Parameters")
-
-        self.use_gpu_colmap_check = QCheckBox("Use GPU Acceleration (CUDA) for feature extraction + matching")
-        self.use_gpu_colmap_check.setChecked(True)
-        card_colmap.addWidget(self.use_gpu_colmap_check)
-
-        self.colmap_feature_extractor_combo = QComboBox()
-        self.colmap_feature_extractor_combo.addItem("Automatic", "auto")
-        self.colmap_feature_extractor_combo.setCurrentIndex(0)
-        self.colmap_feature_extractor_combo.setVisible(False)
-
-        colmap_hint = QLabel(
-            "Learned-vs-classic extraction is handled automatically. Use the main options below and pass version-specific flags directly to the customer-installed binary when needed."
-        )
-        colmap_hint.setProperty("role", "mutedSmall")
-        colmap_hint.setWordWrap(True)
-        card_colmap.addWidget(colmap_hint)
-
-        self.mapping_backend_combo = QComboBox()
-        self.mapping_backend_combo.addItem("GLOMAP — Global Mapper", "glomap")
-        self.mapping_backend_combo.addItem("COLMAP Incremental", "colmap")
-        self.mapping_backend_combo.setCurrentIndex(0)
-        self.mapping_backend_combo.setMinimumWidth(280)
-        card_colmap.addWidget(FormRow("Mapping Backend:", self.mapping_backend_combo))
-
-        self.colmap_camera_model_combo = QComboBox()
-        for _cm in ["PINHOLE", "OPENCV", "RADIAL", "SIMPLE_RADIAL", "SIMPLE_PINHOLE", "FULL_OPENCV"]:
-            self.colmap_camera_model_combo.addItem(_cm, _cm)
-        self.colmap_camera_model_combo.setCurrentIndex(0)
-        card_colmap.addWidget(FormRow("Camera Model:", self.colmap_camera_model_combo))
-
-        self.colmap_single_camera_check = QCheckBox("Single camera model (all images share intrinsics)")
-        self.colmap_single_camera_check.setChecked(False)
-        card_colmap.addWidget(self.colmap_single_camera_check)
-
-        _sep_c1 = _make_divider()
-        card_colmap.addWidget(_sep_c1)
-
-        _cp_nums = QGridLayout()
-        _cp_nums.setSpacing(8)
-        _cp_nums.setColumnStretch(1, 1)
-        _cp_nums.setColumnStretch(3, 1)
-        self.colmap_max_image_size_spin = QSpinBox()
-        self.colmap_max_image_size_spin.setRange(512, 9999)
-        self.colmap_max_image_size_spin.setValue(3200)
-        self.colmap_max_image_size_spin.setSuffix(" px")
-        self.colmap_max_image_size_spin.setToolTip("--FeatureExtraction.max_image_size")
-        _cp_nums.addWidget(QLabel("Max Image Size:"), 0, 0)
-        _cp_nums.addWidget(self.colmap_max_image_size_spin, 0, 1)
-        self.colmap_max_features_spin = QSpinBox()
-        self.colmap_max_features_spin.setRange(256, 65536)
-        self.colmap_max_features_spin.setValue(8192)
-        self.colmap_max_features_spin.setToolTip("--SiftExtraction.max_num_features")
-        _cp_nums.addWidget(QLabel("Max Features:"), 0, 2)
-        _cp_nums.addWidget(self.colmap_max_features_spin, 0, 3)
-        self.colmap_min_matches_spin = QSpinBox()
-        self.colmap_min_matches_spin.setRange(5, 500)
-        self.colmap_min_matches_spin.setValue(15)
-        self.colmap_min_matches_spin.setToolTip("--mapper.min_num_matches")
-        _cp_nums.addWidget(QLabel("Min Matches:"), 1, 0)
-        _cp_nums.addWidget(self.colmap_min_matches_spin, 1, 1)
-        self.colmap_overlap_spin = QSpinBox()
-        self.colmap_overlap_spin.setRange(1, 50)
-        self.colmap_overlap_spin.setValue(10)
-        self.colmap_overlap_spin.setToolTip("--SequentialMatching.overlap (sequential mode only)")
-        _cp_nums.addWidget(QLabel("Sequential Overlap:"), 1, 2)
-        _cp_nums.addWidget(self.colmap_overlap_spin, 1, 3)
-        card_colmap.addLayout(_cp_nums)
-
-        _sep_c2 = _make_divider()
-        card_colmap.addWidget(_sep_c2)
-
-        self.colmap_matching_combo = QComboBox()
-        self.colmap_matching_combo.addItem("Exhaustive (all pairs — best quality, slow)", "exhaustive")
-        self.colmap_matching_combo.addItem("Sequential (ordered frames — fast)", "sequential")
-        self.colmap_matching_combo.addItem("Vocab Tree (large sets — balanced)", "vocab_tree")
-        self.colmap_matching_combo.setCurrentIndex(0)
-        card_colmap.addWidget(FormRow("Feature Matching:", self.colmap_matching_combo))
-
-        self.enable_hloc_fallback_check = QCheckBox("Enable HLOC fallback (ALIKED + LightGlue)")
-        self.enable_hloc_fallback_check.setChecked(True)
-        self.enable_hloc_fallback_check.setVisible(False)
-
-        self.prefer_colmap_learned_check = QCheckBox("Prefer COLMAP built-in ALIKED (over HLOC)")
-        self.prefer_colmap_learned_check.setChecked(False)
-        self.prefer_colmap_learned_check.setVisible(False)
-
-        self.require_learned_pipeline_check = QCheckBox("All-or-fail: require learned pipeline")
-        self.require_learned_pipeline_check.setChecked(False)
-        self.require_learned_pipeline_check.setVisible(False)
-
-        _sep_c3 = _make_divider()
-        card_colmap.addWidget(_sep_c3)
-
-        self.colmap_feature_flags_edit = QLineEdit()
-        self.colmap_feature_flags_edit.setPlaceholderText(
-            "e.g. --ImageReader.camera_model PINHOLE --ImageReader.max_image_size 3200"
-        )
-        card_colmap.addWidget(FormRow("Feature Flags:", self.colmap_feature_flags_edit))
-
-        self.colmap_matcher_flags_edit = QLineEdit()
-        self.colmap_matcher_flags_edit.setPlaceholderText(
-            "e.g. --SequentialMatching.overlap 10 --SequentialMatching.loop_detection 0"
-        )
-        card_colmap.addWidget(FormRow("Matcher Flags:", self.colmap_matcher_flags_edit))
-
-        self.colmap_mapper_flags_edit = QLineEdit()
-        self.colmap_mapper_flags_edit.setPlaceholderText(
-            "e.g. --Mapper.min_num_matches 15 --Mapper.ba_refine_focal_length 0"
-        )
-        card_colmap.addWidget(FormRow("Mapper Flags:", self.colmap_mapper_flags_edit))
-
-        self.colmap_extra_args_edit = QLineEdit()
-        self.colmap_extra_args_edit.setPlaceholderText(
-            "Optional global overrides appended to COLMAP commands"
-        )
-        card_colmap.addWidget(FormRow("Global Overrides:", self.colmap_extra_args_edit))
-        _colmap_extra_hint = QLabel(
-            "These flags are passed directly to the selected COLMAP binary. Keep them compatible with the installed version."
-        )
-        _colmap_extra_hint.setProperty("role", "mutedSmall")
-        _colmap_extra_hint.setWordWrap(True)
-        card_colmap.addWidget(_colmap_extra_hint)
-
-        _cp_layout.addWidget(card_colmap)
-        _cp_layout.addStretch()
-        self.recon_params_stack.addWidget(_colmap_page)
-
-        # ══ Page 1: SphereSfM ══
-        _sphere_page = QWidget()
-        _sp_layout = QVBoxLayout(_sphere_page)
-        _sp_layout.setContentsMargins(0, 0, 0, 0)
-        _sp_layout.setSpacing(8)
-        card_sphere = CardWidget("SphereSfM Parameters")
-
-        self.spheresfm_status_label = QLabel("  Checking SphereSfM...")
-        self.spheresfm_status_label.setObjectName("sphereStatus")
-        self.spheresfm_status_label.setProperty("status", "idle")
-        card_sphere.addWidget(self.spheresfm_status_label)
-        QTimer.singleShot(300, self._check_spheresfm_status)
-
-        self.use_gpu_spheresfm_check = QCheckBox("Use GPU Acceleration (CUDA)")
-        self.use_gpu_spheresfm_check.setChecked(True)
-        card_sphere.addWidget(self.use_gpu_spheresfm_check)
-
-        self.sphere_camera_model_combo = QComboBox()
-        self.sphere_camera_model_combo.addItem("SPHERE", "SPHERE")
-        self.sphere_camera_model_combo.addItem("SIMPLE_SPHERE", "SIMPLE_SPHERE")
-        self.sphere_camera_model_combo.addItem("FULL_OPENCV (Fisheye)", "FULL_OPENCV")
-        self.sphere_camera_model_combo.setCurrentIndex(0)
-        card_sphere.addWidget(FormRow("Camera Model:", self.sphere_camera_model_combo))
-
-        self.sphere_feature_extractor_combo = QComboBox()
-        self.sphere_feature_extractor_combo.addItem("SIFT (Default for SphereSfM)", "sift")
-        self.sphere_feature_extractor_combo.addItem("ALIKED (Learned)", "aliked")
-        self.sphere_feature_extractor_combo.setCurrentIndex(0)
-        card_sphere.addWidget(FormRow("Feature Extractor:", self.sphere_feature_extractor_combo))
-
-        self.sphere_matching_combo = QComboBox()
-        self.sphere_matching_combo.addItem("Sequential (ordered frames)", "sequential")
-        self.sphere_matching_combo.addItem("Exhaustive (all pairs)", "exhaustive")
-        self.sphere_matching_combo.addItem("Vocab Tree (large sets)", "vocab_tree")
-        self.sphere_matching_combo.setCurrentIndex(0)  # Sequential is best for video sequences
-        card_sphere.addWidget(FormRow("Feature Matching:", self.sphere_matching_combo))
-
-        _sep_s1 = _make_divider()
-        card_sphere.addWidget(_sep_s1)
-
-        _sp_nums = QGridLayout()
-        _sp_nums.setSpacing(8)
-        _sp_nums.setColumnStretch(1, 1)
-        _sp_nums.setColumnStretch(3, 1)
-        self.sphere_max_image_size_spin = QSpinBox()
-        self.sphere_max_image_size_spin.setRange(512, 9999)
-        self.sphere_max_image_size_spin.setValue(3200)
-        self.sphere_max_image_size_spin.setSuffix(" px")
-        _sp_nums.addWidget(QLabel("Max Image Size:"), 0, 0)
-        _sp_nums.addWidget(self.sphere_max_image_size_spin, 0, 1)
-        self.sphere_max_features_spin = QSpinBox()
-        self.sphere_max_features_spin.setRange(256, 65536)
-        self.sphere_max_features_spin.setValue(8192)
-        _sp_nums.addWidget(QLabel("Max Features:"), 0, 2)
-        _sp_nums.addWidget(self.sphere_max_features_spin, 0, 3)
-        self.sphere_overlap_spin = QSpinBox()
-        self.sphere_overlap_spin.setRange(1, 50)
-        self.sphere_overlap_spin.setValue(10)
-        _sp_nums.addWidget(QLabel("Sequential Overlap:"), 1, 0)
-        _sp_nums.addWidget(self.sphere_overlap_spin, 1, 1)
-        self.sphere_min_matches_spin = QSpinBox()
-        self.sphere_min_matches_spin.setRange(5, 500)
-        self.sphere_min_matches_spin.setValue(15)
-        _sp_nums.addWidget(QLabel("Min Matches:"), 1, 2)
-        _sp_nums.addWidget(self.sphere_min_matches_spin, 1, 3)
-        card_sphere.addLayout(_sp_nums)
-
-        _sep_s2 = _make_divider()
-        card_sphere.addWidget(_sep_s2)
-
-        self.sphere_extra_args_edit = QLineEdit()
-        self.sphere_extra_args_edit.setPlaceholderText(
-            "e.g. --SiftExtraction.estimate_affine_shape 1 --SiftMatching.guided_matching 1"
-        )
-        card_sphere.addWidget(FormRow("Extra Arguments:", self.sphere_extra_args_edit))
-        _sphere_extra_hint = QLabel("Passed directly to SphereSfM. Separate flags with spaces.")
-        _sphere_extra_hint.setProperty("role", "mutedSmall")
-        card_sphere.addWidget(_sphere_extra_hint)
-
-        _sep_s3 = _make_divider()
-        card_sphere.addWidget(_sep_s3)
-
-        _sphere_tuning_hint = QLabel(
-            "Use the main controls here and pass any version-specific SphereSfM flags directly below."
-        )
-        _sphere_tuning_hint.setWordWrap(True)
-        _sphere_tuning_hint.setProperty("role", "mutedSmall")
-        card_sphere.addWidget(_sphere_tuning_hint)
-
-        self.sphere_feature_flags_edit = QLineEdit()
-        self.sphere_feature_flags_edit.setPlaceholderText(
-            "e.g. --ImageReader.single_camera 1 --SiftExtraction.max_num_orientations 2"
-        )
-        card_sphere.addWidget(FormRow("Feature Flags:", self.sphere_feature_flags_edit))
-
-        self.sphere_matcher_flags_edit = QLineEdit()
-        self.sphere_matcher_flags_edit.setPlaceholderText(
-            "e.g. --SequentialMatching.overlap 10 --SiftMatching.max_ratio 0.8"
-        )
-        card_sphere.addWidget(FormRow("Matcher Flags:", self.sphere_matcher_flags_edit))
-
-        self.sphere_mapper_flags_edit = QLineEdit()
-        self.sphere_mapper_flags_edit.setPlaceholderText(
-            "e.g. --Mapper.init_min_num_inliers 50 --Mapper.multiple_models 0"
-        )
-        card_sphere.addWidget(FormRow("Mapper Flags:", self.sphere_mapper_flags_edit))
-
-        feature_group = QGroupBox("Feature Extraction Tuning")
-        feature_layout = QGridLayout(feature_group)
-        feature_layout.setHorizontalSpacing(10)
-        feature_layout.setVerticalSpacing(8)
-        feature_layout.setColumnStretch(1, 1)
-        feature_layout.setColumnStretch(3, 1)
-
-        self.sphere_single_camera_check = QCheckBox("Single camera intrinsics")
-        self.sphere_single_camera_check.setChecked(True)
-        feature_layout.addWidget(self.sphere_single_camera_check, 0, 0, 1, 2)
-
-        self.sphere_max_orientations_spin = QSpinBox()
-        self.sphere_max_orientations_spin.setRange(1, 8)
-        self.sphere_max_orientations_spin.setValue(2)
-        feature_layout.addWidget(QLabel("Max Orientations:"), 1, 0)
-        feature_layout.addWidget(self.sphere_max_orientations_spin, 1, 1)
-
-        self.sphere_peak_threshold_spin = QDoubleSpinBox()
-        self.sphere_peak_threshold_spin.setDecimals(5)
-        self.sphere_peak_threshold_spin.setRange(0.00001, 1.0)
-        self.sphere_peak_threshold_spin.setSingleStep(0.0005)
-        self.sphere_peak_threshold_spin.setValue(0.00667)
-        feature_layout.addWidget(QLabel("Peak Threshold:"), 1, 2)
-        feature_layout.addWidget(self.sphere_peak_threshold_spin, 1, 3)
-
-        self.sphere_edge_threshold_spin = QDoubleSpinBox()
-        self.sphere_edge_threshold_spin.setDecimals(2)
-        self.sphere_edge_threshold_spin.setRange(1.0, 50.0)
-        self.sphere_edge_threshold_spin.setSingleStep(0.5)
-        self.sphere_edge_threshold_spin.setValue(10.0)
-        feature_layout.addWidget(QLabel("Edge Threshold:"), 2, 0)
-        feature_layout.addWidget(self.sphere_edge_threshold_spin, 2, 1)
-
-        card_sphere.addWidget(feature_group)
-
-        matcher_group = QGroupBox("Feature Matching Tuning")
-        matcher_layout = QGridLayout(matcher_group)
-        matcher_layout.setHorizontalSpacing(10)
-        matcher_layout.setVerticalSpacing(8)
-        matcher_layout.setColumnStretch(1, 1)
-        matcher_layout.setColumnStretch(3, 1)
-
-        self.sphere_quadratic_overlap_check = QCheckBox("Quadratic overlap")
-        self.sphere_quadratic_overlap_check.setChecked(True)
-        matcher_layout.addWidget(self.sphere_quadratic_overlap_check, 0, 0, 1, 2)
-
-        self.sphere_loop_detection_check = QCheckBox("Loop detection")
-        self.sphere_loop_detection_check.setChecked(False)
-        matcher_layout.addWidget(self.sphere_loop_detection_check, 0, 2, 1, 2)
-
-        self.sphere_cross_check_check = QCheckBox("Cross-check matches")
-        self.sphere_cross_check_check.setChecked(True)
-        matcher_layout.addWidget(self.sphere_cross_check_check, 1, 0, 1, 2)
-
-        self.sphere_max_ratio_spin = QDoubleSpinBox()
-        self.sphere_max_ratio_spin.setDecimals(2)
-        self.sphere_max_ratio_spin.setRange(0.1, 1.0)
-        self.sphere_max_ratio_spin.setSingleStep(0.05)
-        self.sphere_max_ratio_spin.setValue(0.8)
-        matcher_layout.addWidget(QLabel("Max Ratio:"), 2, 0)
-        matcher_layout.addWidget(self.sphere_max_ratio_spin, 2, 1)
-
-        self.sphere_max_distance_spin = QDoubleSpinBox()
-        self.sphere_max_distance_spin.setDecimals(2)
-        self.sphere_max_distance_spin.setRange(0.1, 5.0)
-        self.sphere_max_distance_spin.setSingleStep(0.05)
-        self.sphere_max_distance_spin.setValue(0.7)
-        matcher_layout.addWidget(QLabel("Max Distance:"), 2, 2)
-        matcher_layout.addWidget(self.sphere_max_distance_spin, 2, 3)
-
-        self.sphere_matcher_max_error_spin = QDoubleSpinBox()
-        self.sphere_matcher_max_error_spin.setDecimals(2)
-        self.sphere_matcher_max_error_spin.setRange(0.5, 20.0)
-        self.sphere_matcher_max_error_spin.setSingleStep(0.5)
-        self.sphere_matcher_max_error_spin.setValue(4.0)
-        matcher_layout.addWidget(QLabel("Max Error:"), 3, 0)
-        matcher_layout.addWidget(self.sphere_matcher_max_error_spin, 3, 1)
-
-        self.sphere_matcher_confidence_spin = QDoubleSpinBox()
-        self.sphere_matcher_confidence_spin.setDecimals(3)
-        self.sphere_matcher_confidence_spin.setRange(0.1, 1.0)
-        self.sphere_matcher_confidence_spin.setSingleStep(0.001)
-        self.sphere_matcher_confidence_spin.setValue(0.999)
-        matcher_layout.addWidget(QLabel("Confidence:"), 3, 2)
-        matcher_layout.addWidget(self.sphere_matcher_confidence_spin, 3, 3)
-
-        self.sphere_max_trials_spin = QSpinBox()
-        self.sphere_max_trials_spin.setRange(100, 100000)
-        self.sphere_max_trials_spin.setSingleStep(100)
-        self.sphere_max_trials_spin.setValue(10000)
-        matcher_layout.addWidget(QLabel("Max Trials:"), 4, 0)
-        matcher_layout.addWidget(self.sphere_max_trials_spin, 4, 1)
-
-        self.sphere_min_inlier_ratio_spin = QDoubleSpinBox()
-        self.sphere_min_inlier_ratio_spin.setDecimals(2)
-        self.sphere_min_inlier_ratio_spin.setRange(0.0, 1.0)
-        self.sphere_min_inlier_ratio_spin.setSingleStep(0.05)
-        self.sphere_min_inlier_ratio_spin.setValue(0.25)
-        matcher_layout.addWidget(QLabel("Min Inlier Ratio:"), 4, 2)
-        matcher_layout.addWidget(self.sphere_min_inlier_ratio_spin, 4, 3)
-
-        card_sphere.addWidget(matcher_group)
-
-        mapper_group = QGroupBox("Mapping Tuning")
-        mapper_layout = QGridLayout(mapper_group)
-        mapper_layout.setHorizontalSpacing(10)
-        mapper_layout.setVerticalSpacing(8)
-        mapper_layout.setColumnStretch(1, 1)
-        mapper_layout.setColumnStretch(3, 1)
-
-        self.sphere_refine_focal_check = QCheckBox("Refine focal length")
-        self.sphere_refine_focal_check.setChecked(False)
-        mapper_layout.addWidget(self.sphere_refine_focal_check, 0, 0, 1, 2)
-
-        self.sphere_refine_principal_point_check = QCheckBox("Refine principal point")
-        self.sphere_refine_principal_point_check.setChecked(False)
-        mapper_layout.addWidget(self.sphere_refine_principal_point_check, 0, 2, 1, 2)
-
-        self.sphere_refine_extra_params_check = QCheckBox("Refine extra params")
-        self.sphere_refine_extra_params_check.setChecked(False)
-        mapper_layout.addWidget(self.sphere_refine_extra_params_check, 1, 0, 1, 2)
-
-        self.sphere_ignore_two_view_tracks_check = QCheckBox("Ignore two-view tracks")
-        self.sphere_ignore_two_view_tracks_check.setChecked(True)
-        mapper_layout.addWidget(self.sphere_ignore_two_view_tracks_check, 1, 2, 1, 2)
-
-        self.sphere_multiple_models_check = QCheckBox("Allow multiple models")
-        self.sphere_multiple_models_check.setChecked(True)
-        mapper_layout.addWidget(self.sphere_multiple_models_check, 2, 0, 1, 2)
-
-        self.sphere_init_min_inliers_spin = QSpinBox()
-        self.sphere_init_min_inliers_spin.setRange(1, 1000)
-        self.sphere_init_min_inliers_spin.setValue(100)
-        mapper_layout.addWidget(QLabel("Init Min Inliers:"), 3, 0)
-        mapper_layout.addWidget(self.sphere_init_min_inliers_spin, 3, 1)
-
-        self.sphere_init_trials_spin = QSpinBox()
-        self.sphere_init_trials_spin.setRange(1, 5000)
-        self.sphere_init_trials_spin.setValue(200)
-        mapper_layout.addWidget(QLabel("Init Trials:"), 3, 2)
-        mapper_layout.addWidget(self.sphere_init_trials_spin, 3, 3)
-
-        self.sphere_init_max_error_spin = QDoubleSpinBox()
-        self.sphere_init_max_error_spin.setDecimals(2)
-        self.sphere_init_max_error_spin.setRange(0.5, 20.0)
-        self.sphere_init_max_error_spin.setSingleStep(0.5)
-        self.sphere_init_max_error_spin.setValue(4.0)
-        mapper_layout.addWidget(QLabel("Init Max Error:"), 4, 0)
-        mapper_layout.addWidget(self.sphere_init_max_error_spin, 4, 1)
-
-        self.sphere_init_forward_motion_spin = QDoubleSpinBox()
-        self.sphere_init_forward_motion_spin.setDecimals(2)
-        self.sphere_init_forward_motion_spin.setRange(0.1, 1.0)
-        self.sphere_init_forward_motion_spin.setSingleStep(0.01)
-        self.sphere_init_forward_motion_spin.setValue(0.95)
-        mapper_layout.addWidget(QLabel("Init Max Forward Motion:"), 4, 2)
-        mapper_layout.addWidget(self.sphere_init_forward_motion_spin, 4, 3)
-
-        self.sphere_init_min_tri_angle_spin = QDoubleSpinBox()
-        self.sphere_init_min_tri_angle_spin.setDecimals(1)
-        self.sphere_init_min_tri_angle_spin.setRange(0.1, 90.0)
-        self.sphere_init_min_tri_angle_spin.setSingleStep(0.5)
-        self.sphere_init_min_tri_angle_spin.setValue(16.0)
-        mapper_layout.addWidget(QLabel("Init Min Tri Angle:"), 5, 0)
-        mapper_layout.addWidget(self.sphere_init_min_tri_angle_spin, 5, 1)
-
-        self.sphere_abs_pose_min_inliers_spin = QSpinBox()
-        self.sphere_abs_pose_min_inliers_spin.setRange(1, 500)
-        self.sphere_abs_pose_min_inliers_spin.setValue(50)
-        mapper_layout.addWidget(QLabel("Abs Pose Min Inliers:"), 5, 2)
-        mapper_layout.addWidget(self.sphere_abs_pose_min_inliers_spin, 5, 3)
-
-        self.sphere_abs_pose_max_error_spin = QDoubleSpinBox()
-        self.sphere_abs_pose_max_error_spin.setDecimals(2)
-        self.sphere_abs_pose_max_error_spin.setRange(0.5, 50.0)
-        self.sphere_abs_pose_max_error_spin.setSingleStep(0.5)
-        self.sphere_abs_pose_max_error_spin.setValue(8.0)
-        mapper_layout.addWidget(QLabel("Abs Pose Max Error:"), 6, 0)
-        mapper_layout.addWidget(self.sphere_abs_pose_max_error_spin, 6, 1)
-
-        self.sphere_abs_pose_min_inlier_ratio_spin = QDoubleSpinBox()
-        self.sphere_abs_pose_min_inlier_ratio_spin.setDecimals(2)
-        self.sphere_abs_pose_min_inlier_ratio_spin.setRange(0.0, 1.0)
-        self.sphere_abs_pose_min_inlier_ratio_spin.setSingleStep(0.05)
-        self.sphere_abs_pose_min_inlier_ratio_spin.setValue(0.25)
-        mapper_layout.addWidget(QLabel("Abs Pose Min Inlier Ratio:"), 6, 2)
-        mapper_layout.addWidget(self.sphere_abs_pose_min_inlier_ratio_spin, 6, 3)
-
-        self.sphere_max_reg_trials_spin = QSpinBox()
-        self.sphere_max_reg_trials_spin.setRange(1, 20)
-        self.sphere_max_reg_trials_spin.setValue(3)
-        mapper_layout.addWidget(QLabel("Max Registration Trials:"), 7, 0)
-        mapper_layout.addWidget(self.sphere_max_reg_trials_spin, 7, 1)
-
-        self.sphere_tri_min_angle_spin = QDoubleSpinBox()
-        self.sphere_tri_min_angle_spin.setDecimals(1)
-        self.sphere_tri_min_angle_spin.setRange(0.0, 30.0)
-        self.sphere_tri_min_angle_spin.setSingleStep(0.5)
-        self.sphere_tri_min_angle_spin.setValue(1.5)
-        mapper_layout.addWidget(QLabel("Triangulation Min Angle:"), 7, 2)
-        mapper_layout.addWidget(self.sphere_tri_min_angle_spin, 7, 3)
-
-        self.sphere_tri_max_transitivity_spin = QSpinBox()
-        self.sphere_tri_max_transitivity_spin.setRange(1, 10)
-        self.sphere_tri_max_transitivity_spin.setValue(1)
-        mapper_layout.addWidget(QLabel("Triangulation Max Transitivity:"), 8, 0)
-        mapper_layout.addWidget(self.sphere_tri_max_transitivity_spin, 8, 1)
-
-        self.sphere_filter_max_reproj_error_spin = QDoubleSpinBox()
-        self.sphere_filter_max_reproj_error_spin.setDecimals(2)
-        self.sphere_filter_max_reproj_error_spin.setRange(0.5, 20.0)
-        self.sphere_filter_max_reproj_error_spin.setSingleStep(0.5)
-        self.sphere_filter_max_reproj_error_spin.setValue(4.0)
-        mapper_layout.addWidget(QLabel("Filter Max Reproj Error:"), 8, 2)
-        mapper_layout.addWidget(self.sphere_filter_max_reproj_error_spin, 8, 3)
-
-        self.sphere_filter_min_tri_angle_spin = QDoubleSpinBox()
-        self.sphere_filter_min_tri_angle_spin.setDecimals(1)
-        self.sphere_filter_min_tri_angle_spin.setRange(0.0, 30.0)
-        self.sphere_filter_min_tri_angle_spin.setSingleStep(0.5)
-        self.sphere_filter_min_tri_angle_spin.setValue(1.5)
-        mapper_layout.addWidget(QLabel("Filter Min Tri Angle:"), 9, 0)
-        mapper_layout.addWidget(self.sphere_filter_min_tri_angle_spin, 9, 1)
-
-        card_sphere.addWidget(mapper_group)
-        feature_group.setVisible(False)
-        matcher_group.setVisible(False)
-        mapper_group.setVisible(False)
-
-        _sp_layout.addWidget(card_sphere)
-        _sp_layout.addStretch()
-        self.recon_params_stack.addWidget(_sphere_page)
-
-        # Wire tool dropdown → stack
-        self.recon_tool_combo.currentIndexChanged.connect(self._on_recon_tool_changed)
-        self.recon_params_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        layout.addWidget(self.recon_params_stack)
-
-        # ── Legacy hidden widgets (config compat) ─────────────────────────────
-        self.alignment_mode_group = QButtonGroup(self)
-        self.mode_rig_sfm_radio = QRadioButton()
-        self.mode_rig_sfm_radio.setChecked(True)
-        self.mode_rig_sfm_radio.setVisible(False)
-        self.mode_sphere_sfm_radio = QRadioButton()
-        self.mode_sphere_sfm_radio.setVisible(False)
-        self.alignment_mode_group.addButton(self.mode_rig_sfm_radio, 0)
-        self.alignment_mode_group.addButton(self.mode_sphere_sfm_radio, 1)
-        self.use_rig_sfm_check = QCheckBox()
-        self.use_rig_sfm_check.setVisible(False)
-        self.use_rig_sfm_check.setChecked(True)
-        self.mode_pose_transfer_radio = QRadioButton()
-        self.mode_pose_transfer_radio.setVisible(False)
-        self.alignment_mode_group.addButton(self.mode_pose_transfer_radio, 2)
-        self.pose_transfer_config_group = CardWidget("Virtual Camera Configuration")
-        self.pose_transfer_config_group.setVisible(False)
-        layout.addWidget(self.pose_transfer_config_group)
-        # Quality combo kept hidden so saved configs round-trip cleanly (always High)
-        self.colmap_quality_combo = QComboBox()
-        self.colmap_quality_combo.setVisible(False)
-        self.colmap_quality_combo.addItems(["Draft (Fast)", "Medium (Balanced)", "High (Best Quality)"])
-        self.colmap_quality_combo.setCurrentIndex(2)
-        
-        # Export card
-        card_export = CardWidget("Export Options")
-        self.export_lichtfeld_check = QCheckBox("Export to LichtFeld Studio Format")
-        self.export_lichtfeld_check.setChecked(True)
-        self.export_lichtfeld_check.setToolTip("transforms.json + pointcloud.ply + images/ + masks/")
-        card_export.addWidget(self.export_lichtfeld_check)
-
-        self.export_realityscan_check = QCheckBox("Export to RealityScan Format")
-        self.export_realityscan_check.setChecked(False)
-        self.export_realityscan_check.setToolTip(
-            "Without COLMAP: exports images/ (+ optional *_mask.png). "
-            "With COLMAP: also exports sparse/ and optional database.db"
-        )
-        card_export.addWidget(self.export_realityscan_check)
-        
-        self.export_include_masks_check = QCheckBox("Include Masks in Export")
-        self.export_include_masks_check.setChecked(True)
-        card_export.addWidget(self.export_include_masks_check)
-
-        self.export_sidecar_check = QCheckBox("Export XMP sidecar files (optional)")
-        self.export_sidecar_check.setChecked(False)
-        self.export_sidecar_check.setToolTip("Create .xmp files beside aligned images with camera pose metadata")
-        card_export.addWidget(self.export_sidecar_check)
-        layout.addWidget(card_export)
-        
-        # Output info
-        self.output_info_label = QLabel(
-            "Output: <output_dir>/reconstruction/sparse/0/"
-        )
-        self.output_info_label.setProperty("role", "muted")
-        self.output_info_label.setWordWrap(True)
-        layout.addWidget(self.output_info_label)
-
-        stage4_footer = StageActionFooter("Run Reconstruction")
-        stage4_footer.primary_button.clicked.connect(self.run_stage_4_only)
-        stage4_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(5))
-        layout.addWidget(stage4_footer)
-
-        QTimer.singleShot(0, self._update_recon_stack_height)
-        
-        layout.addStretch()
-        return self._scroll_wrap(page)
-    
-    # ========================================================================
-    # PAGE 6: TRAINING
-    # ========================================================================
-    def _create_stage5_page(self) -> QScrollArea:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(16)
-        
-        layout.addWidget(StageHeader(
-            "Training",
-            "Launch Gaussian Splatting training with LichtFeld Studio using the generated COLMAP model."
-        ))
-
-        layout.addWidget(StageSummaryStrip(
-            "Training",
-            "Configure optional training launch and executable path after reconstruction output is ready."
-        ))
-        
-        card = CardWidget("Training Target")
-        self.train_lichtfeld_check = QCheckBox("Launch Lichtfeld Studio Training")
-        self.train_lichtfeld_check.setChecked(False)
-        card.addWidget(self.train_lichtfeld_check)
-        
-        path_row = QHBoxLayout()
-        self.lichtfeld_path_edit = QLineEdit()
-        self.lichtfeld_path_edit.setPlaceholderText("Auto-detect or browse...")
-        path_row.addWidget(self.lichtfeld_path_edit, stretch=1)
-        lf_browse = QPushButton("Browse...")
-        lf_browse.setFixedWidth(80)
-        lf_browse.clicked.connect(self.browse_lichtfeld_path)
-        path_row.addWidget(lf_browse)
-        path_row_widget = QWidget()
-        path_row_widget.setLayout(path_row)
-        card.addWidget(FormRow("Lichtfeld Path:", path_row_widget))
-        
-        note = QLabel("Lichtfeld Studio will be launched with the generated COLMAP model for 3DGS training.")
-        note.setProperty("role", "muted")
-        note.setWordWrap(True)
-        card.addWidget(note)
-        
-        layout.addWidget(card)
-
-        stage5_footer = StageActionFooter("Run Training")
-        stage5_footer.primary_button.clicked.connect(self.run_stage_5_only)
-        stage5_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(6))
-        layout.addWidget(stage5_footer)
-
-        layout.addStretch()
-        return self._scroll_wrap(page)
-    
-    # ========================================================================
     # LOG PANEL
     # ========================================================================
     def _create_log_panel(self) -> QWidget:
@@ -1988,8 +1277,6 @@ class MainWindow(QMainWindow):
             self._set_control_status("No masking categories enabled", "warn")
             return
 
-        if stage_index == 6 and self.train_lichtfeld_check.isChecked() and not self.lichtfeld_path_edit.text().strip():
-            self.log_message("[WARN] Training validation: Lichtfeld path is required when training is enabled.")
             self._set_control_status("Lichtfeld path required", "warn")
             return
 
@@ -2179,8 +1466,6 @@ class MainWindow(QMainWindow):
             getattr(self, 'stage1_enable', None),
             getattr(self, 'stage2_enable', None),
             getattr(self, 'stage3_enable', None),
-            getattr(self, 'stage4_enable', None),
-            getattr(self, 'stage5_enable', None),
         ]
         enabled_count = sum(1 for check in checks if check is not None and check.isChecked())
         self.overview_stage_status_label.setText(
@@ -2319,86 +1604,19 @@ class MainWindow(QMainWindow):
             },
             'stage3_image_source': self._get_stage3_image_source(),
             'mask_target': self._legacy_mask_target_from_source(self._get_stage3_image_source()),
-            'stage4_enabled': self.stage4_enable.isChecked(),
-            'use_rig_sfm': self.use_rig_sfm_check.isChecked(),
-            'alignment_mode': self._get_alignment_mode(),
-            'stage4_image_source': self._get_stage4_image_source(),
-            'stage4_mask_source': self._get_stage4_mask_source(),
-            'use_gpu_colmap': (
-                self.use_gpu_colmap_check.isChecked()
-                if self.recon_tool_combo.currentData() == 'colmap'
-                else self.use_gpu_spheresfm_check.isChecked()
-            ),
-            'colmap_quality': 2,
-            'use_lightglue_aliked': True,
-            'prefer_colmap_learned': self.prefer_colmap_learned_check.isChecked(),
-            'enable_hloc_fallback': self.enable_hloc_fallback_check.isChecked(),
-            'require_learned_pipeline': self.require_learned_pipeline_check.isChecked(),
-            'reuse_colmap_database': True,
-            'lichtfeld_fix_rotation': True,
-            'spheresfm_path': str(self.settings.get_spheresfm_path()) if self.settings.get_spheresfm_path() else None,
-            'colmap_path': str(self.settings.get_colmap_gpu_path()) if self.settings.get_colmap_gpu_path() else None,
-            'sphere_alignment_path': str(self.settings.get_spheresfm_path()) if self.settings.get_spheresfm_path() else None,
-            'mapping_backend': self.mapping_backend_combo.currentData(),
-            'colmap_params': {
-                'camera_model': self.colmap_camera_model_combo.currentData(),
-                'single_camera': self.colmap_single_camera_check.isChecked(),
-                'max_image_size': self.colmap_max_image_size_spin.value(),
-                'max_num_features': self.colmap_max_features_spin.value(),
-                'min_num_matches': self.colmap_min_matches_spin.value(),
-                'sequential_overlap': self.colmap_overlap_spin.value(),
-                'matching_method': self.colmap_matching_combo.currentData(),
-                'feature_extractor': self.colmap_feature_extractor_combo.currentData(),
-                    'feature_flags': self.colmap_feature_flags_edit.text().strip(),
-                    'matcher_flags': self.colmap_matcher_flags_edit.text().strip(),
-                    'mapper_flags': self.colmap_mapper_flags_edit.text().strip(),
-                'extra_args': self.colmap_extra_args_edit.text().strip(),
-            },
-            'spheresfm_params': {
-                'camera_model': self.sphere_camera_model_combo.currentData(),
-                'feature_extractor': self.sphere_feature_extractor_combo.currentData(),
-                'matching_method': self.sphere_matching_combo.currentData(),
-                'max_image_size': self.sphere_max_image_size_spin.value(),
-                'max_num_features': self.sphere_max_features_spin.value(),
-                'sequential_overlap': self.sphere_overlap_spin.value(),
-                'min_num_matches': self.sphere_min_matches_spin.value(),
-                'feature_flags': self._build_spheresfm_feature_flags(),
-                'matcher_flags': self._build_spheresfm_matcher_flags(),
-                'mapper_flags': self._build_spheresfm_mapper_flags(),
-                'extra_args': self.sphere_extra_args_edit.text().strip(),
-            },
-            'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
             'export_realityscan': self.export_realityscan_check.isChecked(),
             'export_include_masks': self.export_include_masks_check.isChecked(),
             'export_image_source': self._get_export_image_source(),
             'export_mask_source': self._get_export_mask_source(),
             'export_sidecars': self.export_sidecar_check.isChecked(),
-            'stage5_enabled': self.stage5_enable.isChecked(),
-            'train_lighting': self.train_lichtfeld_check.isChecked(),
-            'lichtfeld_path': self.lichtfeld_path_edit.text(),
             # SDK Media Processing options (colour sliders, stabilization toggles)
             'sdk_options': self.stage1_media_panel.get_sdk_options() if hasattr(self, 'stage1_media_panel') else {},
         }
     
-    def _get_alignment_mode(self) -> str:
-        if hasattr(self, 'recon_tool_combo') and self.recon_tool_combo.currentData() == 'spheresfm':
-            return 'panorama_sfm'
-        return 'perspective_reconstruction'
-
     def _get_stage3_image_source(self) -> str:
         if hasattr(self, 'mask_input_source_combo'):
             return self.mask_input_source_combo.currentData()
         return 'equirect' if not self.stage2_enable.isChecked() else 'perspective'
-
-    def _get_stage4_image_source(self) -> str:
-        if hasattr(self, 'recon_image_source_combo'):
-            return self.recon_image_source_combo.currentData()
-        return 'auto'
-
-    def _get_stage4_mask_source(self) -> str:
-        if hasattr(self, 'recon_mask_source_combo'):
-            return self.recon_mask_source_combo.currentData()
-        return 'auto'
 
     def _get_export_image_source(self) -> str:
         if hasattr(self, 'export_image_source_combo'):
@@ -2567,87 +1785,6 @@ class MainWindow(QMainWindow):
                 self.persons_enable.setChecked(cats.get('persons', True))
                 self.objects_enable.setChecked(cats.get('personal_objects', True))
                 self.animals_enable.setChecked(cats.get('animals', True))
-            if 'stage4_enabled' in config:
-                self.stage4_enable.setChecked(config['stage4_enabled'])
-            if 'alignment_mode' in config:
-                m = config['alignment_mode']
-                if m in ('sphere_sfm', 'panorama_sfm'):
-                    self.recon_tool_combo.setCurrentIndex(1)
-                else:
-                    self.recon_tool_combo.setCurrentIndex(0)
-            if 'stage4_image_source' in config and hasattr(self, 'recon_image_source_combo'):
-                self._set_combo_data(self.recon_image_source_combo, config['stage4_image_source'])
-            if 'stage4_mask_source' in config and hasattr(self, 'recon_mask_source_combo'):
-                self._set_combo_data(self.recon_mask_source_combo, config['stage4_mask_source'])
-            if 'use_gpu_colmap' in config:
-                self.use_gpu_colmap_check.setChecked(config['use_gpu_colmap'])
-                self.use_gpu_spheresfm_check.setChecked(config['use_gpu_colmap'])
-            if 'sphere_alignment_path' in config and config['sphere_alignment_path']:
-                try:
-                    self.settings.set_spheresfm_path(Path(config['sphere_alignment_path']), auto_detected=False)
-                except Exception:
-                    pass
-            if 'spheresfm_path' in config and config['spheresfm_path']:
-                try:
-                    self.settings.set_spheresfm_path(Path(config['spheresfm_path']), auto_detected=False)
-                except Exception:
-                    pass
-            if 'colmap_path' in config and config['colmap_path']:
-                try:
-                    self.settings.set_colmap_gpu_path(Path(config['colmap_path']), auto_detected=False)
-                except Exception:
-                    pass
-            if 'glomap_path' in config and config['glomap_path']:
-                try:
-                    self.settings.set_colmap_gpu_path(Path(config['glomap_path']), auto_detected=False)
-                except Exception:
-                    pass
-            if 'mapping_backend' in config:
-                backend_idx = self.mapping_backend_combo.findData(config['mapping_backend'])
-                if backend_idx >= 0:
-                    self.mapping_backend_combo.setCurrentIndex(backend_idx)
-            if 'colmap_params' in config:
-                colmap_params = config['colmap_params']
-                camera_idx = self.colmap_camera_model_combo.findData(colmap_params.get('camera_model', 'PINHOLE'))
-                if camera_idx >= 0:
-                    self.colmap_camera_model_combo.setCurrentIndex(camera_idx)
-                self.colmap_single_camera_check.setChecked(bool(colmap_params.get('single_camera', False)))
-                self.colmap_max_image_size_spin.setValue(int(colmap_params.get('max_image_size', 3200)))
-                self.colmap_max_features_spin.setValue(int(colmap_params.get('max_num_features', 8192)))
-                self.colmap_min_matches_spin.setValue(int(colmap_params.get('min_num_matches', 15)))
-                self.colmap_overlap_spin.setValue(int(colmap_params.get('sequential_overlap', 10)))
-                matching_idx = self.colmap_matching_combo.findData(colmap_params.get('matching_method', 'exhaustive'))
-                if matching_idx >= 0:
-                    self.colmap_matching_combo.setCurrentIndex(matching_idx)
-                self.colmap_feature_flags_edit.setText(str(colmap_params.get('feature_flags', '')))
-                self.colmap_matcher_flags_edit.setText(str(colmap_params.get('matcher_flags', '')))
-                self.colmap_mapper_flags_edit.setText(str(colmap_params.get('mapper_flags', '')))
-                self.colmap_extra_args_edit.setText(str(colmap_params.get('extra_args', '')))
-            if 'spheresfm_params' in config:
-                sfm_params = config['spheresfm_params']
-                camera_idx = self.sphere_camera_model_combo.findData(sfm_params.get('camera_model', 'SPHERE'))
-                if camera_idx >= 0:
-                    self.sphere_camera_model_combo.setCurrentIndex(camera_idx)
-                feature_idx = self.sphere_feature_extractor_combo.findData(sfm_params.get('feature_extractor', 'sift'))
-                if feature_idx >= 0:
-                    self.sphere_feature_extractor_combo.setCurrentIndex(feature_idx)
-                matching_idx = self.sphere_matching_combo.findData(sfm_params.get('matching_method', 'sequential'))
-                if matching_idx >= 0:
-                    self.sphere_matching_combo.setCurrentIndex(matching_idx)
-                self.sphere_max_image_size_spin.setValue(int(sfm_params.get('max_image_size', 3200)))
-                self.sphere_max_features_spin.setValue(int(sfm_params.get('max_num_features', 8192)))
-                self.sphere_overlap_spin.setValue(int(sfm_params.get('sequential_overlap', 10)))
-                self.sphere_min_matches_spin.setValue(int(sfm_params.get('min_num_matches', 15)))
-                self._apply_spheresfm_flag_config(sfm_params)
-                self.sphere_extra_args_edit.setText(str(sfm_params.get('extra_args', '')))
-            if 'enable_hloc_fallback' in config:
-                self.enable_hloc_fallback_check.setChecked(config['enable_hloc_fallback'])
-            if 'prefer_colmap_learned' in config:
-                self.prefer_colmap_learned_check.setChecked(config['prefer_colmap_learned'])
-            if 'require_learned_pipeline' in config:
-                self.require_learned_pipeline_check.setChecked(config['require_learned_pipeline'])
-            if 'export_lichtfeld' in config:
-                self.export_lichtfeld_check.setChecked(config['export_lichtfeld'])
             if 'export_realityscan' in config:
                 self.export_realityscan_check.setChecked(config['export_realityscan'])
             if 'export_include_masks' in config:
@@ -2658,12 +1795,6 @@ class MainWindow(QMainWindow):
                 self._set_combo_data(self.export_mask_source_combo, config['export_mask_source'])
             if 'export_sidecars' in config:
                 self.export_sidecar_check.setChecked(config['export_sidecars'])
-            if 'stage5_enabled' in config:
-                self.stage5_enable.setChecked(config['stage5_enabled'])
-            if 'train_lighting' in config:
-                self.train_lichtfeld_check.setChecked(config['train_lighting'])
-            if 'lichtfeld_path' in config:
-                self.lichtfeld_path_edit.setText(config['lichtfeld_path'])
 
             self.on_settings_changed()
             
@@ -2981,23 +2112,6 @@ class MainWindow(QMainWindow):
         self.start_time_spin.setEnabled(not checked)
         self.end_time_spin.setEnabled(not checked)
     
-    def _check_spheresfm_status(self):
-        try:
-            from src.premium.sphere_sfm_integration import verify_spheresfm_installation
-            status = verify_spheresfm_installation()
-            if status['installed']:
-                self.spheresfm_status_label.setText(f"  SphereSfM available ({status.get('version', 'Unknown')})")
-                self.spheresfm_status_label.setProperty("status", "ok")
-                self._refresh_widget_style(self.spheresfm_status_label)
-            else:
-                self.spheresfm_status_label.setText(f"  SphereSfM not available: {status.get('error', 'Unknown')}")
-                self.spheresfm_status_label.setProperty("status", "error")
-                self._refresh_widget_style(self.spheresfm_status_label)
-        except Exception as e:
-            self.spheresfm_status_label.setText(f"  SphereSfM error: {e}")
-            self.spheresfm_status_label.setProperty("status", "error")
-            self._refresh_widget_style(self.spheresfm_status_label)
-    
     # ========================================================================
     # FILE BROWSING
     # ========================================================================
@@ -3054,8 +2168,6 @@ class MainWindow(QMainWindow):
         worker = PipelineWorker({
             'output_dir': str(output_root),
             'export_include_masks': self.export_include_masks_check.isChecked(),
-            'alignment_mode': self._get_alignment_mode(),
-            'stage4_image_source': self._get_stage4_image_source(),
             'export_image_source': self._get_export_image_source(),
             'export_mask_source': self._get_export_mask_source(),
         })
@@ -3078,90 +2190,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "RealityScan Export Failed", f"Simple export failed:\n{error}")
 
     def export_realityscan_with_metadata(self):
-        """Export RealityScan package with COLMAP metadata (sparse model), plus images/masks."""
-        output_dir = self.output_dir_edit.text().strip()
-        if not output_dir:
-            QMessageBox.warning(self, "Output Required", "Please configure the output directory first.")
-            return
-
-        output_root = Path(output_dir)
-        if not output_root.exists():
-            QMessageBox.warning(self, "Not Found", f"Output folder does not exist:\n{output_root}")
-            return
-
-        sparse_root = output_root / 'reconstruction' / 'sparse'
-        colmap_dir = None
-
-        candidates = [sparse_root / '0', sparse_root / '1', sparse_root]
-        for candidate in candidates:
-            if candidate.exists() and ((candidate / 'images.txt').exists() or (candidate / 'images.bin').exists()):
-                colmap_dir = candidate
-                break
-
-        if colmap_dir is None:
-            QMessageBox.warning(
-                self,
-                "COLMAP Metadata Not Found",
-                "No COLMAP sparse model was found in reconstruction output.\n"
-                "Run reconstruction first, or use 'Export RealityScan (Simple)'."
-            )
-            return
-
-        images_dir = self._resolve_output_image_dir(
-            output_root,
-            self._get_export_image_source(),
-            alignment_mode=self._get_alignment_mode(),
-            reconstruction_dir=output_root / 'reconstruction' / 'images',
+        """Not available in simple-version (no COLMAP reconstruction)."""
+        QMessageBox.information(
+            self,
+            "Not Available",
+            "RealityScan metadata export requires COLMAP reconstruction (Stage 4).\n"
+            "Use the 'Export RealityScan (Simple)' option instead."
         )
-        if images_dir is None or not images_dir.exists():
-            QMessageBox.warning(self, "Images Not Found", "Could not find the selected images to export.")
-            return
-
-        export_masks_dir = None
-        if self.export_include_masks_check.isChecked():
-            if images_dir == (output_root / 'perspective_views'):
-                image_source = 'perspective'
-            elif images_dir == (output_root / 'extracted_frames'):
-                image_source = 'equirect'
-            else:
-                image_source = self._get_stage4_image_source()
-            masks_dir = self._resolve_output_masks_dir(output_root, self._get_export_mask_source(), image_source)
-            export_masks_dir = str(masks_dir) if masks_dir else None
-
-        from src.premium.pose_transfer_integration import export_for_realityscan
-
-        export_dir = output_root / 'realityscan_export_with_metadata'
-        database_path = sparse_root / 'database.db'
-        ok = export_for_realityscan(
-            colmap_dir=str(colmap_dir),
-            images_dir=str(images_dir),
-            masks_dir=export_masks_dir,
-            output_dir=str(export_dir),
-            database_path=str(database_path) if database_path.exists() else None,
-            flat_folder=True,
-        )
-
-        if ok:
-            self.log_message(f"[OK] RealityScan metadata export complete: {export_dir}")
-            self._set_control_status("RealityScan metadata export complete", "ok")
-            QMessageBox.information(
-                self,
-                "RealityScan Export Complete",
-                f"Metadata export created successfully:\n{export_dir}\n\n"
-                "Contains images+masks in one folder plus sparse metadata."
-            )
-        else:
-            self.log_message("[FAIL] RealityScan metadata export failed")
-            self._set_control_status("RealityScan metadata export failed", "error")
-            QMessageBox.warning(self, "RealityScan Export Failed", "Metadata export failed.")
-    
-    def browse_lichtfeld_path(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Lichtfeld Studio", "C:\\Program Files",
-            "Executables (*.exe);;All (*.*)"
-        )
-        if path:
-            self.lichtfeld_path_edit.setText(path)
 
     def browse_colmap_path(self):
         QMessageBox.information(
@@ -3268,9 +2303,6 @@ class MainWindow(QMainWindow):
             'skip_transform': not self.stage2_enable.isChecked(),
             'enable_stage2': self.stage2_enable.isChecked(),
             'enable_stage3': self.stage3_enable.isChecked(),
-            'use_rig_sfm': self.stage4_enable.isChecked() and self.use_rig_sfm_check.isChecked(),
-            'train_lighting': self.stage5_enable.isChecked() and self.train_lichtfeld_check.isChecked(),
-            'lichtfeld_path': self.lichtfeld_path_edit.text() or None,
             'export_realityscan': self.export_realityscan_check.isChecked(),
             'export_include_masks': self.export_include_masks_check.isChecked(),
             'fps': self.fps_spin.value(),
@@ -3360,61 +2392,6 @@ class MainWindow(QMainWindow):
                 },
                 'stage3_image_source': self._get_stage3_image_source(),
                 'mask_target': self._legacy_mask_target_from_source(self._get_stage3_image_source()),
-            })
-        
-        # Reconstruction config
-        if self.stage4_enable.isChecked():
-            _is_colmap = (self.recon_tool_combo.currentData() == 'colmap')
-            self.pipeline_config.update({
-                'alignment_mode': self._get_alignment_mode(),
-                'use_gpu_colmap': (
-                    self.use_gpu_colmap_check.isChecked()
-                    if _is_colmap else self.use_gpu_spheresfm_check.isChecked()
-                ),
-                'colmap_quality': 2,
-                'use_lightglue_aliked': True,
-                'prefer_colmap_learned': self.prefer_colmap_learned_check.isChecked(),
-                'enable_hloc_fallback': self.enable_hloc_fallback_check.isChecked(),
-                'require_learned_pipeline': self.require_learned_pipeline_check.isChecked(),
-                'reuse_colmap_database': True,
-                'lichtfeld_fix_rotation': True,
-                'spheresfm_path': str(self.settings.get_spheresfm_path()) if self.settings.get_spheresfm_path() else None,
-                'colmap_path': str(self.settings.get_colmap_gpu_path()) if self.settings.get_colmap_gpu_path() else None,
-                'sphere_alignment_path': str(self.settings.get_spheresfm_path()) if self.settings.get_spheresfm_path() else None,
-                'mapping_backend': self.mapping_backend_combo.currentData(),
-                'colmap_params': {
-                    'camera_model': self.colmap_camera_model_combo.currentData(),
-                    'single_camera': self.colmap_single_camera_check.isChecked(),
-                    'max_image_size': self.colmap_max_image_size_spin.value(),
-                    'max_num_features': self.colmap_max_features_spin.value(),
-                    'min_num_matches': self.colmap_min_matches_spin.value(),
-                    'sequential_overlap': self.colmap_overlap_spin.value(),
-                    'matching_method': self.colmap_matching_combo.currentData(),
-                    'feature_extractor': self.colmap_feature_extractor_combo.currentData(),
-                    'feature_flags': self.colmap_feature_flags_edit.text().strip(),
-                    'matcher_flags': self.colmap_matcher_flags_edit.text().strip(),
-                    'mapper_flags': self.colmap_mapper_flags_edit.text().strip(),
-                    'extra_args': self.colmap_extra_args_edit.text().strip(),
-                },
-                'spheresfm_params': {
-                    'camera_model': self.sphere_camera_model_combo.currentData(),
-                    'feature_extractor': self.sphere_feature_extractor_combo.currentData(),
-                    'matching_method': self.sphere_matching_combo.currentData(),
-                    'max_image_size': self.sphere_max_image_size_spin.value(),
-                    'max_num_features': self.sphere_max_features_spin.value(),
-                    'sequential_overlap': self.sphere_overlap_spin.value(),
-                    'min_num_matches': self.sphere_min_matches_spin.value(),
-                    'feature_flags': self._build_spheresfm_feature_flags(),
-                    'matcher_flags': self._build_spheresfm_matcher_flags(),
-                    'mapper_flags': self._build_spheresfm_mapper_flags(),
-                    'extra_args': self.sphere_extra_args_edit.text().strip(),
-                },
-                'export_lichtfeld': self.export_lichtfeld_check.isChecked(),
-                'stage4_image_source': self._get_stage4_image_source(),
-                'stage4_mask_source': self._get_stage4_mask_source(),
-                'export_image_source': self._get_export_image_source(),
-                'export_mask_source': self._get_export_mask_source(),
-                'export_sidecars': self.export_sidecar_check.isChecked(),
             })
         
         # UI state
@@ -3522,7 +2499,7 @@ class MainWindow(QMainWindow):
 
         output_root = Path(output_dir)
         preferred_source = self._get_stage3_image_source()
-        folder = self._resolve_output_image_dir(output_root, preferred_source, alignment_mode=self._get_alignment_mode())
+        folder = self._resolve_output_image_dir(output_root, preferred_source)
         if folder is None and preferred_source == 'auto':
             from src.pipeline.batch_orchestrator import PipelineWorker
             worker = PipelineWorker({})
@@ -3554,105 +2531,6 @@ class MainWindow(QMainWindow):
         self.stage1_enable.setChecked(s1)
         self.stage2_enable.setChecked(s2)
     
-    def run_stage_4_only(self):
-        self.log_message("Running reconstruction only")
-        output_dir = self.output_dir_edit.text()
-        if not output_dir:
-            QMessageBox.warning(self, "Missing", "Configure output directory first")
-            return
-
-        output_root = Path(output_dir)
-        input_dir = self._resolve_output_image_dir(
-            output_root,
-            self._get_stage4_image_source(),
-            alignment_mode=self._get_alignment_mode(),
-        )
-        if input_dir is None:
-            from src.pipeline.batch_orchestrator import PipelineWorker
-            worker = PipelineWorker({})
-            input_dir = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
-        
-        if not input_dir or not input_dir.exists():
-            caption = "Select Reconstruction Images"
-            if self._get_stage4_image_source() == 'equirect':
-                caption = "Select Equirect Frames"
-            elif self._get_stage4_image_source() == 'perspective':
-                caption = "Select Perspective Views"
-            folder = QFileDialog.getExistingDirectory(self, caption, str(Path(output_dir)))
-            if not folder:
-                return
-            input_dir = Path(folder)
-        
-        self.log_message(f"Using input: {input_dir}")
-        self._pending_stage4_input = str(input_dir)
-        self._auto_advance_enabled = False
-        s1 = self.stage1_enable.isChecked()
-        s2 = self.stage2_enable.isChecked()
-        s3 = self.stage3_enable.isChecked()
-        s5 = self.stage5_enable.isChecked()
-        orig = self.stage4_enable.isChecked()
-        self.stage1_enable.setChecked(False)
-        self.stage2_enable.setChecked(False)
-        self.stage3_enable.setChecked(False)
-        self.stage5_enable.setChecked(False)
-        self.stage4_enable.setChecked(True)
-        self.start_pipeline()
-        self.stage1_enable.setChecked(s1)
-        self.stage2_enable.setChecked(s2)
-        self.stage3_enable.setChecked(s3)
-        self.stage5_enable.setChecked(s5)
-        self.stage4_enable.setChecked(orig)
-    
-    def run_stage_5_only(self):
-        self.log_message("Running training only")
-        output_dir_text = self.output_dir_edit.text()
-        if not output_dir_text:
-            QMessageBox.warning(self, "Missing", "Configure output directory first")
-            return
-
-        output_dir = Path(output_dir_text)
-        if not output_dir.exists():
-            QMessageBox.warning(self, "Missing", f"Output directory not found:\n{output_dir}")
-            return
-
-        model_dir = output_dir / 'reconstruction' / 'sparse' / '0'
-        has_model = model_dir.exists() and any((model_dir / name).exists() for name in ('images.bin', 'images.txt'))
-        if not has_model:
-            QMessageBox.warning(
-                self,
-                "No Reconstruction",
-                "No aligned COLMAP model was found. Run Stage 4 (Reconstruction) first."
-            )
-            return
-
-        if self.train_lichtfeld_check.isChecked():
-            lichtfeld_path = self.lichtfeld_path_edit.text().strip()
-            if not lichtfeld_path or not Path(lichtfeld_path).exists():
-                QMessageBox.warning(
-                    self,
-                    "Invalid Lichtfeld Path",
-                    "Training is enabled, but the Lichtfeld Studio executable path is missing or invalid."
-                )
-                return
-
-        self._auto_advance_enabled = False
-        s1 = self.stage1_enable.isChecked()
-        s2 = self.stage2_enable.isChecked()
-        s3 = self.stage3_enable.isChecked()
-        s4 = self.stage4_enable.isChecked()
-        orig = self.stage5_enable.isChecked()
-        self.stage1_enable.setChecked(False)
-        self.stage2_enable.setChecked(False)
-        self.stage3_enable.setChecked(False)
-        self.stage4_enable.setChecked(False)
-        self.stage5_enable.setChecked(True)
-        self.start_pipeline()
-        self.stage1_enable.setChecked(s1)
-        self.stage2_enable.setChecked(s2)
-        self.stage3_enable.setChecked(s3)
-        self.stage4_enable.setChecked(s4)
-        self.stage5_enable.setChecked(orig)
-    
     # ========================================================================
     # CALLBACKS
     # ========================================================================
@@ -3669,8 +2547,6 @@ class MainWindow(QMainWindow):
                 next_map = {
                     1: (self.stage2_enable, self.run_stage_2_only),
                     2: (self.stage3_enable, self.run_stage_3_only),
-                    3: (self.stage4_enable, self.run_stage_4_only),
-                    4: (self.stage5_enable, self.run_stage_5_only),
                 }
                 if stage_number in next_map:
                     check, runner = next_map[stage_number]
