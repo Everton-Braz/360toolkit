@@ -1330,7 +1330,8 @@ class MainWindow(QMainWindow):
         cc_spin = QSpinBox()
         cc_spin.setRange(1, 12)
         cc_spin.setValue(camera_count)
-        cc_spin.setFixedWidth(68)
+        cc_spin.setMinimumWidth(92)
+        cc_spin.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         row.addWidget(cc_spin)
         
         pitch_lbl = QLabel("Pitch")
@@ -1339,7 +1340,8 @@ class MainWindow(QMainWindow):
         p_spin = QSpinBox()
         p_spin.setRange(-90, 90)
         p_spin.setValue(pitch)
-        p_spin.setFixedWidth(68)
+        p_spin.setMinimumWidth(92)
+        p_spin.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         row.addWidget(p_spin)
         
         fov_lbl = QLabel("FOV")
@@ -1348,7 +1350,8 @@ class MainWindow(QMainWindow):
         f_spin = QSpinBox()
         f_spin.setRange(30, 150)
         f_spin.setValue(fov)
-        f_spin.setFixedWidth(68)
+        f_spin.setMinimumWidth(92)
+        f_spin.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         row.addWidget(f_spin)
         
         rm_btn = QPushButton("−")

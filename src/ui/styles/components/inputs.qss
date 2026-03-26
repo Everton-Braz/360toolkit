@@ -22,6 +22,11 @@ QComboBox {
     min-width: 120px;
 }
 
+QSpinBox,
+QDoubleSpinBox {
+    min-width: 88px;
+}
+
 QComboBox::drop-down {
     width: 28px;
     border: none;
