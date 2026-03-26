@@ -34,6 +34,13 @@ VARIANTS = {
         "bundle_torch_runtime": "0",
         "display_name": "Customer Managed GPU",
     },
+    "simple-version": {
+        "build_name": "360ToolkitGS-Simple",
+        "bundle_external_tools": "1",
+        "bundle_reconstruction_tools": "0",
+        "bundle_torch_runtime": "0",
+        "display_name": "Simple Version (Stages 1-2-3)",
+    },
 }
 
 

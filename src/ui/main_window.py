@@ -784,6 +784,11 @@ class MainWindow(QMainWindow):
         self.stage1_media_panel.values_changed.connect(
             self.stage1_eq_preview.set_color_opts
         )
+        # Auto-reset preview rotation when FlowState is enabled
+        # (FlowState uses gyroscope to level the output — no manual rotation needed)
+        self.stage1_media_panel.values_changed.connect(
+            self._on_media_flowstate_changed
+        )
 
         return splitter
     
@@ -978,7 +983,7 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(StageHeader(
             "AI Masking",
-            "Detect and mask persons, objects, and animals using YOLO + SAM for photogrammetry."
+            "Detect and mask persons, objects, and animals for photogrammetry."
         ))
 
         layout.addWidget(StageSummaryStrip(
@@ -1407,10 +1412,6 @@ class MainWindow(QMainWindow):
         export_simple_action.triggered.connect(self.export_realityscan_simple)
         file_menu.addAction(export_simple_action)
 
-        export_meta_action = QAction("Export RealityScan (&With COLMAP Metadata)", self)
-        export_meta_action.triggered.connect(self.export_realityscan_with_metadata)
-        file_menu.addAction(export_meta_action)
-
         file_menu.addSeparator()
         exit_action = QAction("E&xit", self)
         exit_action.setShortcut("Ctrl+Q")
@@ -1604,11 +1605,11 @@ class MainWindow(QMainWindow):
             },
             'stage3_image_source': self._get_stage3_image_source(),
             'mask_target': self._legacy_mask_target_from_source(self._get_stage3_image_source()),
-            'export_realityscan': self.export_realityscan_check.isChecked(),
-            'export_include_masks': self.export_include_masks_check.isChecked(),
+            'export_realityscan': self.export_realityscan_check.isChecked() if hasattr(self, 'export_realityscan_check') else False,
+            'export_include_masks': self.export_include_masks_check.isChecked() if hasattr(self, 'export_include_masks_check') else True,
             'export_image_source': self._get_export_image_source(),
             'export_mask_source': self._get_export_mask_source(),
-            'export_sidecars': self.export_sidecar_check.isChecked(),
+            'export_sidecars': self.export_sidecar_check.isChecked() if hasattr(self, 'export_sidecar_check') else False,
             # SDK Media Processing options (colour sliders, stabilization toggles)
             'sdk_options': self.stage1_media_panel.get_sdk_options() if hasattr(self, 'stage1_media_panel') else {},
         }
@@ -1785,15 +1786,15 @@ class MainWindow(QMainWindow):
                 self.persons_enable.setChecked(cats.get('persons', True))
                 self.objects_enable.setChecked(cats.get('personal_objects', True))
                 self.animals_enable.setChecked(cats.get('animals', True))
-            if 'export_realityscan' in config:
+            if 'export_realityscan' in config and hasattr(self, 'export_realityscan_check'):
                 self.export_realityscan_check.setChecked(config['export_realityscan'])
-            if 'export_include_masks' in config:
+            if 'export_include_masks' in config and hasattr(self, 'export_include_masks_check'):
                 self.export_include_masks_check.setChecked(config['export_include_masks'])
             if 'export_image_source' in config and hasattr(self, 'export_image_source_combo'):
                 self._set_combo_data(self.export_image_source_combo, config['export_image_source'])
             if 'export_mask_source' in config and hasattr(self, 'export_mask_source_combo'):
                 self._set_combo_data(self.export_mask_source_combo, config['export_mask_source'])
-            if 'export_sidecars' in config:
+            if 'export_sidecars' in config and hasattr(self, 'export_sidecar_check'):
                 self.export_sidecar_check.setChecked(config['export_sidecars'])
 
             self.on_settings_changed()
@@ -2167,7 +2168,7 @@ class MainWindow(QMainWindow):
 
         worker = PipelineWorker({
             'output_dir': str(output_root),
-            'export_include_masks': self.export_include_masks_check.isChecked(),
+            'export_include_masks': self.export_include_masks_check.isChecked() if hasattr(self, 'export_include_masks_check') else True,
             'export_image_source': self._get_export_image_source(),
             'export_mask_source': self._get_export_mask_source(),
         })
@@ -2188,15 +2189,6 @@ class MainWindow(QMainWindow):
             self.log_message(f"[FAIL] RealityScan simple export failed: {error}")
             self._set_control_status("RealityScan export failed", "error")
             QMessageBox.warning(self, "RealityScan Export Failed", f"Simple export failed:\n{error}")
-
-    def export_realityscan_with_metadata(self):
-        """Not available in simple-version (no COLMAP reconstruction)."""
-        QMessageBox.information(
-            self,
-            "Not Available",
-            "RealityScan metadata export requires COLMAP reconstruction (Stage 4).\n"
-            "Use the 'Export RealityScan (Simple)' option instead."
-        )
 
     def browse_colmap_path(self):
         QMessageBox.information(
@@ -2272,26 +2264,36 @@ class MainWindow(QMainWindow):
         input_file = self.input_file_edit.text()
         output_dir = self.output_dir_edit.text()
         
-        if not input_file:
-            QMessageBox.warning(self, "Input Required", "Please select an input file.")
-            self._set_control_status("Input required", "warn")
-            return
+        def _clear_pending():
+            for _a in ('_pending_stage2_input', '_pending_stage3_input', '_pending_stage4_input'):
+                if hasattr(self, _a):
+                    delattr(self, _a)
+
+        if self.stage1_enable.isChecked():
+            if not input_file:
+                QMessageBox.warning(self, "Input Required", "Please select an input file.")
+                self._set_control_status("Input required", "warn")
+                _clear_pending()
+                return
+            if not Path(input_file).exists():
+                QMessageBox.warning(self, "Not Found", f"Input file not found:\n{input_file}")
+                self._set_control_status("Input file not found", "error")
+                _clear_pending()
+                return
+            if Path(input_file).is_dir():
+                QMessageBox.warning(
+                    self,
+                    "Invalid Input for Extraction",
+                    "Stage 1 (Frame Extraction) expects a video file (.insv/.mp4), not a folder.\n"
+                    "Either select a video file or disable Stage 1 and run Split/Mask on existing images."
+                )
+                self._set_control_status("Stage 1 requires a video file", "warn")
+                _clear_pending()
+                return
         if not output_dir:
             QMessageBox.warning(self, "Output Required", "Please select an output directory.")
             self._set_control_status("Output required", "warn")
-            return
-        if not Path(input_file).exists():
-            QMessageBox.warning(self, "Not Found", f"Input file not found:\n{input_file}")
-            self._set_control_status("Input file not found", "error")
-            return
-        if self.stage1_enable.isChecked() and Path(input_file).is_dir():
-            QMessageBox.warning(
-                self,
-                "Invalid Input for Extraction",
-                "Stage 1 (Frame Extraction) expects a video file (.insv/.mp4), not a folder.\n"
-                "Either select a video file or disable Stage 1 and run Split/Mask on existing images."
-            )
-            self._set_control_status("Stage 1 requires a video file", "warn")
+            _clear_pending()
             return
         
         stage2_method = self.stage2_method_combo.currentData()
@@ -2303,8 +2305,8 @@ class MainWindow(QMainWindow):
             'skip_transform': not self.stage2_enable.isChecked(),
             'enable_stage2': self.stage2_enable.isChecked(),
             'enable_stage3': self.stage3_enable.isChecked(),
-            'export_realityscan': self.export_realityscan_check.isChecked(),
-            'export_include_masks': self.export_include_masks_check.isChecked(),
+            'export_realityscan': self.export_realityscan_check.isChecked() if hasattr(self, 'export_realityscan_check') else False,
+            'export_include_masks': self.export_include_masks_check.isChecked() if hasattr(self, 'export_include_masks_check') else True,
             'fps': self.fps_spin.value(),
             'extraction_method': self.extraction_method_combo.currentData(),
             'start_time': 0.0 if self.full_video_check.isChecked() else self.start_time_spin.value(),
@@ -2406,7 +2408,10 @@ class MainWindow(QMainWindow):
         self._set_control_status("Starting pipeline", "running")
         
         # Inject any stage-specific overrides set before this call
-        # (e.g. run_stage_3_only sets _pending_stage3_input before calling us)
+        # (e.g. run_stage_2_only / run_stage_3_only set _pending_stage*_input before calling us)
+        if hasattr(self, '_pending_stage2_input') and self._pending_stage2_input:
+            self.pipeline_config['stage2_input_dir'] = self._pending_stage2_input
+            del self._pending_stage2_input
         if hasattr(self, '_pending_stage3_input') and self._pending_stage3_input:
             self.pipeline_config['stage3_input_dir'] = self._pending_stage3_input
             del self._pending_stage3_input
@@ -2447,6 +2452,24 @@ class MainWindow(QMainWindow):
     # ========================================================================
     # STAGE-ONLY RUNNERS
     # ========================================================================
+    def _on_media_flowstate_changed(self, sdk_opts: dict):
+        """Auto-reset the preview rotation to 0° when FlowState is newly enabled.
+        FlowState applies gyroscope stabilisation which levels the horizon,
+        so no manual frame rotation is needed afterwards.
+        """
+        flowstate_on = sdk_opts.get('enable_flowstate', False)
+        was_on = getattr(self, '_prev_flowstate_on', None)
+        self._prev_flowstate_on = flowstate_on
+
+        # Only act on the OFF → ON transition
+        if flowstate_on and was_on is False:
+            if hasattr(self, 'stage1_eq_preview'):
+                preview = self.stage1_eq_preview
+                if preview._rotation != 0:
+                    preview._rotation = 0
+                    preview._rotate_btn.setText("\u21bb 0\u00b0")
+                    preview._trigger_render()
+
     def run_stage_1_only(self):
         self.log_message("Running extraction only")
         self._auto_advance_enabled = True
@@ -2485,7 +2508,7 @@ class MainWindow(QMainWindow):
         s1, s3 = self.stage1_enable.isChecked(), self.stage3_enable.isChecked()
         self.stage1_enable.setChecked(False)
         self.stage3_enable.setChecked(False)
-        self.pipeline_config['stage2_input_dir'] = str(folder)
+        self._pending_stage2_input = str(folder)
         self.start_pipeline()
         self.stage1_enable.setChecked(s1)
         self.stage3_enable.setChecked(s3)
@@ -2498,23 +2521,33 @@ class MainWindow(QMainWindow):
             return
 
         output_root = Path(output_dir)
-        preferred_source = self._get_stage3_image_source()
-        folder = self._resolve_output_image_dir(output_root, preferred_source)
-        if folder is None and preferred_source == 'auto':
-            from src.pipeline.batch_orchestrator import PipelineWorker
-            worker = PipelineWorker({})
-            folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
+        _img_exts = ('*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG', '*.tif', '*.TIF', '*.tiff', '*.TIFF')
+
+        def _has_images(p: Path) -> bool:
+            return p.is_dir() and any(f for ext in _img_exts for f in p.glob(ext))
+
+        # If output_root itself is already an images folder, use it directly
+        # (happens when user sets output dir directly to perspective_views/extracted_frames)
+        folder = None
+        if _has_images(output_root):
+            folder = output_root
+        else:
+            preferred_source = self._get_stage3_image_source()
+            folder = self._resolve_output_image_dir(output_root, preferred_source)
+            if folder is None:
+                from src.pipeline.batch_orchestrator import PipelineWorker
+                worker = PipelineWorker({})
+                folder = worker.discover_stage_input_folder(stage=3, output_dir=output_dir)
+
         if not folder:
             folder_str = QFileDialog.getExistingDirectory(
-                self, "Select images to mask", str(Path(output_dir))
+                self, "Select images to mask", str(output_root)
             )
             if not folder_str:
                 return
             folder = Path(folder_str)
 
-        images = []
-        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
-            images.extend(folder.glob(ext))
+        images = [f for ext in _img_exts for f in folder.glob(ext)]
         if not images:
             QMessageBox.warning(self, "No Images", f"No images found in:\n{folder}")
             return
@@ -2523,7 +2556,11 @@ class MainWindow(QMainWindow):
         # Store the resolved folder so start_pipeline() can inject it after
         # rebuilding pipeline_config (it overwrites the whole dict from scratch).
         self._pending_stage3_input = str(folder)
-        self._auto_advance_enabled = True
+        # Stage 3 is the terminal stage — do NOT set _auto_advance_enabled to True.
+        # If we were called via auto-advance from stage 2, the flag is already True
+        # and will be reset to False by on_stage_complete when stage 3 finishes.
+        # Setting it True here is what caused the infinite loop (skipped stage-2
+        # signal → auto-advance → run_stage_3_only → repeat).
         s1, s2 = self.stage1_enable.isChecked(), self.stage2_enable.isChecked()
         self.stage1_enable.setChecked(False)
         self.stage2_enable.setChecked(False)
@@ -2543,7 +2580,7 @@ class MainWindow(QMainWindow):
     def on_stage_complete(self, stage_number: int, results: dict):
         if results.get('success'):
             self.log_message(f"[OK] Stage {stage_number} complete")
-            if self._auto_advance_enabled:
+            if self._auto_advance_enabled and not results.get('skipped'):
                 next_map = {
                     1: (self.stage2_enable, self.run_stage_2_only),
                     2: (self.stage3_enable, self.run_stage_3_only),

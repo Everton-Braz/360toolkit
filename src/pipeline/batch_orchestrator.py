@@ -262,6 +262,10 @@ class PipelineWorker(QThread):
         elif stage == 3:
             # Look for perspective_views first, then extracted_frames (equirect masking)
             image_patterns = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
+            # If output_path itself is an images folder (user set output dir to the images folder)
+            if output_path.exists() and any(output_path.glob(p) for p in image_patterns):
+                logger.info(f"[OK] output_dir itself is the masking input: {output_path}")
+                return output_path
             for candidate in ('perspective_views', 'extracted_frames'):
                 folder = output_path / candidate
                 if folder.exists() and any(folder.glob(p) for p in image_patterns):
@@ -1790,36 +1794,41 @@ class PipelineWorker(QThread):
                         )
             
             # Get input images based on skip_transform flag
+            # NOTE: if stage3_input_dir was explicitly provided, the first resolution block
+            # already set input_dir correctly — do not overwrite it here.
             skip_transform = self.config.get('skip_transform', False)
-            
-            if skip_transform:
-                # Direct Masking Mode - use extracted frames (equirectangular/fisheye)
-                input_dir = Path(self.config['output_dir']) / 'extracted_frames'
-                logger.info(f"[Direct Masking] Using extracted frames directly: {input_dir}")
-            elif self.config.get('enable_stage2', True):
-                # Split was enabled - use its output (perspective images)
-                input_dir = Path(self.config['output_dir']) / 'perspective_views'
-                logger.info(f"Using perspective views: {input_dir}")
-            else:
-                # Split disabled - check for explicit input or auto-discover ONCE
-                stage3_input = self.config.get('stage3_input_dir')
-                if not stage3_input:
-                    # Single auto-discovery attempt
-                    discovered = self.discover_stage_input_folder(3, self.config['output_dir'])
-                    if discovered:
-                        input_dir = discovered
-                        logger.info(f"Auto-discovered masking input: {input_dir}")
-                    else:
-                        return {
-                            'success': False,
-                            'error': 'Masking input directory not specified and auto-discovery failed',
-                            'masks_created': 0,
-                            'skipped': 0,
-                            'failed': 0
-                        }
+
+            if not self.config.get('stage3_input_dir'):
+                if skip_transform:
+                    # Direct Masking Mode - use extracted frames (equirectangular/fisheye)
+                    input_dir = Path(self.config['output_dir']) / 'extracted_frames'
+                    logger.info(f"[Direct Masking] Using extracted frames directly: {input_dir}")
+                elif self.config.get('enable_stage2', True):
+                    # Split was enabled - use its output (perspective images)
+                    input_dir = Path(self.config['output_dir']) / 'perspective_views'
+                    logger.info(f"Using perspective views: {input_dir}")
                 else:
-                    input_dir = Path(stage3_input)
-                    logger.info(f"Using specified masking input: {input_dir}")
+                    # Split disabled - check for explicit input or auto-discover ONCE
+                    stage3_input = self.config.get('stage3_input_dir')
+                    if not stage3_input:
+                        # Single auto-discovery attempt
+                        discovered = self.discover_stage_input_folder(3, self.config['output_dir'])
+                        if discovered:
+                            input_dir = discovered
+                            logger.info(f"Auto-discovered masking input: {input_dir}")
+                        else:
+                            return {
+                                'success': False,
+                                'error': 'Masking input directory not specified and auto-discovery failed',
+                                'masks_created': 0,
+                                'skipped': 0,
+                                'failed': 0
+                            }
+                    else:
+                        input_dir = Path(stage3_input)
+                        logger.info(f"Using specified masking input: {input_dir}")
+                # Re-detect resolved_source from the (possibly updated) input_dir
+                resolved_source = self._detect_project_image_source(output_root, input_dir)
             
             masks_subdir = {
                 'perspective': 'masks_perspective',
@@ -1999,6 +2008,14 @@ class BatchOrchestrator:
             PipelineWorker thread (already started)
         """
         
+        # Cancel and clean up any existing worker before starting a new one.
+        # Without this guard, rapid successive calls (e.g. from the auto-advance loop)
+        # would spawn multiple concurrent worker threads while pause/cancel signals
+        # only reached the latest worker, leaving orphaned threads running.
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(3000)  # Wait up to 3 s for clean shutdown
+
         self.worker = PipelineWorker(config)
         
         # Connect callbacks

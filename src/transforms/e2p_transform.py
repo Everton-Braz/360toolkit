@@ -246,8 +246,10 @@ class TorchE2PTransform:
         f_y = 1.0 / math.tan(v_fov_rad / 2)
         
         # 3D coordinates on image plane
+        # Note: y_coords runs -1 (top) → +1 (bottom), but in 3-D space +y is UP.
+        # Negate so the top row of the output looks upward (sky), not downward.
         x_3d = grid_x / f_x
-        y_3d = grid_y / f_y
+        y_3d = -grid_y / f_y
         z_3d = torch.ones_like(x_3d)
         
         # Normalize
@@ -416,8 +418,10 @@ class E2PTransform:
         focal_length_y = 1.0 / math.tan(v_fov_rad / 2)
         
         # 3D coordinates on the image plane
+        # Note: y_norm runs -1 (top) → +1 (bottom), but in 3-D space +y is UP.
+        # Negate so the top row of the output looks upward (sky), not downward.
         x_3d = x_norm / focal_length_x
-        y_3d = y_norm / focal_length_y
+        y_3d = -y_norm / focal_length_y
         z_3d = np.ones_like(x_3d)
         
         # Normalize to unit vectors
