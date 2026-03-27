@@ -510,6 +510,10 @@ class SDKExtractor:
         
         # Detect dual-track vs single-track
         input_files = self._detect_input_files(input_path)
+
+        # Patch unsupported camtype values (e.g., Antigravity A1 uses types 112/155
+        # which are not in the SDK dispatch table → replace with nearest valid types)
+        _patched_temps = self._patch_insv_camtype_if_needed(input_files)
         
         # Build MediaSDK command
         cmd = self._build_extraction_command(
@@ -832,6 +836,13 @@ class SDKExtractor:
             else:
                 logger.error(f"Error details: {error_msg}")
             raise RuntimeError(f"MediaSDK extraction failed: {error_msg[:200]}")
+        finally:
+            # Always clean up temporary patched INSV files
+            for tmp_path in _patched_temps:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
     
     def stop(self):
         """Stop currently running SDK process."""
@@ -892,7 +903,94 @@ class SDKExtractor:
                 logger.info(f"Detected dual-track video: {input_path.name} + {second_track.name}")
         
         return input_files
-    
+
+    # Camtype tokens that are NOT in the SDK's dispatch table and their nearest
+    # working replacements (determined by exhaustive sweep 0-200, May 2025).
+    # Both replacements are in the top quality tier (~5710 KB/frame output).
+    _UNSUPPORTED_CAMTYPE_PATCHES = {
+        b'_112_': b'_113_',  # A1 offset field: type 112 unsupported → 113 (nearest valid)
+        b'_155_': b'_156_',  # A1 original_offset field: type 155 unsupported → 156
+    }
+    _CAMTYPE_TAIL_SCAN = 300 * 1024  # bytes to read from EOF (covers the INSV trailer)
+
+    def _patch_insv_camtype_if_needed(self, input_files: List[str]) -> List[str]:
+        """
+        Detect unsupported camtype tokens in INSV calibration strings and
+        rewrite the file to a temp copy with the nearest supported type.
+
+        Cameras like the Antigravity A1 embed lens calibrations that end in
+        ``_112_`` (offset) and ``_155_`` (original_offset).  Neither value is
+        in the SDK's dispatch table, producing:
+            CameraLensType:155  /  no implemention!
+
+        Strategy (safe, minimal mutation):
+          1. Read only the last 300 KB (the INSV trailer region).
+          2. If a known-bad token is present, replace it in-memory.
+          3. Write head (unchanged) + patched tail to a sibling temp file.
+          4. Return a list of temp paths that the caller must delete.
+
+        Returns:
+            List of temporary file paths to delete after SDK call.
+        """
+        import tempfile as _tempfile
+        temps: List[str] = []
+
+        for i, path in enumerate(input_files):
+            p = Path(path)
+            if p.suffix.lower() not in ('.insv', '.mp4'):
+                continue
+
+            file_size = p.stat().st_size
+            tail_read = min(self._CAMTYPE_TAIL_SCAN, file_size)
+
+            with open(p, 'rb') as f:
+                f.seek(-tail_read, 2)
+                tail = f.read()
+
+            if not any(tok in tail for tok in self._UNSUPPORTED_CAMTYPE_PATCHES):
+                continue  # No patching needed
+
+            logger.info(
+                "[CAMTYPE PATCH] Unsupported lens type detected in '%s' — "
+                "creating patched temp copy...", p.name
+            )
+
+            patched_tail = tail
+            for old, new in self._UNSUPPORTED_CAMTYPE_PATCHES.items():
+                count = patched_tail.count(old)
+                if count:
+                    patched_tail = patched_tail.replace(old, new)
+                    logger.info(
+                        "[CAMTYPE PATCH]   %s → %s  (%d occurrence(s))",
+                        old.decode(), new.decode(), count
+                    )
+
+            # Write temp file: verbatim head + patched tail
+            tmp = _tempfile.NamedTemporaryFile(
+                suffix='.insv', dir=p.parent, delete=False,
+                prefix='_campatched_'
+            )
+            try:
+                head_size = file_size - tail_read
+                with open(p, 'rb') as fsrc:
+                    remaining = head_size
+                    buf_size = 4 * 1024 * 1024
+                    while remaining > 0:
+                        chunk = fsrc.read(min(buf_size, remaining))
+                        if not chunk:
+                            break
+                        tmp.write(chunk)
+                        remaining -= len(chunk)
+                tmp.write(patched_tail)
+            finally:
+                tmp.close()
+
+            input_files[i] = tmp.name
+            temps.append(tmp.name)
+            logger.info("[CAMTYPE PATCH] Patched copy: %s", tmp.name)
+
+        return temps
+
     def _build_extraction_command(
         self,
         input_files: List[str],
