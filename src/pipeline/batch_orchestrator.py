@@ -563,8 +563,12 @@ class PipelineWorker(QThread):
                 
                 if not self.sdk_extractor.is_available():
                     logger.warning("WARNING: Insta360 MediaSDK not available")
-                    logger.warning("INFO: Auto-fallback to FFmpeg v360 stitching (SDK-quality)")
-                    method = 'ffmpeg_stitched'
+                    logger.warning("INFO: Auto-fallback to FFmpeg stitching")
+                    if Path(input_file).suffix.lower() == '.insv':
+                        logger.info("INFO: .insv dual-fisheye file - using v360 dual-stitch fallback")
+                        method = 'ffmpeg_v360_dual'
+                    else:
+                        method = 'ffmpeg_stitched'
                 else:
                     logger.info("INFO: Insta360 MediaSDK detected - using SDK stitching")
                     
@@ -683,7 +687,11 @@ class PipelineWorker(QThread):
                         else:
                             # No frames produced - fallback to FFmpeg
                             logger.warning("INFO: No frames extracted by SDK timeout - Falling back to FFmpeg method")
-                            method = 'ffmpeg_stitched'
+                            if Path(input_file).suffix.lower() == '.insv':
+                                logger.info("INFO: .insv dual-fisheye file - using v360 dual-stitch fallback")
+                                method = 'ffmpeg_v360_dual'
+                            else:
+                                method = 'ffmpeg_stitched'
                     
                     except Exception as sdk_error:
                         # Other SDK errors - check if any frames were created anyway
@@ -706,9 +714,13 @@ class PipelineWorker(QThread):
                         if not self.config.get('allow_fallback', True):
                             logger.error("Fallback disabled by configuration. Aborting.")
                             raise sdk_error
-                        
+
                         logger.warning("INFO: Falling back to FFmpeg method")
-                        method = 'ffmpeg_stitched'
+                        if Path(input_file).suffix.lower() == '.insv':
+                            logger.info("INFO: .insv dual-fisheye file - using v360 dual-stitch fallback")
+                            method = 'ffmpeg_v360_dual'
+                        else:
+                            method = 'ffmpeg_stitched'
             
             # Use standard FrameExtractor (FFmpeg or OpenCV)
             result = self.frame_extractor.extract_frames(

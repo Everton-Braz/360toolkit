@@ -193,6 +193,8 @@ class FrameExtractor:
             if method.startswith('ffmpeg_'):
                 if method == 'ffmpeg_stitched':
                     return self._extract_with_ffmpeg_stitched(input_path, output_path, fps, start_time, end_time, progress_callback)
+                elif method == 'ffmpeg_v360_dual':
+                    return self._extract_with_ffmpeg_v360_dual(input_path, output_path, fps, start_time, end_time, progress_callback)
                 elif method == 'ffmpeg_dual_lens':
                     return self._extract_dual_lens_ffmpeg(input_path, output_path, fps, start_time, end_time, 'both', progress_callback)
                 elif method == 'ffmpeg_lens1':
@@ -462,6 +464,83 @@ class FrameExtractor:
             entries.append(f"{prefix}={rendered}" if prefix else rendered)
         return entries
     
+    def _extract_with_ffmpeg_v360_dual(self, input_path: Path, output_path: Path,
+                                        fps: float, start_time: float, end_time: Optional[float],
+                                        progress_callback: Optional[Callable]) -> Dict:
+        """
+        Stitch dual-fisheye .insv streams into equirectangular frames using FFmpeg v360.
+
+        Designed for cameras whose dual-fisheye lenses are oriented zenith/nadir
+        (e.g. Antigravity A1) and are NOT supported by the Insta360 MediaSDK.
+
+        Working parameters discovered for Antigravity A1:
+          - Streams: 0:v:0 (lens 1) + 0:v:1 (lens 2), both 3840×3840
+          - Filter: dfisheye → equirect, ih_fov=190, iv_fov=190, pitch=-90
+          - Output: 7680×3840 JPEG (2:1 equirectangular)
+        """
+        logger.info(f"Using FFmpeg v360 dual-fisheye stitch at {fps} FPS")
+
+        output_pattern = str(output_path / "frame_%05d.jpg")
+
+        # Build filter_complex: hstack both streams, then v360 dfisheye→equirect,
+        # then fps filter to sample at the requested rate.
+        filter_complex = (
+            "[0:v:0][0:v:1]hstack=inputs=2[st];"
+            "[st]v360=dfisheye:equirect:ih_fov=190:iv_fov=190:pitch=-90:yaw=0:roll=0,"
+            f"fps={fps}"
+        )
+
+        cmd = [self.ffmpeg_path]
+
+        # Fast seek before input
+        if start_time > 0:
+            cmd.extend(['-ss', str(start_time)])
+
+        cmd.extend(['-i', str(input_path)])
+
+        # Duration after input
+        if end_time is not None:
+            duration = end_time - start_time
+            if duration > 0:
+                cmd.extend(['-t', str(duration)])
+
+        cmd.extend([
+            '-filter_complex', filter_complex,
+            '-q:v', '2',   # High quality JPEG
+            '-y',
+            output_pattern
+        ])
+
+        logger.debug(f"FFmpeg v360 command: {' '.join(cmd)}")
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = process.communicate()
+
+        if process.returncode != 0:
+            logger.error(f"FFmpeg v360 dual stitch failed: {stderr}")
+            return {
+                'success': False,
+                'error': f"FFmpeg v360 dual stitch failed: {stderr[:300]}",
+                'frame_count': 0,
+                'output_files': []
+            }
+
+        output_files = sorted(output_path.glob("frame_*.jpg"))
+        frame_count = len(output_files)
+        logger.info(f"[OK] v360 dual stitch: {frame_count} equirectangular frames")
+
+        return {
+            'success': True,
+            'frame_count': frame_count,
+            'output_files': [str(f) for f in output_files],
+            'error': None
+        }
+
     def _extract_dual_lens_ffmpeg(self, input_path: Path, output_path: Path,
                                    fps: float, start_time: float, end_time: Optional[float],
                                    lens_mode: str, progress_callback: Optional[Callable]) -> Dict:
