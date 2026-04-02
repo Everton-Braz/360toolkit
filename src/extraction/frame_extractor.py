@@ -20,6 +20,18 @@ from src.config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
+INSV_TRAILER_SCAN_BYTES = 1024 * 1024
+INSV_TRAILER_CAMERA_STRINGS = [
+    (b'antigravity a1', 'Antigravity A1'),
+    (b'insta360 x5', 'Insta360 X5'),
+    (b'insta360 x4', 'Insta360 X4'),
+    (b'insta360 x3', 'Insta360 X3'),
+    (b'insta360 one x2', 'Insta360 ONE X2'),
+    (b'insta360 one x', 'Insta360 ONE X'),
+]
+INSV_A1_CAMTYPE_TOKENS = (b'_112_', b'_155_')
+
+
 def _find_bundled_ffmpeg() -> Optional[str]:
     """Find FFmpeg in bundled location (for PyInstaller builds)."""
     if getattr(sys, 'frozen', False):
@@ -325,7 +337,7 @@ class FrameExtractor:
             # Detect file type
             file_ext = input_path.suffix.lower()
             file_types = {
-                '.insv': 'Insta360 dual-fisheye',
+                '.insv': 'INSV dual-fisheye',
                 '.mp4': 'MP4 video',
                 '.mov': 'QuickTime video',
                 '.avi': 'AVI video',
@@ -377,6 +389,18 @@ class FrameExtractor:
             
             logger.info(f"Video info: {resolution_str}, {fps:.2f} FPS, {duration_formatted}, "
                        f"{frame_count} frames")
+            if camera_model:
+                logger.info(
+                    "Detected input device for %s: %s (%s)",
+                    input_path.name,
+                    camera_model,
+                    camera_model_source,
+                )
+            elif file_ext == '.insv':
+                logger.warning(
+                    "Could not determine INSV source device for %s from metadata or trailer",
+                    input_path.name,
+                )
             
             return {
                 'success': True,
@@ -401,7 +425,7 @@ class FrameExtractor:
             return {'success': False, 'error': str(e)}
 
     def _detect_camera_model(self, input_path: Path, file_ext: str, width: int, height: int) -> tuple[str, str]:
-        """Detect camera model from metadata when possible, otherwise leave it blank."""
+        """Detect camera model from ffprobe metadata first, then INSV trailer markers."""
         metadata = self._read_media_metadata(input_path)
         if metadata:
             metadata_strings = [entry.lower() for entry in self._flatten_metadata_entries(metadata)]
@@ -417,7 +441,42 @@ class FrameExtractor:
                     if all(token in entry for token in tokens):
                         return label, 'metadata'
 
+        if file_ext == '.insv':
+            trailer_model, trailer_source = self._detect_insv_trailer_camera_model(input_path)
+            if trailer_model:
+                return trailer_model, trailer_source
+
         return '', 'unavailable'
+
+    def _detect_insv_trailer_camera_model(self, input_path: Path) -> tuple[str, str]:
+        """Detect camera model from INSV trailer strings and known A1 camtype tokens."""
+        trailer = self._read_file_tail(input_path, INSV_TRAILER_SCAN_BYTES)
+        if not trailer:
+            return '', 'unavailable'
+
+        trailer_lower = trailer.lower()
+
+        for needle, label in INSV_TRAILER_CAMERA_STRINGS:
+            if needle in trailer_lower:
+                return label, 'insv_trailer_string'
+
+        if any(token in trailer for token in INSV_A1_CAMTYPE_TOKENS):
+            return 'Antigravity A1', 'insv_trailer_camtype'
+
+        return '', 'unavailable'
+
+    def _read_file_tail(self, input_path: Path, max_bytes: int) -> bytes:
+        """Read up to ``max_bytes`` from the end of a file for trailer inspection."""
+        try:
+            file_size = input_path.stat().st_size
+            tail_size = min(file_size, max_bytes)
+            with input_path.open('rb') as handle:
+                if tail_size:
+                    handle.seek(-tail_size, 2)
+                return handle.read(tail_size)
+        except OSError as exc:
+            logger.debug(f"Failed to read trailer from {input_path.name}: {exc}")
+            return b''
 
     def _read_media_metadata(self, input_path: Path) -> Dict:
         """Read media container metadata via ffprobe when available."""
@@ -473,10 +532,15 @@ class FrameExtractor:
         Designed for cameras whose dual-fisheye lenses are oriented zenith/nadir
         (e.g. Antigravity A1) and are NOT supported by the Insta360 MediaSDK.
 
-        Working parameters discovered for Antigravity A1:
-          - Streams: 0:v:0 (lens 1) + 0:v:1 (lens 2), both 3840×3840
-          - Filter: dfisheye → equirect, ih_fov=190, iv_fov=190, pitch=-90
+        Confirmed working parameters for Antigravity A1 (systematic sweep 2026-03-28):
+          - Streams: 0:v:0 (up lens) + 0:v:1 (down lens), both 3840×3840
+          - Stream order: [0,1]  (no swap needed)
+          - Filter: dfisheye → equirect, ih_fov=185, iv_fov=185, pitch=-90
+          - pitch=-90 corrects for the A1's up/down lens orientation
           - Output: 7680×3840 JPEG (2:1 equirectangular)
+
+        Sweep method: ord01_pre-none_fov185_p-90_y0 produced the best equirectangular
+        with flat horizon, sky on top, ground on bottom, no visible stitch artefacts.
         """
         logger.info(f"Using FFmpeg v360 dual-fisheye stitch at {fps} FPS")
 
@@ -484,9 +548,10 @@ class FrameExtractor:
 
         # Build filter_complex: hstack both streams, then v360 dfisheye→equirect,
         # then fps filter to sample at the requested rate.
+        # pitch=-90 is CRITICAL for the A1 up/down lens arrangement.
         filter_complex = (
             "[0:v:0][0:v:1]hstack=inputs=2[st];"
-            "[st]v360=dfisheye:equirect:ih_fov=190:iv_fov=190:pitch=-90:yaw=0:roll=0,"
+            "[st]v360=dfisheye:equirect:ih_fov=185:iv_fov=185:pitch=-90:yaw=0:roll=0,"
             f"fps={fps}"
         )
 
@@ -522,13 +587,18 @@ class FrameExtractor:
         stdout, stderr = process.communicate()
 
         if process.returncode != 0:
-            logger.error(f"FFmpeg v360 dual stitch failed: {stderr}")
-            return {
-                'success': False,
-                'error': f"FFmpeg v360 dual stitch failed: {stderr[:300]}",
-                'frame_count': 0,
-                'output_files': []
-            }
+            # Check if frames were actually produced despite non-zero exit
+            # (FFmpeg returns rc=1 when unmapped streams exist, e.g. subtitle track)
+            produced = sorted(output_path.glob("frame_*.jpg"))
+            if not produced:
+                logger.error(f"FFmpeg v360 dual stitch failed: {stderr}")
+                return {
+                    'success': False,
+                    'error': f"FFmpeg v360 dual stitch failed: {stderr[:300]}",
+                    'frame_count': 0,
+                    'output_files': []
+                }
+            logger.warning(f"FFmpeg returned rc={process.returncode} but {len(produced)} frames produced — treating as success")
 
         output_files = sorted(output_path.glob("frame_*.jpg"))
         frame_count = len(output_files)

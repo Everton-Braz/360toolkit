@@ -66,6 +66,8 @@ import json
 import cv2
 import os
 import sys
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional, Callable, List, Tuple
 
@@ -467,6 +469,16 @@ class SDKExtractor:
                   warmth (int)        [-100, 100]
                   tint (int)          [-100, 100]
                   definition (int)    [0, 100]
+                  output_rotation (int) - post-rotate output images by 0/90/180/270
+                  auto_rotate_output (bool) - auto-fix known camera orientations
+                  disable_cuda (bool) - disable CUDA when True
+                  enable_soft_encode (bool) - use software encoder when True
+                  enable_soft_decode (bool) - use software decoder when True
+                  image_processing_accel (str) - auto/cuda/vulkan/cpu depending on SDK support
+                  enable_dense_overlap_recovery (bool) - use overlapping SDK windows for dense all-frame extraction
+                  dense_overlap_step (int) - frame step between overlap windows
+                  dense_overlap_window (int) - number of frames requested per overlap window
+                  enable_sparse_retry_recovery (bool) - retry each requested sparse frame through SDK-only windows
 
         Returns:
             List of extracted frame paths
@@ -499,21 +511,60 @@ class SDKExtractor:
         # Convert time range to frame range
         start_frame = int(start_time * video_fps)
         end_frame = min(int(end_time * video_fps), total_frames)
+
+        # Detect dual-track vs single-track and whether this source needs A1 recovery handling.
+        source_input_files = self._detect_input_files(input_path)
+        source_requires_recovery = self._source_requires_sdk_recovery(source_input_files)
+
+        input_files_override = None
+        if sdk_options:
+            input_files_override = sdk_options.get('_input_files_override')
+        input_files = list(input_files_override) if input_files_override else list(source_input_files)
         
         # Calculate frame indices to extract based on desired FPS within time range
         frame_interval = max(1, int(video_fps / fps))
         frame_indices = list(range(start_frame, end_frame, frame_interval))
+
+        if self._should_use_dense_overlap_strategy(source_requires_recovery, frame_indices, frame_interval, sdk_options):
+            return self._extract_dense_sequence_with_overlap(
+                input_path=str(input_path),
+                output_dir=str(output_dir),
+                fps=fps,
+                quality=quality,
+                resolution=resolution,
+                output_format=output_format,
+                start_time=start_time,
+                end_time=end_time,
+                progress_callback=progress_callback,
+                sdk_options=sdk_options,
+                video_fps=video_fps,
+                frame_indices=frame_indices,
+            )
+
+        if self._should_use_sparse_retry_strategy(source_requires_recovery, frame_indices, frame_interval, sdk_options):
+            return self._extract_sparse_indices_with_retry(
+                input_path=str(input_path),
+                output_dir=str(output_dir),
+                fps=fps,
+                quality=quality,
+                resolution=resolution,
+                output_format=output_format,
+                progress_callback=progress_callback,
+                sdk_options=sdk_options,
+                video_fps=video_fps,
+                frame_indices=frame_indices,
+                total_frames=total_frames,
+            )
         
         logger.info(f"Time range: {start_time}s - {end_time}s (frames {start_frame} - {end_frame})")
         logger.info(f"Extracting {len(frame_indices)} frames from {total_frames} total")
         logger.info(f"Frame interval: {frame_interval} (video FPS: {video_fps}, target FPS: {fps})")
-        
-        # Detect dual-track vs single-track
-        input_files = self._detect_input_files(input_path)
+
+        output_rotation = self._determine_output_rotation(source_input_files, sdk_options)
 
         # Patch unsupported camtype values (e.g., Antigravity A1 uses types 112/155
         # which are not in the SDK dispatch table → replace with nearest valid types)
-        _patched_temps = self._patch_insv_camtype_if_needed(input_files)
+        _patched_temps = [] if input_files_override else self._patch_insv_camtype_if_needed(input_files)
         
         # Build MediaSDK command
         cmd = self._build_extraction_command(
@@ -801,6 +852,9 @@ class SDKExtractor:
                 logger.warning(f"[WARNING] Low extraction rate: {actual_count}/{expected_count} ({success_rate:.1f}%)")
             
             logger.info(f"[OK] Extracted {actual_count}/{expected_count} frames ({success_rate:.1f}%)")
+
+            if output_rotation:
+                self._rotate_output_frames(extracted_frames, output_rotation)
             
             # Verify image file sizes (detect black/empty images)
             if extracted_frames:
@@ -912,6 +966,406 @@ class SDKExtractor:
         b'_155_': b'_156_',  # A1 original_offset field: type 155 unsupported → 156
     }
     _CAMTYPE_TAIL_SCAN = 300 * 1024  # bytes to read from EOF (covers the INSV trailer)
+
+    def _source_requires_sdk_recovery(self, input_files: List[str]) -> bool:
+        """Return True only for A1-style sources that need the SDK retry workaround."""
+        for path in input_files:
+            if self._tail_contains_any_token(Path(path), self._UNSUPPORTED_CAMTYPE_PATCHES):
+                return True
+        return False
+
+    def _should_use_dense_overlap_strategy(
+        self,
+        source_requires_recovery: bool,
+        frame_indices: List[int],
+        frame_interval: int,
+        sdk_options: Optional[Dict] = None,
+    ) -> bool:
+        """Return True when a dense all-frame export should use overlap recovery."""
+        if not source_requires_recovery:
+            return False
+
+        if not frame_indices or frame_interval != 1:
+            return False
+
+        if sdk_options and sdk_options.get('_dense_overlap_internal'):
+            return False
+
+        enabled = True if sdk_options is None else sdk_options.get('enable_dense_overlap_recovery', True)
+        return bool(enabled) and len(frame_indices) > 12
+
+    def _should_use_sparse_retry_strategy(
+        self,
+        source_requires_recovery: bool,
+        frame_indices: List[int],
+        frame_interval: int,
+        sdk_options: Optional[Dict] = None,
+    ) -> bool:
+        """Return True when sparse frame extraction should retry each target frame."""
+        if not source_requires_recovery:
+            return False
+
+        if not frame_indices or frame_interval <= 1:
+            return False
+
+        if sdk_options and sdk_options.get('_sparse_retry_internal'):
+            return False
+
+        enabled = True if sdk_options is None else sdk_options.get('enable_sparse_retry_recovery', True)
+        return bool(enabled) and len(frame_indices) <= 120
+
+    def _extract_dense_sequence_with_overlap(
+        self,
+        input_path: str,
+        output_dir: str,
+        fps: float,
+        quality: str,
+        resolution: Optional[Tuple[int, int]],
+        output_format: str,
+        start_time: float,
+        end_time: Optional[float],
+        progress_callback: Optional[Callable[[int], None]],
+        sdk_options: Optional[Dict],
+        video_fps: float,
+        frame_indices: List[int],
+    ) -> List[str]:
+        """Recover dense all-frame exports with overlapping SDK windows."""
+        logger.info("[SDK] Using dense overlap recovery for all-frame extraction")
+
+        overlap_step = 3
+        overlap_window = 6
+        if sdk_options:
+            overlap_step = max(1, int(sdk_options.get('dense_overlap_step', overlap_step)))
+            overlap_window = max(overlap_step, int(sdk_options.get('dense_overlap_window', overlap_window)))
+
+        nested_options = dict(sdk_options or {})
+        nested_options['_dense_overlap_internal'] = True
+        nested_options['enable_dense_overlap_recovery'] = False
+
+        output_path = Path(output_dir)
+        expected_count = len(frame_indices)
+        first_index = frame_indices[0]
+        last_index_exclusive = frame_indices[-1] + 1
+
+        for window_start in range(first_index, last_index_exclusive, overlap_step):
+            window_end = min(window_start + overlap_window, last_index_exclusive)
+            window_start_time = window_start / video_fps
+            window_end_time = window_end / video_fps
+
+            logger.info(
+                "[SDK] Dense overlap window %s-%s (%0.3fs-%0.3fs)",
+                window_start,
+                window_end - 1,
+                window_start_time,
+                window_end_time,
+            )
+
+            try:
+                self.extract_frames(
+                    input_path=input_path,
+                    output_dir=output_dir,
+                    fps=fps,
+                    quality=quality,
+                    resolution=resolution,
+                    output_format=output_format,
+                    start_time=window_start_time,
+                    end_time=window_end_time,
+                    progress_callback=None,
+                    sdk_options=nested_options,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[SDK] Dense overlap window %s-%s failed: %s",
+                    window_start,
+                    window_end - 1,
+                    exc,
+                )
+
+            if progress_callback:
+                recovered = len(self._collect_frame_paths(output_path, frame_indices, output_format))
+                progress_callback(int(recovered / expected_count * 100))
+
+        extracted_frames = self._collect_frame_paths(output_path, frame_indices, output_format)
+        actual_count = len(extracted_frames)
+        success_rate = (actual_count / expected_count * 100) if expected_count > 0 else 0
+        logger.info(f"[SDK] Dense overlap recovery extracted {actual_count}/{expected_count} frames ({success_rate:.1f}%)")
+
+        if progress_callback:
+            progress_callback(100)
+
+        if actual_count == 0:
+            raise RuntimeError(f"SDK dense overlap recovery produced no output frames in {output_dir}")
+
+        return extracted_frames
+
+    def _extract_sparse_indices_with_retry(
+        self,
+        input_path: str,
+        output_dir: str,
+        fps: float,
+        quality: str,
+        resolution: Optional[Tuple[int, int]],
+        output_format: str,
+        progress_callback: Optional[Callable[[int], None]],
+        sdk_options: Optional[Dict],
+        video_fps: float,
+        frame_indices: List[int],
+        total_frames: int,
+    ) -> List[str]:
+        """Extract sparse frame sets by retrying only the frames missing after a preflight batch pass."""
+        logger.info("[SDK] Using sparse retry recovery for %d requested frames", len(frame_indices))
+
+        output_path = Path(output_dir)
+        frame_interval = max(1, int(video_fps / fps))
+        nested_options = dict(sdk_options or {})
+        nested_options['_sparse_retry_internal'] = True
+        nested_options['enable_sparse_retry_recovery'] = False
+        nested_options['enable_dense_overlap_recovery'] = False
+
+        retry_input_files = self._detect_input_files(Path(input_path))
+        retry_temp_files = self._patch_insv_camtype_if_needed(retry_input_files)
+        nested_options['_input_files_override'] = retry_input_files
+
+        recovered_paths: List[str] = []
+        try:
+            # Try one batched sparse extraction first and only retry the frames that are still missing.
+            batch_start_time = frame_indices[0] / video_fps
+            batch_end_frame = min(total_frames, frame_indices[-1] + frame_interval)
+            batch_end_time = batch_end_frame / video_fps
+            logger.info(
+                "[SDK] Sparse recovery preflight batch %s-%s (%0.3fs-%0.3fs)",
+                frame_indices[0],
+                max(frame_indices[-1], batch_end_frame - 1),
+                batch_start_time,
+                batch_end_time,
+            )
+
+            try:
+                self.extract_frames(
+                    input_path=input_path,
+                    output_dir=output_dir,
+                    fps=fps,
+                    quality=quality,
+                    resolution=resolution,
+                    output_format=output_format,
+                    start_time=batch_start_time,
+                    end_time=batch_end_time,
+                    progress_callback=None,
+                    sdk_options=nested_options,
+                )
+            except Exception as exc:
+                logger.warning("[SDK] Sparse recovery preflight batch failed: %s", exc)
+
+            recovered_paths = self._collect_frame_paths(output_path, frame_indices, output_format)
+            recovered_indices = self._collect_existing_frame_indices(output_path, frame_indices, output_format)
+            logger.info(
+                "[SDK] Sparse recovery preflight satisfied %d/%d requested frames",
+                len(recovered_indices),
+                len(frame_indices),
+            )
+
+            missing_indices = [frame_index for frame_index in frame_indices if frame_index not in recovered_indices]
+            for missing_position, frame_index in enumerate(missing_indices, start=1):
+                best_candidate = self._recover_single_frame_with_retry(
+                    input_path=input_path,
+                    output_dir=output_path,
+                    frame_index=frame_index,
+                    fps=fps,
+                    video_fps=video_fps,
+                    quality=quality,
+                    resolution=resolution,
+                    output_format=output_format,
+                    sdk_options=nested_options,
+                    total_frames=total_frames,
+                )
+                if best_candidate:
+                    recovered_paths.append(best_candidate)
+
+                if progress_callback:
+                    completed = len(recovered_indices) + missing_position
+                    progress_callback(int(completed / len(frame_indices) * 100))
+
+            if progress_callback:
+                progress_callback(100)
+
+            final_frames = self._collect_frame_paths(output_path, frame_indices, output_format)
+            if not final_frames:
+                raise RuntimeError(f"SDK sparse retry recovery produced no output frames in {output_dir}")
+
+            return final_frames
+        finally:
+            for tmp_path in retry_temp_files:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    def _collect_existing_frame_indices(
+        self,
+        output_dir: Path,
+        frame_indices: List[int],
+        output_format: str,
+    ) -> set[int]:
+        """Return the requested frame indices that already exist in the output directory."""
+        ext = f".{output_format.lower()}"
+        existing = set()
+        for frame_index in frame_indices:
+            if (output_dir / f"{frame_index}{ext}").exists():
+                existing.add(frame_index)
+        return existing
+
+    def _recover_single_frame_with_retry(
+        self,
+        input_path: str,
+        output_dir: Path,
+        frame_index: int,
+        fps: float,
+        video_fps: float,
+        quality: str,
+        resolution: Optional[Tuple[int, int]],
+        output_format: str,
+        sdk_options: Dict,
+        total_frames: int,
+    ) -> Optional[str]:
+        """Retry a single target frame using multiple SDK-only extraction windows."""
+        ext = f".{output_format.lower()}"
+        final_path = output_dir / f"{frame_index}{ext}"
+        attempt_windows = [
+            (frame_index, frame_index + 1),
+            (max(0, frame_index - 3), min(total_frames, frame_index + 3)),
+            (max(0, frame_index - 6), min(total_frames, frame_index)),
+            (frame_index, min(total_frames, frame_index + 6)),
+        ]
+
+        best_temp_path: Optional[Path] = None
+        best_score = float('-inf')
+
+        for attempt_number, (window_start, window_end) in enumerate(attempt_windows, start=1):
+            if window_end <= window_start:
+                continue
+
+            temp_dir = Path(tempfile.mkdtemp(prefix=f"sdk_retry_{frame_index:04d}_{attempt_number}_", dir=str(output_dir.parent)))
+            try:
+                self.extract_frames(
+                    input_path=input_path,
+                    output_dir=str(temp_dir),
+                    fps=fps,
+                    quality=quality,
+                    resolution=resolution,
+                    output_format=output_format,
+                    start_time=window_start / video_fps,
+                    end_time=window_end / video_fps,
+                    progress_callback=None,
+                    sdk_options=sdk_options,
+                )
+            except Exception as exc:
+                logger.warning("[SDK] Retry attempt %d failed for frame %d: %s", attempt_number, frame_index, exc)
+
+            candidate_path = temp_dir / f"{frame_index}{ext}"
+            if not candidate_path.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                continue
+
+            candidate_score = self._score_extracted_frame(candidate_path)
+            logger.info("[SDK] Frame %d attempt %d score: %.2f", frame_index, attempt_number, candidate_score)
+            if candidate_score > best_score:
+                if best_temp_path and best_temp_path.parent.exists():
+                    shutil.rmtree(best_temp_path.parent, ignore_errors=True)
+                best_score = candidate_score
+                best_temp_path = candidate_path
+            else:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if not best_temp_path or not best_temp_path.exists():
+            logger.warning("[SDK] Could not recover frame %d", frame_index)
+            return None
+
+        shutil.copy2(best_temp_path, final_path)
+        shutil.rmtree(best_temp_path.parent, ignore_errors=True)
+        return str(final_path)
+
+    def _score_extracted_frame(self, image_path: Path) -> float:
+        """Score an extracted frame so gray/corrupted results rank lower than valid images."""
+        image = cv2.imread(str(image_path))
+        if image is None:
+            return float('-inf')
+
+        height = image.shape[0]
+        lower_half = image[height // 2 :, :, :]
+        gray = cv2.cvtColor(lower_half, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(lower_half, cv2.COLOR_BGR2HSV)
+
+        detail = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        contrast = float(gray.std())
+        saturation = float(hsv[:, :, 1].mean())
+        return detail * 2.0 + contrast * 8.0 + saturation
+
+    def _determine_output_rotation(self, input_files: List[str], sdk_options: Optional[Dict] = None) -> int:
+        """Determine whether extracted SDK outputs need a post-rotation."""
+        rotation_override = None
+        auto_rotate = True
+
+        if sdk_options:
+            rotation_override = sdk_options.get('output_rotation')
+            auto_rotate = sdk_options.get('auto_rotate_output', True)
+
+        if rotation_override is not None:
+            rotation = int(rotation_override) % 360
+            if rotation in (0, 90, 180, 270):
+                logger.info(f"[Orientation] Using explicit output rotation override: {rotation}°")
+                return rotation
+            logger.warning(f"[Orientation] Ignoring unsupported output rotation override: {rotation_override}")
+
+        if not auto_rotate:
+            return 0
+
+        for path in input_files:
+            if self._tail_contains_any_token(Path(path), self._UNSUPPORTED_CAMTYPE_PATCHES):
+                logger.info("[Orientation] Detected A1-style camtype trailer; rotating SDK outputs 180°")
+                return 180
+
+        return 0
+
+    def _tail_contains_any_token(self, path: Path, token_map: Dict[bytes, bytes]) -> bool:
+        """Check whether the file trailer contains any token from token_map."""
+        if not path.exists() or path.suffix.lower() not in ('.insv', '.mp4'):
+            return False
+
+        try:
+            file_size = path.stat().st_size
+            tail_read = min(self._CAMTYPE_TAIL_SCAN, file_size)
+            with open(path, 'rb') as handle:
+                handle.seek(-tail_read, 2)
+                tail = handle.read()
+            return any(token in tail for token in token_map)
+        except OSError as exc:
+            logger.warning(f"[Orientation] Could not inspect trailer for {path.name}: {exc}")
+            return False
+
+    def _rotate_output_frames(self, frame_paths: List[str], rotation: int) -> None:
+        """Rotate extracted SDK output frames in place."""
+        cv_codes = {
+            90: cv2.ROTATE_90_CLOCKWISE,
+            180: cv2.ROTATE_180,
+            270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+        }
+        code = cv_codes.get(rotation % 360)
+        if code is None:
+            return
+
+        rotated = 0
+        for frame_path in frame_paths:
+            try:
+                image = cv2.imread(str(frame_path))
+                if image is None:
+                    continue
+                image = cv2.rotate(image, code)
+                cv2.imwrite(str(frame_path), image)
+                rotated += 1
+            except Exception as exc:
+                logger.warning(f"[Orientation] Failed to rotate {frame_path}: {exc}")
+
+        logger.info(f"[Orientation] Rotated {rotated}/{len(frame_paths)} SDK output frames by {rotation}°")
 
     def _patch_insv_camtype_if_needed(self, input_files: List[str]) -> List[str]:
         """
@@ -1115,24 +1569,24 @@ class SDKExtractor:
         # ===== GPU ACCELERATION FLAGS (CRITICAL for performance) =====
         # Reference: https://github.com/Insta360Develop/Desktop-MediaSDK-Cpp
         
-        # 1. ENABLE CUDA (default is "true" which means "disable CUDA" - confusing!)
-        #    Set to "false" to ENABLE CUDA acceleration
-        cmd.extend(["-disable_cuda", "false"])  # FALSE = CUDA ENABLED
-        logger.info("[SDK GPU] CUDA acceleration ENABLED (disable_cuda=false)")
+        disable_cuda = bool(preset.get('disable_cuda', False))
+        cmd.extend(["-disable_cuda", "true" if disable_cuda else "false"])
+        logger.info(f"[SDK GPU] CUDA acceleration {'DISABLED' if disable_cuda else 'ENABLED'} (disable_cuda={'true' if disable_cuda else 'false'})")
         
         # 2. USE HARDWARE ENCODER (not software)
-        #    Default is false, set to false to use GPU encoder
-        cmd.extend(["-enable_soft_encode", "false"])  # Hardware encoder
-        logger.info("[SDK GPU] Hardware encoder enabled (GPU H.264/H.265)")
+        enable_soft_encode = bool(preset.get('enable_soft_encode', False))
+        cmd.extend(["-enable_soft_encode", "true" if enable_soft_encode else "false"])
+        logger.info(f"[SDK GPU] {'Software' if enable_soft_encode else 'Hardware'} encoder enabled")
         
         # 3. USE HARDWARE DECODER (not software)
-        #    Default is false, set to false to use GPU decoder
-        cmd.extend(["-enable_soft_decode", "false"])  # Hardware decoder
-        logger.info("[SDK GPU] Hardware decoder enabled (GPU video decode)")
+        enable_soft_decode = bool(preset.get('enable_soft_decode', False))
+        cmd.extend(["-enable_soft_decode", "true" if enable_soft_decode else "false"])
+        logger.info(f"[SDK GPU] {'Software' if enable_soft_decode else 'Hardware'} decoder enabled")
         
         # 4. IMAGE PROCESSING ACCELERATION (auto = GPU if available)
-        cmd.extend(["-image_processing_accel", "auto"])  # Auto-detect GPU/Vulkan
-        logger.info("[SDK GPU] Image processing acceleration: AUTO (GPU/Vulkan)")
+        image_processing_accel = str(preset.get('image_processing_accel', 'auto')).strip().lower() or 'auto'
+        cmd.extend(["-image_processing_accel", image_processing_accel])
+        logger.info(f"[SDK GPU] Image processing acceleration: {image_processing_accel.upper()}")
         
         # 5. OPTIONAL: Enable H.265 encoder for better compression (GPU-accelerated)
         #    Only if output is video (not needed for image sequences, but doesn't hurt)

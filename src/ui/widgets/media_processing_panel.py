@@ -324,3 +324,8 @@ class MediaProcessingPanel(QWidget):
         }
         for key, widget in map_.items():
             widget.setValue(sdk_options.get(key, 0))
+
+    def set_stabilization(self, flowstate: bool, direction_lock: bool):
+        """Programmatically set the stabilization toggles."""
+        self._flowstate.setChecked(flowstate)
+        self._directionlock.setChecked(direction_lock)

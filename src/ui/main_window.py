@@ -206,6 +206,7 @@ class MainWindow(QMainWindow):
         self._user_log_visible = True
         self._effective_log_visible = True
         self._resolved_theme = "dark"
+        self._last_auto_sdk_defaults_key = None
         
         self.init_ui()
         self.create_menu_bar()
@@ -2222,12 +2223,15 @@ class MainWindow(QMainWindow):
             self._refresh_widget_style(self.file_metadata_label)
             self.log_message("Input is a folder. Skip video analysis and use Split/Mask stages.")
             return
+
+        self._auto_apply_insv_sdk_defaults(input_file)
         
         extractor = FrameExtractor()
         info = extractor.get_video_info(input_file)
         
         if info.get('success'):
             camera_model = (info.get('camera_model') or '').strip()
+            camera_model_source = (info.get('camera_model_source') or '').strip()
             camera_segment = f" | <b>Camera:</b> {camera_model}" if camera_model else ""
             self.file_metadata_label.setText(
                 f"<b>Type:</b> {info.get('file_type_desc', 'Unknown')} | "
@@ -2251,11 +2255,42 @@ class MainWindow(QMainWindow):
                 th = ((h * 3 // 4 + 64) // 128) * 128
                 self.cubemap_tile_width_spin.setValue(tw)
                 self.cubemap_tile_height_spin.setValue(th)
-            self.log_message(f"Analyzed: {Path(input_file).name}")
+            if camera_model:
+                source_suffix = f" ({camera_model_source})" if camera_model_source and camera_model_source != 'unavailable' else ""
+                self.log_message(f"Analyzed: {Path(input_file).name} | device={camera_model}{source_suffix}")
+            else:
+                self.log_message(f"Analyzed: {Path(input_file).name}")
+                if Path(input_file).suffix.lower() == '.insv':
+                    self.log_message("[WARN] Analyze: could not identify the source device from INSV metadata/trailer.")
         else:
             self.file_metadata_label.setText(f"Error: {info.get('error', 'Unknown')}")
             self.file_metadata_label.setProperty("state", "error")
             self._refresh_widget_style(self.file_metadata_label)
+
+    def _auto_apply_insv_sdk_defaults(self, input_file: str):
+        """Enable FlowState and Direction Lock defaults when a new INSV file is analyzed."""
+        if not hasattr(self, 'stage1_media_panel'):
+            return
+
+        path = Path(input_file)
+        if path.suffix.lower() != '.insv':
+            return
+
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+
+        if self._last_auto_sdk_defaults_key == key:
+            return
+
+        opts = self.stage1_media_panel.get_sdk_options()
+        needs_change = not opts.get('enable_flowstate', False) or not opts.get('enable_direction_lock', False)
+        self.stage1_media_panel.set_stabilization(True, True)
+        self._last_auto_sdk_defaults_key = key
+
+        if needs_change:
+            self.log_message(f"[INFO] Analyze: enabled FlowState and Direction Lock defaults for INSV input: {path.name}")
     
     # ========================================================================
     # PIPELINE EXECUTION
