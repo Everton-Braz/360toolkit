@@ -11,10 +11,15 @@ __pycache__/
 
 # PyInstaller
 *.spec
-!360FrameTools_MINIMAL.spec
-!360ToolkitGS.spec
-!360ToolkitGS-ONNX.spec
 *.exe
+
+# Commercial / packaging assets kept out of the public repo
+runtime_hook_*.py
+build.bat
+BUILD*.bat
+create_release_zip.bat
+BUILD*.md
+build_gpu_fix.txt
 
 # Large folders
 360ToolkitGS-FULL/
@@ -131,6 +136,11 @@ test_production_fix.py
 test_cpu_worker.py
 test_build_functionality.py
 test_transform_direct.py
+test_a1_blend_stitch.py
+test_a1_orientation_sweep.py
+test_extract_mask_epr.py
+test_sdk_camtype_sweep.py
+test_split_opencl.py
 
 # Internal planning / session notes (not product docs)
 GPU_OPTIMIZATION_REPORT.md
