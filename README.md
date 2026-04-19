@@ -9,8 +9,6 @@
 - Open-source source repo: develop and run the pipeline from Python in this repository.
 - Paid Windows bundle: get the prebuilt desktop release from Gumroad: <https://evertonbraz.gumroad.com/l/360toolkit>
 
-The commercial Windows package is distributed separately. PyInstaller specs, release scripts, and packaging hooks are intentionally not kept in this public repository.
-
 ## Current Pipeline
 
 `Extract Frames` -> `Split Views` -> `Mask Images`
