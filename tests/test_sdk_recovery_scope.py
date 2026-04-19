@@ -1,4 +1,6 @@
-from src.extraction.sdk_extractor import SDKExtractor
+import pytest
+
+from src.extraction.sdk_extractor import IncompleteSDKExtractionError, SDKExtractor
 
 
 def test_sdk_recovery_scope_ignores_native_insta360_without_a1_tokens(tmp_path) -> None:
@@ -88,3 +90,78 @@ def test_sparse_retry_only_retries_missing_frames(tmp_path) -> None:
         str(output_dir / "12.png"),
         str(output_dir / "24.png"),
     ]
+
+
+def test_validate_requested_frame_set_rejects_missing_frames(tmp_path) -> None:
+    extractor = SDKExtractor.__new__(SDKExtractor)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "0.png").write_bytes(b"ok")
+    (output_dir / "24.png").write_bytes(b"ok")
+
+    with pytest.raises(IncompleteSDKExtractionError) as exc_info:
+        extractor._validate_requested_frame_set(
+            output_dir,
+            [0, 12, 24],
+            "png",
+            operation_label="SDK extraction",
+        )
+
+    assert exc_info.value.actual_count == 2
+    assert exc_info.value.expected_count == 3
+    assert exc_info.value.missing_indices == [12]
+
+
+def test_sparse_retry_requires_full_requested_frame_set(tmp_path) -> None:
+    extractor = SDKExtractor.__new__(SDKExtractor)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    sample = tmp_path / "sample_a1.insv"
+    sample.write_bytes(b"header" + b"_112_" + b"payload" + b"_155_" + b"trailer")
+
+    def fake_detect_input_files(path):
+        return [str(path)]
+
+    def fake_patch_input_files(input_files):
+        return []
+
+    def fake_extract_frames(**kwargs):
+        (output_dir / "0.png").write_bytes(b"ok")
+        (output_dir / "24.png").write_bytes(b"ok")
+        return [str(output_dir / "0.png"), str(output_dir / "24.png")]
+
+    def fake_collect_frame_paths(current_output_dir, frame_indices, output_format):
+        return [
+            str(current_output_dir / f"{frame_index}.png")
+            for frame_index in frame_indices
+            if (current_output_dir / f"{frame_index}.png").exists()
+        ]
+
+    def fake_recover_single_frame_with_retry(**kwargs):
+        return None
+
+    extractor._detect_input_files = fake_detect_input_files
+    extractor._patch_insv_camtype_if_needed = fake_patch_input_files
+    extractor.extract_frames = fake_extract_frames
+    extractor._collect_frame_paths = fake_collect_frame_paths
+    extractor._recover_single_frame_with_retry = fake_recover_single_frame_with_retry
+
+    with pytest.raises(IncompleteSDKExtractionError) as exc_info:
+        extractor._extract_sparse_indices_with_retry(
+            input_path=str(sample),
+            output_dir=str(output_dir),
+            fps=2.0,
+            quality="best",
+            resolution=None,
+            output_format="png",
+            progress_callback=None,
+            sdk_options={},
+            video_fps=24.0,
+            frame_indices=[0, 12, 24],
+            total_frames=120,
+        )
+
+    assert exc_info.value.actual_count == 2
+    assert exc_info.value.expected_count == 3
+    assert exc_info.value.missing_indices == [12]

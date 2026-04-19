@@ -11,6 +11,12 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+_APP_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_SAM3_ROOT = _APP_ROOT / 'downloads' / 'sam3cpp'
+_DEFAULT_SAM3_SEGMENTER = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'segment_persons.exe'
+_DEFAULT_SAM3_GUI = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'sam3_image.exe'
+_DEFAULT_SAM3_MODEL = _DEFAULT_SAM3_ROOT / 'models' / 'sam3-q4_0.ggml'
+
 
 class ConfigManager:
     """
@@ -238,9 +244,32 @@ class ConfigManager:
             
             # AI Masking
             'stage3_enabled': True,
+            'masking_engine': 'yolo',
             'model_size': 'small',
             'confidence_threshold': DEFAULT_CONFIDENCE_THRESHOLD,
             'use_gpu': DEFAULT_USE_GPU,
+            'sam3_segmenter_path': str(_DEFAULT_SAM3_SEGMENTER),
+            'sam3_model_path': str(_DEFAULT_SAM3_MODEL),
+            'sam3_image_exe_path': str(_DEFAULT_SAM3_GUI),
+            'sam3_feather_radius': 8,
+            'sam3_enable_refinement': True,
+            'sam3_refine_sky_only': True,
+            'sam3_seam_aware_refinement': True,
+            'sam3_edge_sharpen_strength': 0.75,
+            'sam3_prompts': {
+                'persons':  True,
+                'bags':     True,
+                'phones':   True,
+                'hats':     True,
+                'helmets':  True,
+                'sky':      True,
+            },
+            'sam3_custom_prompts': '',
+            'sam3_morph_radius': 0,
+            'sam3_alpha_export': False,
+            'sam3_max_input_width': 3840,
+            'sam3_score_threshold': 0.5,
+            'sam3_nms_threshold': 0.1,
             'masking_categories': {
                 'persons': True,
                 'personal_objects': True,

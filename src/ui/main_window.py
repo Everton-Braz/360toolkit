@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox,
     QLineEdit, QSplitter, QScrollArea, QSizePolicy,
     QRadioButton, QButtonGroup, QFrame, QStackedWidget,
-    QApplication, QToolButton, QGridLayout, QSpacerItem, QStyle
+    QApplication, QToolButton, QGridLayout, QSpacerItem, QStyle,
+    QSlider
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal, QEvent
 from PyQt6.QtGui import QFont, QAction, QIcon, QPainter, QColor, QPen, QPixmap, QShortcut, QKeySequence, QPalette, QStandardItem
@@ -28,7 +29,9 @@ from src.pipeline.batch_orchestrator import BatchOrchestrator
 from src.config.defaults import (
     APP_NAME, APP_VERSION,
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
+    DEFAULT_STAGE2_LAYOUT_MODE, DEFAULT_STAGE2_NUMBERING_MODE,
     EXTRACTION_METHODS, TRANSFORM_TYPES, YOLOV8_MODELS,
+    STAGE2_LAYOUT_MODES, STAGE2_NUMBERING_MODES,
     DEFAULT_SDK_QUALITY
 )
 from src.config.settings import get_settings
@@ -43,9 +46,11 @@ from src.ui.widgets import (
     StageActionFooter,
     FormRow,
     MediaProcessingPanel,
+    SAM3PreviewWidget,
 )
 from src.ui.preview_panels import EquirectPreviewWidget
 from src.utils.runtime_backends import has_bundled_onnx_runtime, has_usable_torch_runtime, is_usable_torch_module
+from src.pipeline.stage2_naming import perspective_output_sort_key
 
 logger = logging.getLogger(__name__)
 
@@ -218,9 +223,8 @@ class MainWindow(QMainWindow):
         self._update_overview_stage_summary()
         self.on_settings_changed()
 
-        # Connect input file path to Stage 1 equirectangular preview
-        if hasattr(self, 'stage1_eq_preview'):
-            self.input_file_edit.textChanged.connect(self.stage1_eq_preview.set_video_path)
+        self.input_file_edit.textChanged.connect(self._on_input_file_changed)
+        self.output_dir_edit.textChanged.connect(self._on_stage3_preview_source_changed)
         
         # Show maximized by default
         self.showMaximized()
@@ -790,6 +794,12 @@ class MainWindow(QMainWindow):
         self.stage1_media_panel.values_changed.connect(
             self._on_media_flowstate_changed
         )
+        self.stage1_eq_preview.preview_timestamp_changed.connect(
+            self._on_stage1_preview_timestamp_changed
+        )
+        self.start_time_spin.valueChanged.connect(
+            self._sync_preview_timestamp_from_stage1_range
+        )
 
         return splitter
     
@@ -843,8 +853,42 @@ class MainWindow(QMainWindow):
         self.stage2_format_combo.addItem("TIFF", "tiff")
         self.stage2_format_combo.setFixedWidth(120)
 
+        self.stage2_numbering_combo = QComboBox()
+        for mode, label in STAGE2_NUMBERING_MODES.items():
+            self.stage2_numbering_combo.addItem(label, mode)
+        self.stage2_numbering_combo.setCurrentIndex(
+            max(0, self.stage2_numbering_combo.findData(DEFAULT_STAGE2_NUMBERING_MODE))
+        )
+        self.stage2_numbering_combo.setMinimumWidth(220)
+
+        self.stage2_layout_combo = QComboBox()
+        for mode, label in STAGE2_LAYOUT_MODES.items():
+            self.stage2_layout_combo.addItem(label, mode)
+        self.stage2_layout_combo.setCurrentIndex(
+            max(0, self.stage2_layout_combo.findData(DEFAULT_STAGE2_LAYOUT_MODE))
+        )
+        self.stage2_layout_combo.setMinimumWidth(220)
+
+        stage2_input_widget = QWidget()
+        stage2_input_layout = QHBoxLayout(stage2_input_widget)
+        stage2_input_layout.setContentsMargins(0, 0, 0, 0)
+        stage2_input_layout.setSpacing(8)
+        self.stage2_input_dir_edit = QLineEdit()
+        self.stage2_input_dir_edit.setPlaceholderText("Optional: folder with extracted/equirectangular images for split-only runs")
+        self.stage2_input_dir_edit.textChanged.connect(self._on_stage2_input_dir_changed)
+        stage2_input_layout.addWidget(self.stage2_input_dir_edit)
+        self.stage2_input_browse_btn = QPushButton("Browse…")
+        self.stage2_input_browse_btn.setFixedWidth(92)
+        self.stage2_input_browse_btn.clicked.connect(
+            lambda: self._browse_for_directory(self.stage2_input_dir_edit, "Select Stage 2 Input Folder")
+        )
+        stage2_input_layout.addWidget(self.stage2_input_browse_btn)
+
         card_output.addWidget(FormRow("Output Size:", dims_widget, "Width × Height in pixels"))
         card_output.addWidget(FormRow("Format:", self.stage2_format_combo))
+        card_output.addWidget(FormRow("Frame Numbering:", self.stage2_numbering_combo, "Preserve extracted frame ids or renumber sequentially"))
+        card_output.addWidget(FormRow("Folder Layout:", self.stage2_layout_combo, "Keep all views flat or group them into per-camera folders"))
+        card_output.addWidget(FormRow("Input Folder:", stage2_input_widget, "Used when running Stage 2 without Stage 1; leave empty for auto-discovery"))
         self.stage2_output_group = card_output
         layout.addWidget(card_output)
         
@@ -936,6 +980,46 @@ class MainWindow(QMainWindow):
         self.cubemap_format_combo.addItem("TIFF", "tiff")
         self.cubemap_format_combo.setFixedWidth(120)
         card_tiles.addWidget(FormRow("Tile Format:", self.cubemap_format_combo))
+
+        self.stage2_numbering_combo_cubemap = QComboBox()
+        for mode, label in STAGE2_NUMBERING_MODES.items():
+            self.stage2_numbering_combo_cubemap.addItem(label, mode)
+        self.stage2_numbering_combo_cubemap.setCurrentIndex(
+            max(0, self.stage2_numbering_combo_cubemap.findData(DEFAULT_STAGE2_NUMBERING_MODE))
+        )
+        self.stage2_numbering_combo_cubemap.setMinimumWidth(220)
+        self.stage2_numbering_combo_cubemap.currentIndexChanged.connect(
+            lambda _index: self._mirror_combo_selection(self.stage2_numbering_combo_cubemap, self.stage2_numbering_combo)
+        )
+        self.stage2_numbering_combo.currentIndexChanged.connect(
+            lambda _index: self._mirror_combo_selection(self.stage2_numbering_combo, self.stage2_numbering_combo_cubemap)
+        )
+        card_tiles.addWidget(FormRow("Frame Numbering:", self.stage2_numbering_combo_cubemap, "Use the same frame ids as extraction or renumber sequentially"))
+
+        self.cubemap_layout_combo = QComboBox()
+        self.cubemap_layout_combo.addItem("Flat Folder", "flat")
+        self.cubemap_layout_combo.addItem("Separate By Tile", "by_camera")
+        self.cubemap_layout_combo.setCurrentIndex(
+            max(0, self.cubemap_layout_combo.findData(DEFAULT_STAGE2_LAYOUT_MODE))
+        )
+        self.cubemap_layout_combo.setMinimumWidth(220)
+        card_tiles.addWidget(FormRow("Folder Layout:", self.cubemap_layout_combo, "Keep all cubemap tiles together or group them into per-tile folders"))
+
+        cubemap_input_widget = QWidget()
+        cubemap_input_layout = QHBoxLayout(cubemap_input_widget)
+        cubemap_input_layout.setContentsMargins(0, 0, 0, 0)
+        cubemap_input_layout.setSpacing(8)
+        self.stage2_input_dir_edit_cubemap = QLineEdit()
+        self.stage2_input_dir_edit_cubemap.setPlaceholderText("Optional: folder with extracted/equirectangular images for split-only runs")
+        self.stage2_input_dir_edit_cubemap.textChanged.connect(self._on_stage2_input_dir_changed)
+        cubemap_input_layout.addWidget(self.stage2_input_dir_edit_cubemap)
+        self.stage2_input_browse_btn_cubemap = QPushButton("Browse…")
+        self.stage2_input_browse_btn_cubemap.setFixedWidth(92)
+        self.stage2_input_browse_btn_cubemap.clicked.connect(
+            lambda: self._browse_for_directory(self.stage2_input_dir_edit_cubemap, "Select Stage 2 Input Folder")
+        )
+        cubemap_input_layout.addWidget(self.stage2_input_browse_btn_cubemap)
+        card_tiles.addWidget(FormRow("Input Folder:", cubemap_input_widget, "Used when running Stage 2 without Stage 1; leave empty for auto-discovery"))
         layout.addWidget(card_tiles)
         
         # Cubemap type card
@@ -989,15 +1073,48 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(StageSummaryStrip(
             "Masking",
-            "Choose detection categories, engine, and confidence, then validate before running."
+            "Choose the masking source and SAM3 processing settings, then validate before running."
         ))
 
-        card_source = CardWidget("Input Source")
+        # ── Engine & Quality — merged card ─────────────────────────────────
+        card_model = CardWidget("Engine & Quality")
+
+        self.masking_engine_combo = QComboBox()
+        self.masking_engine_combo.addItem("SAM3.cpp External - Person Masking", "sam3_cpp")
+        self.masking_engine_combo.setCurrentIndex(0)
+        self.masking_engine_combo.setMinimumWidth(280)
+        self.masking_engine_combo.currentIndexChanged.connect(self.on_masking_engine_changed)
+        card_model.addWidget(FormRow("Masking Engine:", self.masking_engine_combo))
+        
+        self.engine_description_label = QLabel("SAM3.cpp is the masking engine used for Stage 3 processing")
+        self.engine_description_label.setProperty("role", "mutedSmall")
+        card_model.addWidget(self.engine_description_label)
+        self.masking_runtime_label = QLabel("Runtime: detecting ONNX / PyTorch backends...")
+        self.masking_runtime_label.setProperty("role", "mutedSmall")
+        card_model.addWidget(self.masking_runtime_label)
+
         self.mask_input_source_combo = QComboBox()
         self.mask_input_source_combo.addItem("Auto", "auto")
         self.mask_input_source_combo.addItem("Perspective Views", "perspective")
         self.mask_input_source_combo.addItem("Equirect / Extracted Frames", "equirect")
-        card_source.addWidget(FormRow("Images:", self.mask_input_source_combo))
+        self.mask_input_source_combo.currentIndexChanged.connect(self._on_stage3_preview_source_changed)
+        card_model.addWidget(FormRow("Input Source:", self.mask_input_source_combo))
+
+        stage3_input_widget = QWidget()
+        stage3_input_layout = QHBoxLayout(stage3_input_widget)
+        stage3_input_layout.setContentsMargins(0, 0, 0, 0)
+        stage3_input_layout.setSpacing(8)
+        self.stage3_input_dir_edit = QLineEdit()
+        self.stage3_input_dir_edit.setPlaceholderText("Optional: folder with images for masking-only runs")
+        self.stage3_input_dir_edit.textChanged.connect(self._on_stage3_input_dir_changed)
+        stage3_input_layout.addWidget(self.stage3_input_dir_edit)
+        self.stage3_input_browse_btn = QPushButton("Browse…")
+        self.stage3_input_browse_btn.setFixedWidth(92)
+        self.stage3_input_browse_btn.clicked.connect(
+            lambda: self._browse_for_directory(self.stage3_input_dir_edit, "Select Stage 3 Input Folder")
+        )
+        stage3_input_layout.addWidget(self.stage3_input_browse_btn)
+        card_model.addWidget(FormRow("Input Folder:", stage3_input_widget, "Used when running Stage 3 without Stage 1/2; leave empty for auto-discovery"))
 
         auto_note = QLabel(
             "Auto uses perspective views when available and falls back to extracted frames. "
@@ -1005,11 +1122,203 @@ class MainWindow(QMainWindow):
         )
         auto_note.setProperty("role", "secondary")
         auto_note.setWordWrap(True)
-        card_source.addWidget(auto_note)
-        layout.addWidget(card_source)
+        card_model.addWidget(auto_note)
+        
+        # Model size
+        self.model_size_container = QWidget()
+        ms_layout = QHBoxLayout(self.model_size_container)
+        ms_layout.setContentsMargins(0, 0, 0, 0)
+        self.model_size_combo = QComboBox()
+        self.model_size_combo.addItem("Nano (10MB) - Fastest", "nano")
+        self.model_size_combo.addItem("Small (40MB) - Balanced", "small")
+        self.model_size_combo.addItem("Medium (90MB) - Best", "medium")
+        self.model_size_combo.setCurrentIndex(1)
+        self.model_size_combo.setFixedWidth(240)
+        ms_layout.addWidget(FormRow("Model Size:", self.model_size_combo))
+        card_model.addWidget(self.model_size_container)
+        
+        self.confidence_container = QWidget()
+        conf_row = QHBoxLayout(self.confidence_container)
+        conf_row.setContentsMargins(0, 0, 0, 0)
+        conf_row.addWidget(QLabel("Confidence:"))
+        self.confidence_spin = QDoubleSpinBox()
+        self.confidence_spin.setRange(0.0, 1.0)
+        self.confidence_spin.setValue(0.6)
+        self.confidence_spin.setSingleStep(0.05)
+        self.confidence_spin.setFixedWidth(80)
+        conf_row.addWidget(self.confidence_spin)
+        conf_hint = QLabel("(common range: 0.5-0.7)")
+        conf_hint.setProperty("role", "muted")
+        conf_row.addWidget(conf_hint)
+        conf_row.addStretch()
+        card_model.addWidget(self.confidence_container)
+
+        self.sam3_options_container = QWidget()
+        sam3_layout = QVBoxLayout(self.sam3_options_container)
+        sam3_layout.setContentsMargins(0, 0, 0, 0)
+        sam3_layout.setSpacing(8)
+
+        sam3_paths_hint = QLabel("Configure segment_persons.exe, the SAM3 model, and sam3_image.exe in Settings > Paths & Detection.")
+        sam3_paths_hint.setWordWrap(True)
+        sam3_paths_hint.setProperty("role", "secondary")
+        sam3_layout.addWidget(sam3_paths_hint)
+
+        sam3_feather_row = QWidget()
+        sam3_feather_layout = QHBoxLayout(sam3_feather_row)
+        sam3_feather_layout.setContentsMargins(0, 0, 0, 0)
+        sam3_feather_layout.setSpacing(8)
+        self.sam3_feather_spin = QSpinBox()
+        self.sam3_feather_spin.setRange(0, 40)
+        self.sam3_feather_spin.setValue(8)
+        self.sam3_feather_spin.valueChanged.connect(self._on_sam3_config_changed)
+        sam3_feather_layout.addWidget(self.sam3_feather_spin)
+        sam3_feather_layout.addWidget(QLabel("Width of the local boundary refinement band."))
+        sam3_feather_layout.addStretch()
+        sam3_layout.addWidget(FormRow("Refinement Band:", sam3_feather_row))
+
+        self.sam3_enable_refinement = True
+        self.sam3_refine_sky_only = True
+        self.sam3_seam_aware_refinement = True
+
+        sam3_sharpen_widget = QWidget()
+        sam3_sharpen_layout = QHBoxLayout(sam3_sharpen_widget)
+        sam3_sharpen_layout.setContentsMargins(0, 0, 0, 0)
+        sam3_sharpen_layout.setSpacing(8)
+        self.sam3_edge_sharpen_spin = QDoubleSpinBox()
+        self.sam3_edge_sharpen_spin.setRange(0.0, 2.0)
+        self.sam3_edge_sharpen_spin.setSingleStep(0.05)
+        self.sam3_edge_sharpen_spin.setDecimals(2)
+        self.sam3_edge_sharpen_spin.setValue(0.75)
+        self.sam3_edge_sharpen_spin.setFixedWidth(80)
+        self.sam3_edge_sharpen_spin.valueChanged.connect(self._on_sam3_config_changed)
+        sam3_sharpen_layout.addWidget(self.sam3_edge_sharpen_spin)
+        sam3_sharpen_layout.addWidget(QLabel("Higher values push mask edges harder toward image boundaries."))
+        sam3_sharpen_layout.addStretch()
+        sam3_layout.addWidget(FormRow("Edge Sharpen:", sam3_sharpen_widget))
+
+        # ── Prompt Categories ────────────────────────────────────────────────
+        sam3_cats_sep = QFrame()
+        sam3_cats_sep.setFrameShape(QFrame.Shape.HLine)
+        sam3_cats_sep.setProperty("role", "divider")
+        sam3_layout.addWidget(sam3_cats_sep)
+
+        sam3_cats_label = QLabel("Detection Targets (SAM3 prompts):")
+        sam3_cats_label.setProperty("role", "secondary")
+        sam3_layout.addWidget(sam3_cats_label)
+
+        sam3_prompts_row = QWidget()
+        sam3_prompts_grid = QGridLayout(sam3_prompts_row)
+        sam3_prompts_grid.setContentsMargins(0, 0, 0, 0)
+        sam3_prompts_grid.setHorizontalSpacing(16)
+        sam3_prompts_grid.setVerticalSpacing(4)
+
+        _sam3_cats = [
+            ('persons',  'Persons',  0, 0),
+            ('bags',     'Bags',     0, 1),
+            ('phones',   'Phones',   0, 2),
+            ('hats',     'Hats',     1, 0),
+            ('helmets',  'Helmets',  1, 1),
+            ('sky',      'Sky',      1, 2),
+        ]
+        self.sam3_prompt_checks: dict = {}
+        for key, label, row, col in _sam3_cats:
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.toggled.connect(self._on_sam3_config_changed)
+            sam3_prompts_grid.addWidget(cb, row, col)
+            self.sam3_prompt_checks[key] = cb
+        sam3_prompts_grid.setColumnStretch(3, 1)
+        sam3_layout.addWidget(sam3_prompts_row)
+
+        self.sam3_custom_prompts_edit = QLineEdit()
+        self.sam3_custom_prompts_edit.setPlaceholderText("Additional prompts, e.g.: car, tree, backpack")
+        self.sam3_custom_prompts_edit.textChanged.connect(self._on_sam3_config_changed)
+        sam3_layout.addWidget(FormRow("Custom prompts:", self.sam3_custom_prompts_edit))
+
+        # ── Morph / Dilate-Erode slider ─────────────────────────────────────
+        sam3_morph_widget = QWidget()
+        sam3_morph_layout = QHBoxLayout(sam3_morph_widget)
+        sam3_morph_layout.setContentsMargins(0, 0, 0, 0)
+        sam3_morph_layout.setSpacing(8)
+        self.sam3_morph_slider = QSlider(Qt.Orientation.Horizontal)
+        self.sam3_morph_slider.setRange(-50, 50)
+        self.sam3_morph_slider.setValue(0)
+        self.sam3_morph_slider.setFixedWidth(200)
+        self.sam3_morph_slider.setTickInterval(10)
+        self.sam3_morph_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.sam3_morph_spin = QSpinBox()
+        self.sam3_morph_spin.setRange(-50, 50)
+        self.sam3_morph_spin.setValue(0)
+        self.sam3_morph_spin.setFixedWidth(60)
+        self.sam3_morph_spin.setToolTip("Negative = dilate (expand), positive = erode (shrink)")
+        def _update_morph_label(v):
+            self.sam3_morph_spin.blockSignals(True)
+            self.sam3_morph_spin.setValue(v)
+            self.sam3_morph_spin.blockSignals(False)
+            self._on_sam3_config_changed()
+        def _update_morph_slider(v):
+            self.sam3_morph_slider.blockSignals(True)
+            self.sam3_morph_slider.setValue(v)
+            self.sam3_morph_slider.blockSignals(False)
+            self._on_sam3_config_changed()
+        self.sam3_morph_slider.valueChanged.connect(_update_morph_label)
+        self.sam3_morph_spin.valueChanged.connect(_update_morph_slider)
+        sam3_morph_layout.addWidget(QLabel("Dilate"))
+        sam3_morph_layout.addWidget(self.sam3_morph_slider)
+        sam3_morph_layout.addWidget(QLabel("Erode"))
+        sam3_morph_layout.addWidget(self.sam3_morph_spin)
+        sam3_morph_layout.addStretch()
+        sam3_layout.addWidget(FormRow("Mask Morphology:", sam3_morph_widget))
+
+        # ── Max input width ──────────────────────────────────────────────────
+        sam3_maxw_widget = QWidget()
+        sam3_maxw_layout = QHBoxLayout(sam3_maxw_widget)
+        sam3_maxw_layout.setContentsMargins(0, 0, 0, 0)
+        sam3_maxw_layout.setSpacing(8)
+        self.sam3_maxw_combo = QComboBox()
+        self.sam3_maxw_combo.addItem("Original (no downscale)", 0)
+        self.sam3_maxw_combo.addItem("3840px  (recommended — 4× faster encode)", 3840)
+        self.sam3_maxw_combo.addItem("1920px  (fast preview)", 1920)
+        self.sam3_maxw_combo.addItem("1024px  (ultra-fast)", 1024)
+        self.sam3_maxw_combo.setCurrentIndex(1)
+        self.sam3_maxw_combo.currentIndexChanged.connect(self._on_sam3_config_changed)
+        sam3_maxw_layout.addWidget(self.sam3_maxw_combo)
+        sam3_maxw_layout.addStretch()
+        sam3_layout.addWidget(FormRow("Max input width:", sam3_maxw_widget))
+
+        # ── Output mode ──────────────────────────────────────────────────────
+        sam3_outmode_widget = QWidget()
+        sam3_outmode_layout = QHBoxLayout(sam3_outmode_widget)
+        sam3_outmode_layout.setContentsMargins(0, 0, 0, 0)
+        self.sam3_output_mode_combo = QComboBox()
+        self.sam3_output_mode_combo.addItem("Mask files only  (separate _mask.png per image)", "masks_only")
+        self.sam3_output_mode_combo.addItem("Alpha cutout PNG only  (transparent area embedded — no mask files)", "alpha_only")
+        self.sam3_output_mode_combo.addItem("Both  (alpha PNG + separate mask file)", "both")
+        self.sam3_output_mode_combo.setCurrentIndex(0)
+        self.sam3_output_mode_combo.currentIndexChanged.connect(self._on_sam3_config_changed)
+        sam3_outmode_layout.addWidget(self.sam3_output_mode_combo)
+        sam3_outmode_layout.addStretch()
+        sam3_layout.addWidget(FormRow("Output mode:", sam3_outmode_widget))
+
+        card_model.addWidget(self.sam3_options_container)
+
+        # GPU inline in same card
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); sep.setProperty("role", "divider")
+        card_model.addWidget(sep)
+        gpu_row = QHBoxLayout()
+        self.use_gpu_check = QCheckBox("Enable GPU Acceleration (CUDA)")
+        self.use_gpu_check.setChecked(True)
+        self.use_gpu_check.toggled.connect(self._on_cuda_toggled)
+        gpu_row.addWidget(self.use_gpu_check)
+        self.gpu_hint_label = QLabel("3-4x faster with NVIDIA GPU. Auto-fallback to CPU.")
+        self.gpu_hint_label.setProperty("role", "accent")
+        gpu_row.addWidget(self.gpu_hint_label)
+        gpu_row.addStretch()
+        card_model.addLayout(gpu_row)
+        layout.addWidget(card_model)
 
         # ── Detection Categories — compact dropdown card ────────────────────
-        card_cats = CardWidget("Detection Categories")
+        self.masking_categories_card = CardWidget("YOLO Detection Categories")
         cats_grid = QGridLayout()
         cats_grid.setSpacing(10)
         cats_grid.setColumnMinimumWidth(0, 160)
@@ -1048,73 +1357,23 @@ class MainWindow(QMainWindow):
         self.animals_enable.toggled.connect(self.animals_combo.setEnabled)
         self.animals_combo.setEnabled(False)   # animals off by default
 
-        card_cats.addLayout(cats_grid)
-        layout.addWidget(card_cats)
+        self.masking_categories_card.addLayout(cats_grid)
+        layout.addWidget(self.masking_categories_card)
 
-        # ── Engine & Quality — merged card ─────────────────────────────────
-        card_model = CardWidget("Engine & Quality")
-
-        self.masking_engine_combo = QComboBox()
-        self.masking_engine_combo.addItem("YOLO (ONNX) - Fast", "yolo_onnx")
-        self.masking_engine_combo.setCurrentIndex(0)
-        self.masking_engine_combo.setMinimumWidth(280)
-        self.masking_engine_combo.currentIndexChanged.connect(self.on_masking_engine_changed)
-        card_model.addWidget(FormRow("Masking Engine:", self.masking_engine_combo))
-        
-        self.engine_description_label = QLabel("ONNX-first runtime | smallest packaged build | CUDA when available")
-        self.engine_description_label.setProperty("role", "mutedSmall")
-        card_model.addWidget(self.engine_description_label)
-        self.masking_runtime_label = QLabel("Runtime: detecting ONNX / PyTorch backends...")
-        self.masking_runtime_label.setProperty("role", "mutedSmall")
-        card_model.addWidget(self.masking_runtime_label)
-        
-        # Model size
-        self.model_size_container = QWidget()
-        ms_layout = QHBoxLayout(self.model_size_container)
-        ms_layout.setContentsMargins(0, 0, 0, 0)
-        self.model_size_combo = QComboBox()
-        self.model_size_combo.addItem("Nano (10MB) - Fastest", "nano")
-        self.model_size_combo.addItem("Small (40MB) - Balanced", "small")
-        self.model_size_combo.addItem("Medium (90MB) - Best", "medium")
-        self.model_size_combo.setCurrentIndex(1)
-        self.model_size_combo.setFixedWidth(240)
-        ms_layout.addWidget(FormRow("Model Size:", self.model_size_combo))
-        card_model.addWidget(self.model_size_container)
-        
-        conf_row = QHBoxLayout()
-        conf_row.addWidget(QLabel("Confidence:"))
-        self.confidence_spin = QDoubleSpinBox()
-        self.confidence_spin.setRange(0.0, 1.0)
-        self.confidence_spin.setValue(0.6)
-        self.confidence_spin.setSingleStep(0.05)
-        self.confidence_spin.setFixedWidth(80)
-        conf_row.addWidget(self.confidence_spin)
-        conf_hint = QLabel("(common range: 0.5-0.7)")
-        conf_hint.setProperty("role", "muted")
-        conf_row.addWidget(conf_hint)
-        conf_row.addStretch()
-        card_model.addLayout(conf_row)
-
-        # GPU inline in same card
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); sep.setProperty("role", "divider")
-        card_model.addWidget(sep)
-        gpu_row = QHBoxLayout()
-        self.use_gpu_check = QCheckBox("Enable GPU Acceleration (CUDA)")
-        self.use_gpu_check.setChecked(True)
-        self.use_gpu_check.toggled.connect(self._on_cuda_toggled)
-        gpu_row.addWidget(self.use_gpu_check)
-        self.gpu_hint_label = QLabel("3-4x faster with NVIDIA GPU. Auto-fallback to CPU.")
-        self.gpu_hint_label.setProperty("role", "accent")
-        gpu_row.addWidget(self.gpu_hint_label)
-        gpu_row.addStretch()
-        card_model.addLayout(gpu_row)
-        layout.addWidget(card_model)
+        self.sam3_preview_card = CardWidget("SAM3 Preview")
+        self.sam3_preview_widget = SAM3PreviewWidget()
+        self.sam3_preview_widget.set_config_provider(self._get_sam3_preview_config)
+        self.sam3_preview_widget.set_auto_image_resolver(self._resolve_stage3_preview_candidate)
+        self.sam3_preview_widget.message_emitted.connect(lambda message: self.log_message(f"[SAM3] {message}"))
+        self.sam3_preview_card.addWidget(self.sam3_preview_widget)
+        layout.addWidget(self.sam3_preview_card)
 
         stage3_footer = StageActionFooter("Run Masking")
         stage3_footer.primary_button.clicked.connect(self.run_stage_3_only)
         stage3_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(4))
         layout.addWidget(stage3_footer)
         
+        self.on_masking_engine_changed(self.masking_engine_combo.currentIndex())
         layout.addStretch()
         return self._scroll_wrap(page)
     
@@ -1249,9 +1508,11 @@ class MainWindow(QMainWindow):
         input_path = self.input_file_edit.text().strip()
         output_path = self.output_dir_edit.text().strip()
         input_obj = Path(input_path) if input_path else None
+        stage2_input_obj = self._get_stage2_input_path()
+        needs_global_input = not (stage_index in (2, 3) and not self.stage1_enable.isChecked() and stage2_input_obj is not None)
 
         if stage_index in (0, 1, 2, 3, 4, 5, 6):
-            if not input_path:
+            if needs_global_input and not input_path:
                 self.log_message("[WARN] Validation: Input path is not set.")
                 self._set_control_status("Input path missing", "warn")
                 return
@@ -1276,15 +1537,47 @@ class MainWindow(QMainWindow):
             self._set_control_status("Split disabled, masking extracted frames", "info")
             return
 
-        if stage_index == 4 and not (
+        if stage_index in (2, 3) and stage2_input_obj is not None:
+            if not stage2_input_obj.exists() or not stage2_input_obj.is_dir():
+                self.log_message(f"[WARN] Split validation: Stage 2 input folder not found: {stage2_input_obj}")
+                self._set_control_status("Stage 2 input folder not found", "warn")
+                return
+            if not self._directory_has_images(stage2_input_obj):
+                self.log_message(f"[WARN] Split validation: No images found in Stage 2 input folder: {stage2_input_obj}")
+                self._set_control_status("No images in Stage 2 input folder", "warn")
+                return
+
+        stage3_input_obj = self._get_stage3_input_path()
+        if stage_index == 4 and stage3_input_obj is not None:
+            if not stage3_input_obj.exists() or not stage3_input_obj.is_dir():
+                self.log_message(f"[WARN] Masking validation: Stage 3 input folder not found: {stage3_input_obj}")
+                self._set_control_status("Stage 3 input folder not found", "warn")
+                return
+            if not self._directory_has_images(stage3_input_obj):
+                self.log_message(f"[WARN] Masking validation: No images found in Stage 3 input folder: {stage3_input_obj}")
+                self._set_control_status("No images in Stage 3 input folder", "warn")
+                return
+
+        if stage_index == 4 and self._normalize_masking_engine(self.masking_engine_combo.currentData()) == 'yolo' and not (
             self.persons_enable.isChecked() or self.objects_enable.isChecked() or self.animals_enable.isChecked()
         ):
             self.log_message("[WARN] Masking validation: No masking category group is enabled.")
             self._set_control_status("No masking categories enabled", "warn")
             return
 
-            self._set_control_status("Lichtfeld path required", "warn")
-            return
+        if stage_index == 4 and self.masking_engine_combo.currentData() == 'sam3_cpp':
+            segmenter_text = self._get_sam3_segmenter_text()
+            model_text = self._get_sam3_model_text()
+            segmenter = Path(segmenter_text) if segmenter_text else None
+            model = Path(model_text) if model_text else None
+            if not segmenter or not segmenter.exists():
+                self.log_message("[WARN] Masking validation: segment_persons.exe is not configured or missing.")
+                self._set_control_status("SAM3.cpp segmenter missing", "warn")
+                return
+            if not model or not model.exists():
+                self.log_message("[WARN] Masking validation: SAM3 model path is not configured or missing.")
+                self._set_control_status("SAM3 model missing", "warn")
+                return
 
         self.log_message("[OK] Validation passed for current stage configuration.")
         self._set_control_status("Validation passed", "ok")
@@ -1592,21 +1885,42 @@ class MainWindow(QMainWindow):
             'stage2_format': stage2_format,
             'stage2_format_perspective': _normalize_image_format(self.stage2_format_combo.currentData(), 'png'),
             'stage2_format_cubemap': _normalize_image_format(self.cubemap_format_combo.currentData(), 'png'),
+            'stage2_numbering_mode': self.stage2_numbering_combo.currentData() if hasattr(self, 'stage2_numbering_combo') else DEFAULT_STAGE2_NUMBERING_MODE,
+            'stage2_perspective_layout': self.stage2_layout_combo.currentData() if hasattr(self, 'stage2_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
+            'stage2_cubemap_layout': self.cubemap_layout_combo.currentData() if hasattr(self, 'cubemap_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
             'output_width': self.stage2_width_spin.value(),
             'output_height': self.stage2_height_spin.value(),
             'cubemap_tile_width': self.cubemap_tile_width_spin.value(),
             'cubemap_tile_height': self.cubemap_tile_height_spin.value(),
             'cubemap_fov': 90,
+            'stage2_input_dir': self._get_stage2_input_dir(),
             'skip_transform': not self.stage2_enable.isChecked(),
             'stage3_enabled': self.stage3_enable.isChecked(),
+            'masking_engine': self._normalize_masking_engine(self.masking_engine_combo.currentData()),
             'model_size': self.model_size_combo.currentData(),
             'confidence_threshold': self.confidence_spin.value(),
             'use_gpu': self.use_gpu_check.isChecked(),
+            'sam3_segmenter_path': self._get_sam3_segmenter_text(),
+            'sam3_model_path': self._get_sam3_model_text(),
+            'sam3_image_exe_path': self._get_sam3_gui_text(),
+            'sam3_feather_radius': self.sam3_feather_spin.value() if hasattr(self, 'sam3_feather_spin') else 8,
+            'sam3_enable_refinement': getattr(self, 'sam3_enable_refinement', True),
+            'sam3_refine_sky_only': getattr(self, 'sam3_refine_sky_only', True),
+            'sam3_seam_aware_refinement': getattr(self, 'sam3_seam_aware_refinement', True),
+            'sam3_edge_sharpen_strength': self.sam3_edge_sharpen_spin.value() if hasattr(self, 'sam3_edge_sharpen_spin') else 0.75,
+            'sam3_prompts': {k: cb.isChecked() for k, cb in self.sam3_prompt_checks.items()} if hasattr(self, 'sam3_prompt_checks') else {},
+            'sam3_custom_prompts': self.sam3_custom_prompts_edit.text().strip() if hasattr(self, 'sam3_custom_prompts_edit') else '',
+            'sam3_morph_radius': self.sam3_morph_spin.value() if hasattr(self, 'sam3_morph_spin') else (self.sam3_morph_slider.value() if hasattr(self, 'sam3_morph_slider') else 0),
+            'sam3_output_mode': self.sam3_output_mode_combo.currentData() if hasattr(self, 'sam3_output_mode_combo') else 'masks_only',
+            'sam3_alpha_export': (self.sam3_output_mode_combo.currentData() in ('alpha_only', 'both')) if hasattr(self, 'sam3_output_mode_combo') else False,
+            'sam3_alpha_only': (self.sam3_output_mode_combo.currentData() == 'alpha_only') if hasattr(self, 'sam3_output_mode_combo') else False,
+            'sam3_max_input_width': self.sam3_maxw_combo.currentData() if hasattr(self, 'sam3_maxw_combo') else 3840,
             'masking_categories': {
                 'persons': self.persons_enable.isChecked(),
                 'personal_objects': self.objects_enable.isChecked(),
                 'animals': self.animals_enable.isChecked(),
             },
+            'stage3_input_dir': self._get_stage3_input_dir(),
             'stage3_image_source': self._get_stage3_image_source(),
             'mask_target': self._legacy_mask_target_from_source(self._get_stage3_image_source()),
             'export_realityscan': self.export_realityscan_check.isChecked() if hasattr(self, 'export_realityscan_check') else False,
@@ -1623,6 +1937,58 @@ class MainWindow(QMainWindow):
             return self.mask_input_source_combo.currentData()
         return 'equirect' if not self.stage2_enable.isChecked() else 'perspective'
 
+    def _get_stage3_input_dir(self) -> str:
+        widget = getattr(self, 'stage3_input_dir_edit', None)
+        if widget is None:
+            return ''
+        return widget.text().strip()
+
+    def _set_stage3_input_dir(self, value: str):
+        normalized = str(value or '').strip()
+        widget = getattr(self, 'stage3_input_dir_edit', None)
+        if widget is None or widget.text().strip() == normalized:
+            return
+        widget.blockSignals(True)
+        widget.setText(normalized)
+        widget.blockSignals(False)
+
+    def _on_stage3_input_dir_changed(self, value: str):
+        self._set_stage3_input_dir(value)
+        self._on_stage3_preview_source_changed()
+
+    def _get_stage3_input_path(self) -> Path | None:
+        value = self._get_stage3_input_dir()
+        return Path(value) if value else None
+
+    def _get_stage2_input_dir(self) -> str:
+        for attr in ('stage2_input_dir_edit', 'stage2_input_dir_edit_cubemap'):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                value = widget.text().strip()
+                if value:
+                    return value
+        return ''
+
+    def _set_stage2_input_dir(self, value: str):
+        normalized = str(value or '').strip()
+        for attr in ('stage2_input_dir_edit', 'stage2_input_dir_edit_cubemap'):
+            widget = getattr(self, attr, None)
+            if widget is None:
+                continue
+            if widget.text().strip() == normalized:
+                continue
+            widget.blockSignals(True)
+            widget.setText(normalized)
+            widget.blockSignals(False)
+
+    def _on_stage2_input_dir_changed(self, value: str):
+        self._set_stage2_input_dir(value)
+        self._on_stage3_preview_source_changed()
+
+    def _get_stage2_input_path(self) -> Path | None:
+        value = self._get_stage2_input_dir()
+        return Path(value) if value else None
+
     def _get_export_image_source(self) -> str:
         if hasattr(self, 'export_image_source_combo'):
             return self.export_image_source_combo.currentData()
@@ -1638,6 +2004,149 @@ class MainWindow(QMainWindow):
             return 'equirect'
         return 'split'
 
+    def _browse_for_file(self, target: QLineEdit, title: str, filter_text: str):
+        start_dir = str(Path(target.text()).parent) if target.text().strip() else str(Path.cwd())
+        selected, _ = QFileDialog.getOpenFileName(self, title, start_dir, filter_text)
+        if selected:
+            target.setText(selected)
+
+    def _browse_for_directory(self, target: QLineEdit, title: str):
+        start_dir = target.text().strip() or str(Path.cwd())
+        selected = QFileDialog.getExistingDirectory(self, title, start_dir)
+        if selected:
+            target.setText(selected)
+
+    def _browse_sam3_segmenter(self):
+        self.open_settings()
+
+    def _browse_sam3_model(self):
+        self.open_settings()
+
+    def _browse_sam3_gui(self):
+        self.open_settings()
+
+    def _sync_preview_timestamp_from_stage1_range(self, *_args):
+        if not hasattr(self, 'stage1_eq_preview'):
+            return
+
+        preview_time = 0.0 if self.full_video_check.isChecked() else self.start_time_spin.value()
+        self.stage1_eq_preview.set_preview_timestamp(preview_time)
+
+    def _on_stage1_preview_timestamp_changed(self, timestamp: float):
+        if hasattr(self, 'sam3_preview_widget'):
+            self.sam3_preview_widget.refresh_auto_source_image(
+                force=True,
+                mark_overlay_stale=True,
+            )
+
+    def _on_sam3_config_changed(self, *_args):
+        self._update_masking_runtime_status()
+        if hasattr(self, 'sam3_preview_widget'):
+            self.sam3_preview_widget.refresh_state()
+            self.sam3_preview_widget.mark_stale()
+
+    def _get_sam3_segmenter_text(self) -> str:
+        segmenter = self.settings.get_sam3_segmenter_path()
+        return str(segmenter) if segmenter else ''
+
+    def _get_sam3_model_text(self) -> str:
+        model = self.settings.get_sam3_model_path()
+        return str(model) if model else ''
+
+    def _get_sam3_gui_text(self) -> str:
+        gui = self.settings.get_sam3_image_exe_path()
+        return str(gui) if gui else ''
+
+    def _set_sam3_paths_from_config(self, config: dict):
+        if 'sam3_segmenter_path' in config:
+            self.settings.set_sam3_segmenter_path(config['sam3_segmenter_path'])
+        if 'sam3_model_path' in config:
+            self.settings.set_sam3_model_path(config['sam3_model_path'])
+        if 'sam3_image_exe_path' in config:
+            self.settings.set_sam3_image_exe_path(config['sam3_image_exe_path'])
+
+    def _mirror_combo_selection(self, source: QComboBox, target: QComboBox):
+        if target is None or source is None:
+            return
+        value = source.currentData()
+        index = target.findData(value)
+        if index < 0 or index == target.currentIndex():
+            return
+        target.blockSignals(True)
+        target.setCurrentIndex(index)
+        target.blockSignals(False)
+
+    def _normalize_masking_engine(self, engine: str | None) -> str:
+        engine_value = str(engine or '').strip().lower()
+        if engine_value == 'sam3_cpp':
+            return 'sam3_cpp'
+        if engine_value == 'sam_vitb':
+            return 'sam3_cpp'
+        return 'sam3_cpp'
+
+    def _get_sam3_preview_config(self) -> dict:
+        prompts = {}
+        if hasattr(self, 'sam3_prompt_checks'):
+            prompts = {k: cb.isChecked() for k, cb in self.sam3_prompt_checks.items()}
+        return {
+            'segment_persons_exe': self._get_sam3_segmenter_text(),
+            'model_path': self._get_sam3_model_text(),
+            'sam3_image_exe': self._get_sam3_gui_text(),
+            'use_gpu': self.use_gpu_check.isChecked() if hasattr(self, 'use_gpu_check') else True,
+            'feather_radius': self.sam3_feather_spin.value() if hasattr(self, 'sam3_feather_spin') else 8,
+            'morph_radius': self.sam3_morph_spin.value() if hasattr(self, 'sam3_morph_spin') else (self.sam3_morph_slider.value() if hasattr(self, 'sam3_morph_slider') else 0),
+            'enable_refinement': getattr(self, 'sam3_enable_refinement', True),
+            'refine_sky_only': getattr(self, 'sam3_refine_sky_only', True),
+            'seam_aware_refinement': getattr(self, 'sam3_seam_aware_refinement', True),
+            'edge_sharpen_strength': self.sam3_edge_sharpen_spin.value() if hasattr(self, 'sam3_edge_sharpen_spin') else 0.75,
+            'alpha_export': (self.sam3_output_mode_combo.currentData() in ('alpha_only', 'both')) if hasattr(self, 'sam3_output_mode_combo') else False,
+            'max_input_width': self.sam3_maxw_combo.currentData() if hasattr(self, 'sam3_maxw_combo') else 3840,
+            'sam3_prompts': prompts,
+            'sam3_custom_prompts': self.sam3_custom_prompts_edit.text().strip() if hasattr(self, 'sam3_custom_prompts_edit') else '',
+        }
+
+    def _resolve_stage3_preview_candidate(self) -> Path | None:
+        stage3_input_path = self._get_stage3_input_path()
+        if stage3_input_path is not None:
+            return self._find_first_image_in_directory(stage3_input_path)
+
+        input_text = self.input_file_edit.text().strip() if hasattr(self, 'input_file_edit') else ''
+        if input_text:
+            input_path = Path(input_text)
+            if input_path.is_file() and input_path.suffix.lower() in {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}:
+                return input_path
+            if input_path.is_dir():
+                preview_path = self._find_first_image_in_directory(input_path)
+                if preview_path is not None:
+                    return preview_path
+
+        output_text = self.output_dir_edit.text().strip() if hasattr(self, 'output_dir_edit') else ''
+        if output_text:
+            output_root = Path(output_text)
+            image_dir = output_root if self._directory_has_images(output_root) else self._resolve_output_image_dir(output_root, self._get_stage3_image_source())
+            if image_dir and image_dir.exists():
+                preview_path = self._find_first_image_in_directory(image_dir)
+                if preview_path is not None:
+                    return preview_path
+
+        stage2_input_path = self._get_stage2_input_path()
+        if stage2_input_path is not None:
+            preview_path = self._find_first_image_in_directory(stage2_input_path)
+            if preview_path is not None:
+                return preview_path
+
+        if hasattr(self, 'stage1_eq_preview') and self.stage1_eq_preview is not None:
+            try:
+                preview_path = self.stage1_eq_preview.export_current_preview_frame(
+                    APP_ROOT / 'downloads' / 'sam3cpp' / 'preview_cache' / 'stage1_preview_frame.png'
+                )
+                if preview_path and preview_path.exists():
+                    return preview_path
+            except Exception as exc:
+                logger.debug("Failed to export Stage 1 preview frame for SAM3: %s", exc)
+
+        return None
+
     def _set_combo_data(self, combo: QComboBox, value: str):
         idx = combo.findData(value)
         if idx >= 0:
@@ -1650,6 +2159,15 @@ class MainWindow(QMainWindow):
             if any(folder.rglob(ext)):
                 return True
         return False
+
+    def _find_first_image_in_directory(self, folder: Path | None) -> Path | None:
+        if folder is None or not folder.exists() or not folder.is_dir():
+            return None
+        candidates = sorted(
+            [p for p in folder.rglob('*') if p.is_file() and p.suffix.lower() in {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}],
+            key=perspective_output_sort_key,
+        )
+        return candidates[0] if candidates else None
 
     def _resolve_output_image_dir(
         self,
@@ -1773,10 +2291,28 @@ class MainWindow(QMainWindow):
                 idx = self.cubemap_format_combo.findData(_normalize_image_format(config['stage2_format_cubemap'], 'png'))
                 if idx >= 0:
                     self.cubemap_format_combo.setCurrentIndex(idx)
+            if 'stage2_numbering_mode' in config and hasattr(self, 'stage2_numbering_combo'):
+                idx = self.stage2_numbering_combo.findData(config['stage2_numbering_mode'])
+                if idx >= 0:
+                    self.stage2_numbering_combo.setCurrentIndex(idx)
+            if 'stage2_input_dir' in config:
+                self._set_stage2_input_dir(config['stage2_input_dir'])
+            if 'stage2_perspective_layout' in config and hasattr(self, 'stage2_layout_combo'):
+                idx = self.stage2_layout_combo.findData(config['stage2_perspective_layout'])
+                if idx >= 0:
+                    self.stage2_layout_combo.setCurrentIndex(idx)
+            if 'stage2_cubemap_layout' in config and hasattr(self, 'cubemap_layout_combo'):
+                idx = self.cubemap_layout_combo.findData(config['stage2_cubemap_layout'])
+                if idx >= 0:
+                    self.cubemap_layout_combo.setCurrentIndex(idx)
             if 'stage3_enabled' in config:
                 self.stage3_enable.setChecked(config['stage3_enabled'])
             if 'stage3_image_source' in config and hasattr(self, 'mask_input_source_combo'):
                 self._set_combo_data(self.mask_input_source_combo, config['stage3_image_source'])
+            if 'stage3_input_dir' in config:
+                self._set_stage3_input_dir(config['stage3_input_dir'])
+            if 'masking_engine' in config and hasattr(self, 'masking_engine_combo'):
+                self._set_combo_data(self.masking_engine_combo, self._normalize_masking_engine(config['masking_engine']))
             if 'model_size' in config:
                 models = list(YOLOV8_MODELS.keys())
                 if config['model_size'] in models:
@@ -1785,6 +2321,44 @@ class MainWindow(QMainWindow):
                 self.confidence_spin.setValue(config['confidence_threshold'])
             if 'use_gpu' in config:
                 self.use_gpu_check.setChecked(config['use_gpu'])
+            self._set_sam3_paths_from_config(config)
+            if 'sam3_feather_radius' in config and hasattr(self, 'sam3_feather_spin'):
+                self.sam3_feather_spin.setValue(int(config['sam3_feather_radius']))
+            if 'sam3_enable_refinement' in config:
+                self.sam3_enable_refinement = bool(config['sam3_enable_refinement'])
+            if 'sam3_refine_sky_only' in config:
+                self.sam3_refine_sky_only = bool(config['sam3_refine_sky_only'])
+            if 'sam3_seam_aware_refinement' in config:
+                self.sam3_seam_aware_refinement = bool(config['sam3_seam_aware_refinement'])
+            if 'sam3_edge_sharpen_strength' in config and hasattr(self, 'sam3_edge_sharpen_spin'):
+                self.sam3_edge_sharpen_spin.setValue(float(config['sam3_edge_sharpen_strength']))
+            if 'sam3_prompts' in config and hasattr(self, 'sam3_prompt_checks'):
+                for k, cb in self.sam3_prompt_checks.items():
+                    cb.setChecked(config['sam3_prompts'].get(k, True))
+            if 'sam3_custom_prompts' in config and hasattr(self, 'sam3_custom_prompts_edit'):
+                self.sam3_custom_prompts_edit.setText(config['sam3_custom_prompts'])
+            if 'sam3_morph_radius' in config and hasattr(self, 'sam3_morph_slider'):
+                v = int(config['sam3_morph_radius'])
+                self.sam3_morph_slider.setValue(v)
+                if hasattr(self, 'sam3_morph_spin'):
+                    self.sam3_morph_spin.setValue(v)
+            if hasattr(self, 'sam3_output_mode_combo') and ('sam3_output_mode' in config or 'sam3_alpha_export' in config or 'sam3_alpha_only' in config):
+                mode = config.get('sam3_output_mode', '')
+                if not mode:
+                    # backward compat: derive from old bool flags
+                    if config.get('sam3_alpha_only', False):
+                        mode = 'alpha_only'
+                    elif config.get('sam3_alpha_export', False):
+                        mode = 'both'
+                    else:
+                        mode = 'masks_only'
+                idx = self.sam3_output_mode_combo.findData(mode)
+                if idx >= 0:
+                    self.sam3_output_mode_combo.setCurrentIndex(idx)
+            if 'sam3_max_input_width' in config and hasattr(self, 'sam3_maxw_combo'):
+                idx = self.sam3_maxw_combo.findData(int(config['sam3_max_input_width']))
+                if idx >= 0:
+                    self.sam3_maxw_combo.setCurrentIndex(idx)
             if 'masking_categories' in config:
                 cats = config['masking_categories']
                 self.persons_enable.setChecked(cats.get('persons', True))
@@ -1821,6 +2395,28 @@ class MainWindow(QMainWindow):
         # Update preview to reflect the newly selected extraction mode
         if hasattr(self, 'stage1_eq_preview'):
             self.stage1_eq_preview.set_extraction_method(method)
+
+    def _on_input_file_changed(self, path: str):
+        normalized_path = (path or '').strip()
+
+        if hasattr(self, 'stage1_eq_preview'):
+            self.stage1_eq_preview.set_video_path(normalized_path)
+
+        self._on_stage3_preview_source_changed()
+
+        suffix = Path(normalized_path).suffix.lower() if normalized_path else ''
+        if suffix in {'.mp4', '.mov', '.avi', '.mkv'}:
+            ffmpeg_idx = self.extraction_method_combo.findData('ffmpeg_stitched')
+            if ffmpeg_idx >= 0 and self.extraction_method_combo.currentIndex() != ffmpeg_idx:
+                self.extraction_method_combo.setCurrentIndex(ffmpeg_idx)
+
+    def _on_stage3_preview_source_changed(self, *_args):
+        if hasattr(self, 'sam3_preview_widget'):
+            self.sam3_preview_widget.refresh_state()
+            self.sam3_preview_widget.refresh_auto_source_image(
+                force=False,
+                mark_overlay_stale=True,
+            )
     
     def on_stage2_method_changed(self, index: int):
         method = self.stage2_method_combo.currentData()
@@ -1836,15 +2432,21 @@ class MainWindow(QMainWindow):
         self.tile_8_controls_widget.setVisible(t == '8-tile')
     
     def on_masking_engine_changed(self, index: int):
-        engine = self.masking_engine_combo.currentData()
-        if engine == "yolo_onnx":
-            self.model_size_container.setVisible(True)
-            self.confidence_spin.setEnabled(True)
-            self.engine_description_label.setText("ONNX-first runtime | smallest packaged build | CUDA when available")
+        engine = self._normalize_masking_engine(self.masking_engine_combo.currentData())
+        is_sam3 = engine == "sam3_cpp"
+        if hasattr(self, 'masking_categories_card'):
+            self.masking_categories_card.setVisible(not is_sam3)
+        self.model_size_container.setVisible(not is_sam3)
+        self.confidence_container.setVisible(not is_sam3)
+        self.sam3_options_container.setVisible(is_sam3)
+        self.sam3_preview_card.setVisible(is_sam3)
+        if is_sam3:
+            self.engine_description_label.setText("Default masking engine | Extraction preview frame feeds SAM3 automatically | full sam3-q4_0.ggml expected")
         else:
-            self.model_size_container.setVisible(True)
             self.confidence_spin.setEnabled(True)
-            self.engine_description_label.setText("Masking runtime selected from legacy config")
+            self.engine_description_label.setText("Masking runtime selected from normalized config")
+        if hasattr(self, 'sam3_preview_widget'):
+            self.sam3_preview_widget.refresh_state()
         self._update_masking_runtime_status()
 
     def _on_cuda_toggled(self, enabled: bool):
@@ -1917,6 +2519,14 @@ class MainWindow(QMainWindow):
             details.append(f'ONNX Runtime: error ({exc})')
 
         details.append('PyTorch: installed' if has_usable_torch_runtime() else 'PyTorch: not bundled')
+        segmenter_text = self._get_sam3_segmenter_text()
+        model_text = self._get_sam3_model_text()
+        segmenter = Path(segmenter_text) if segmenter_text else None
+        model = Path(model_text) if model_text else None
+        if segmenter and model and segmenter.exists() and model.exists():
+            details.append('SAM3.cpp: ready')
+        else:
+            details.append('SAM3.cpp: external exe/model not configured')
         self.masking_runtime_label.setText(' | '.join(details))
 
     def _update_reconstruction_backend_status(self):
@@ -2116,6 +2726,7 @@ class MainWindow(QMainWindow):
     def toggle_time_range(self, checked: bool):
         self.start_time_spin.setEnabled(not checked)
         self.end_time_spin.setEnabled(not checked)
+        self._sync_preview_timestamp_from_stage1_range()
     
     # ========================================================================
     # FILE BROWSING
@@ -2233,6 +2844,8 @@ class MainWindow(QMainWindow):
             camera_model = (info.get('camera_model') or '').strip()
             camera_model_source = (info.get('camera_model_source') or '').strip()
             camera_segment = f" | <b>Camera:</b> {camera_model}" if camera_model else ""
+            stream_count = max(1, int(info.get('video_stream_count') or 1))
+            stream_segment = f" | <b>Streams:</b> {stream_count}"
             self.file_metadata_label.setText(
                 f"<b>Type:</b> {info.get('file_type_desc', 'Unknown')} | "
                 f"<b>Duration:</b> {info.get('duration_formatted', 'N/A')} | "
@@ -2240,6 +2853,7 @@ class MainWindow(QMainWindow):
                 f"<b>FPS:</b> {info.get('fps', 0):.2f} | "
                 f"<b>Frames:</b> {info.get('frame_count', 0):,} | "
                 f"<b>Size:</b> {info.get('file_size_mb', 0):.1f} MB"
+                f"{stream_segment}"
                 f"{camera_segment}"
             )
             self.file_metadata_label.setProperty("state", "ok")
@@ -2247,6 +2861,10 @@ class MainWindow(QMainWindow):
             duration = info.get('duration', 0)
             self.end_time_spin.setMaximum(duration)
             self.end_time_spin.setValue(duration)
+            if hasattr(self, 'stage1_eq_preview'):
+                self.stage1_eq_preview.set_preview_timestamp_maximum(duration)
+                current_preview_time = self.start_time_spin.value() if not self.full_video_check.isChecked() else 0.0
+                self.stage1_eq_preview.set_preview_timestamp(min(current_preview_time, duration))
             
             w = info.get('width', 0)
             h = info.get('height', 0)
@@ -2301,6 +2919,8 @@ class MainWindow(QMainWindow):
         
         input_file = self.input_file_edit.text()
         output_dir = self.output_dir_edit.text()
+        stage2_input_dir = self._get_stage2_input_dir()
+        stage3_input_dir = self._get_stage3_input_dir()
         
         def _clear_pending():
             for _a in ('_pending_stage2_input', '_pending_stage3_input', '_pending_stage4_input'):
@@ -2328,11 +2948,52 @@ class MainWindow(QMainWindow):
                 self._set_control_status("Stage 1 requires a video file", "warn")
                 _clear_pending()
                 return
+        elif self.stage2_enable.isChecked() and not stage2_input_dir:
+            if not input_file:
+                QMessageBox.warning(
+                    self,
+                    "Input Required",
+                    "Select a Stage 2 input folder or enable Stage 1 with a video input."
+                )
+                self._set_control_status("Stage 2 input folder required", "warn")
+                _clear_pending()
+                return
+            if not Path(input_file).exists():
+                QMessageBox.warning(self, "Not Found", f"Input path not found:\n{input_file}")
+                self._set_control_status("Input path not found", "error")
+                _clear_pending()
+                return
         if not output_dir:
             QMessageBox.warning(self, "Output Required", "Please select an output directory.")
             self._set_control_status("Output required", "warn")
             _clear_pending()
             return
+
+        if stage2_input_dir:
+            stage2_input_path = Path(stage2_input_dir)
+            if not stage2_input_path.exists() or not stage2_input_path.is_dir():
+                QMessageBox.warning(self, "Stage 2 Input Missing", f"Stage 2 input folder not found:\n{stage2_input_path}")
+                self._set_control_status("Stage 2 input folder not found", "error")
+                _clear_pending()
+                return
+            if not self._directory_has_images(stage2_input_path):
+                QMessageBox.warning(self, "Stage 2 Input Empty", f"No images found in Stage 2 input folder:\n{stage2_input_path}")
+                self._set_control_status("No images in Stage 2 input folder", "warn")
+                _clear_pending()
+                return
+
+        if stage3_input_dir and self.stage3_enable.isChecked():
+            stage3_input_path = Path(stage3_input_dir)
+            if not stage3_input_path.exists() or not stage3_input_path.is_dir():
+                QMessageBox.warning(self, "Stage 3 Input Missing", f"Stage 3 input folder not found:\n{stage3_input_path}")
+                self._set_control_status("Stage 3 input folder not found", "error")
+                _clear_pending()
+                return
+            if not self._directory_has_images(stage3_input_path):
+                QMessageBox.warning(self, "Stage 3 Input Empty", f"No images found in Stage 3 input folder:\n{stage3_input_path}")
+                self._set_control_status("No images in Stage 3 input folder", "warn")
+                _clear_pending()
+                return
         
         stage2_method = self.stage2_method_combo.currentData()
         
@@ -2343,6 +3004,8 @@ class MainWindow(QMainWindow):
             'skip_transform': not self.stage2_enable.isChecked(),
             'enable_stage2': self.stage2_enable.isChecked(),
             'enable_stage3': self.stage3_enable.isChecked(),
+            'stage2_input_dir': stage2_input_dir,
+            'stage3_input_dir': stage3_input_dir,
             'export_realityscan': self.export_realityscan_check.isChecked() if hasattr(self, 'export_realityscan_check') else False,
             'export_include_masks': self.export_include_masks_check.isChecked() if hasattr(self, 'export_include_masks_check') else True,
             'fps': self.fps_spin.value(),
@@ -2353,6 +3016,9 @@ class MainWindow(QMainWindow):
             'sdk_resolution': self.sdk_resolution_combo.currentData(),
             'output_format': _normalize_image_format(self.output_format_combo.currentData(), 'jpg'),
             'transform_type': stage2_method,
+            'stage2_numbering_mode': self.stage2_numbering_combo.currentData() if hasattr(self, 'stage2_numbering_combo') else DEFAULT_STAGE2_NUMBERING_MODE,
+            'stage2_perspective_layout': self.stage2_layout_combo.currentData() if hasattr(self, 'stage2_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
+            'stage2_cubemap_layout': self.cubemap_layout_combo.currentData() if hasattr(self, 'cubemap_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
             'camera_config': {'cameras': self._generate_camera_positions()},
             'sdk_options': self.stage1_media_panel.get_sdk_options() if hasattr(self, 'stage1_media_panel') else {},
         }
@@ -2416,10 +3082,27 @@ class MainWindow(QMainWindow):
                         animal_classes.append(cls_id)
 
             self.pipeline_config.update({
-                'masking_engine': self.masking_engine_combo.currentData(),
+                'masking_engine': self._normalize_masking_engine(self.masking_engine_combo.currentData()),
                 'model_size': self.model_size_combo.currentData(),
                 'confidence_threshold': self.confidence_spin.value(),
                 'use_gpu': self.use_gpu_check.isChecked(),
+                'sam3_segmenter_path': self._get_sam3_segmenter_text(),
+                'sam3_model_path': self._get_sam3_model_text(),
+                'sam3_image_exe_path': self._get_sam3_gui_text(),
+                'sam3_feather_radius': self.sam3_feather_spin.value() if hasattr(self, 'sam3_feather_spin') else 8,
+                'sam3_enable_refinement': getattr(self, 'sam3_enable_refinement', True),
+                'sam3_refine_sky_only': getattr(self, 'sam3_refine_sky_only', True),
+                'sam3_seam_aware_refinement': getattr(self, 'sam3_seam_aware_refinement', True),
+                'sam3_edge_sharpen_strength': self.sam3_edge_sharpen_spin.value() if hasattr(self, 'sam3_edge_sharpen_spin') else 0.75,
+                'sam3_morph_radius': self.sam3_morph_spin.value() if hasattr(self, 'sam3_morph_spin') else (self.sam3_morph_slider.value() if hasattr(self, 'sam3_morph_slider') else 0),
+                'sam3_output_mode': self.sam3_output_mode_combo.currentData() if hasattr(self, 'sam3_output_mode_combo') else 'masks_only',
+                'sam3_alpha_export': (self.sam3_output_mode_combo.currentData() in ('alpha_only', 'both')) if hasattr(self, 'sam3_output_mode_combo') else False,
+                'sam3_alpha_only': (self.sam3_output_mode_combo.currentData() == 'alpha_only') if hasattr(self, 'sam3_output_mode_combo') else False,
+                'sam3_max_input_width': self.sam3_maxw_combo.currentData() if hasattr(self, 'sam3_maxw_combo') else 3840,
+                'sam3_score_threshold': self.sam3_score_spin.value() if hasattr(self, 'sam3_score_spin') else 0.5,
+                'sam3_nms_threshold': self.sam3_nms_spin.value() if hasattr(self, 'sam3_nms_spin') else 0.1,
+                'sam3_prompts': {k: cb.isChecked() for k, cb in self.sam3_prompt_checks.items()} if hasattr(self, 'sam3_prompt_checks') else {},
+                'sam3_custom_prompts': self.sam3_custom_prompts_edit.text().strip() if hasattr(self, 'sam3_custom_prompts_edit') else '',
                 'masking_categories': {
                     'persons': len(person_classes) > 0,
                     'personal_objects': len(object_classes) > 0,
@@ -2524,19 +3207,29 @@ class MainWindow(QMainWindow):
         if not output_dir:
             QMessageBox.warning(self, "Missing", "Configure output directory first")
             return
-        
-        from src.pipeline.batch_orchestrator import PipelineWorker
-        worker = PipelineWorker({})
-        folder = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
-        if not folder:
-            folder_str = QFileDialog.getExistingDirectory(self, "Select Extraction Output", str(Path(output_dir)))
-            if not folder_str:
-                return
-            folder = Path(folder_str)
+
+        folder = None
+        stage2_input_dir = self._get_stage2_input_dir()
+        if stage2_input_dir:
+            folder = Path(stage2_input_dir)
+        else:
+            from src.pipeline.batch_orchestrator import PipelineWorker
+            worker = PipelineWorker({})
+            folder = worker.discover_stage_input_folder(stage=2, output_dir=output_dir)
+            if not folder:
+                folder_str = QFileDialog.getExistingDirectory(self, "Select Extraction Output", str(Path(output_dir)))
+                if not folder_str:
+                    return
+                folder = Path(folder_str)
+                self._set_stage2_input_dir(str(folder))
+
+        if not folder.exists() or not folder.is_dir():
+            QMessageBox.warning(self, "Stage 2 Input Missing", f"Stage 2 input folder not found:\n{folder}")
+            return
         
         images = []
-        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']:
-            images.extend(folder.glob(ext))
+        for ext in ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG', '*.tif', '*.TIF', '*.tiff', '*.TIFF', '*.bmp', '*.BMP']:
+            images.extend(folder.rglob(ext))
         if not images:
             QMessageBox.warning(self, "No Images", f"No images in: {folder}")
             return
@@ -2562,12 +3255,15 @@ class MainWindow(QMainWindow):
         _img_exts = ('*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG', '*.tif', '*.TIF', '*.tiff', '*.TIFF')
 
         def _has_images(p: Path) -> bool:
-            return p.is_dir() and any(f for ext in _img_exts for f in p.glob(ext))
+            return p.is_dir() and any(f for ext in _img_exts for f in p.rglob(ext))
 
         # If output_root itself is already an images folder, use it directly
         # (happens when user sets output dir directly to perspective_views/extracted_frames)
         folder = None
-        if _has_images(output_root):
+        stage3_input_dir = self._get_stage3_input_dir()
+        if stage3_input_dir:
+            folder = Path(stage3_input_dir)
+        elif _has_images(output_root):
             folder = output_root
         else:
             preferred_source = self._get_stage3_image_source()
@@ -2584,8 +3280,9 @@ class MainWindow(QMainWindow):
             if not folder_str:
                 return
             folder = Path(folder_str)
+            self._set_stage3_input_dir(str(folder))
 
-        images = [f for ext in _img_exts for f in folder.glob(ext)]
+        images = [f for ext in _img_exts for f in folder.rglob(ext)]
         if not images:
             QMessageBox.warning(self, "No Images", f"No images found in:\n{folder}")
             return
@@ -2618,6 +3315,8 @@ class MainWindow(QMainWindow):
     def on_stage_complete(self, stage_number: int, results: dict):
         if results.get('success'):
             self.log_message(f"[OK] Stage {stage_number} complete")
+            if stage_number == 2 and results.get('processing_backend'):
+                self.log_message(f"[INFO] Stage 2 backend: {results.get('processing_backend')}")
             if self._auto_advance_enabled and not results.get('skipped'):
                 next_map = {
                     1: (self.stage2_enable, self.run_stage_2_only),

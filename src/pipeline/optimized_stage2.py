@@ -23,6 +23,12 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple
 
+from .stage2_naming import (
+    build_stage2_frame_records,
+    perspective_output_sort_key,
+    resolve_perspective_output_path,
+)
+
 logger = logging.getLogger(__name__)
 
 # Import our advanced GPU utilities
@@ -125,6 +131,8 @@ class OptimizedStage2Processor:
         output_width: int,
         output_height: int,
         image_format: str,
+        numbering_mode=None,
+        layout_mode=None,
         progress_callback=None,
         cancel_check=None
     ) -> Dict:
@@ -151,7 +159,8 @@ class OptimizedStage2Processor:
                 output_height, image_format, progress_callback, cancel_check
             )
         
-        logger.info(f"[Optimized Split] Processing {len(input_frames)} frames with {len(cameras)} cameras")
+        frame_records = build_stage2_frame_records(input_frames, numbering_mode)
+        logger.info(f"[Optimized Split] Processing {len(frame_records)} frames with {len(cameras)} cameras")
         
         try:
             # Determine batch size - REDUCED for memory efficiency with optimizations
@@ -165,13 +174,13 @@ class OptimizedStage2Processor:
             # Start producer thread (loads images into ring buffer)
             producer_thread = threading.Thread(
                 target=self._producer_thread,
-                args=(input_frames, batch_size),
+                args=([path for path, _ in frame_records], batch_size),
                 daemon=True
             )
             producer_thread.start()
             
             # Process batches from ring buffer (consumer)
-            total_frames = len(input_frames)
+            total_frames = len(frame_records)
             processed_files = []
             
             # Save executor for async writes
@@ -224,8 +233,9 @@ class OptimizedStage2Processor:
                     
                     # Submit saves
                     for i, frame_idx in enumerate(batch_indices):
-                        out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
-                        out_path = output_dir / out_name
+                        output_frame_id = frame_records[frame_idx][1]
+                        out_path = resolve_perspective_output_path(output_dir, output_frame_id, cam_idx, ext, layout_mode)
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
                         
                         future = save_executor.submit(
                             self._save_image_async,
@@ -258,6 +268,8 @@ class OptimizedStage2Processor:
                 result = future.result()
                 if result:
                     processed_files.append(result)
+
+            processed_files = sorted(processed_files, key=perspective_output_sort_key)
             
             save_executor.shutdown(wait=True)
             producer_thread.join(timeout=5)

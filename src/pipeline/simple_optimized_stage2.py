@@ -19,6 +19,12 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
 
+from .stage2_naming import (
+    build_stage2_frame_records,
+    perspective_output_sort_key,
+    resolve_perspective_output_path,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +61,8 @@ class SimpleOptimizedProcessor:
         output_width: int,
         output_height: int,
         image_format: str,
+        numbering_mode=None,
+        layout_mode=None,
         progress_callback=None,
         cancel_check=None
     ) -> Dict:
@@ -66,7 +74,8 @@ class SimpleOptimizedProcessor:
         2. Prefetch next batch while processing current
         3. Optimized batch size (16 tested optimal)
         """
-        logger.info(f"[Simple Optimized] Processing {len(input_frames)} frames × {len(cameras)} cameras")
+        frame_records = build_stage2_frame_records(input_frames, numbering_mode)
+        logger.info(f"[Simple Optimized] Processing {len(frame_records)} frames × {len(cameras)} cameras")
         
         try:
             # Batch size = 16 (tested optimal for perspective splitting)
@@ -82,7 +91,7 @@ class SimpleOptimizedProcessor:
             
             ext = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'jpg'
             
-            total_frames = len(input_frames)
+            total_frames = len(frame_records)
             
             # Pre-submit first batch load
             pending_load_futures = None
@@ -92,7 +101,7 @@ class SimpleOptimizedProcessor:
                     break
                 
                 batch_end = min(batch_start + batch_size, total_frames)
-                batch_paths = input_frames[batch_start:batch_end]
+                batch_paths = [path for path, _ in frame_records[batch_start:batch_end]]
                 
                 # Use prefetched futures or load now
                 if pending_load_futures is None:
@@ -104,7 +113,7 @@ class SimpleOptimizedProcessor:
                 next_batch_start = batch_end
                 if next_batch_start < total_frames:
                     next_batch_end = min(next_batch_start + batch_size, total_frames)
-                    next_batch_paths = input_frames[next_batch_start:next_batch_end]
+                    next_batch_paths = [path for path, _ in frame_records[next_batch_start:next_batch_end]]
                     pending_load_futures = self._load_batch_async(load_executor, next_batch_paths, next_batch_start)
                 else:
                     pending_load_futures = None
@@ -157,8 +166,9 @@ class SimpleOptimizedProcessor:
                     
                     # Submit async saves
                     for i, frame_idx in enumerate(batch_indices):
-                        out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
-                        out_path = output_dir / out_name
+                        output_frame_id = frame_records[frame_idx][1]
+                        out_path = resolve_perspective_output_path(output_dir, output_frame_id, cam_idx, ext, layout_mode)
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
                         
                         future = save_executor.submit(
                             self._save_image,
@@ -183,6 +193,8 @@ class SimpleOptimizedProcessor:
                 result = future.result()
                 if result:
                     processed_files.append(result)
+
+            processed_files = sorted(processed_files, key=perspective_output_sort_key)
             
             save_executor.shutdown(wait=True)
             load_executor.shutdown(wait=True)

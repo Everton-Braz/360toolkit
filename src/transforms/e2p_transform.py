@@ -543,3 +543,94 @@ class E2PTransform:
         R = R_roll @ R_pitch @ R_yaw
         
         return R
+
+
+# ---------------------------------------------------------------------------
+# OpenCL-accelerated E2P transform (no PyTorch required)
+# ---------------------------------------------------------------------------
+
+def _has_opencl() -> bool:
+    """Return True if OpenCL is usable via cv2.UMat."""
+    try:
+        return cv2.ocl.haveOpenCL()
+    except Exception:
+        return False
+
+
+class OpenCLE2PTransform:
+    """
+    OpenCL-accelerated Equirectangular to Pinhole transform.
+
+    Uses cv2.UMat so remap() runs on the GPU via OpenCL — no PyTorch or
+    special OpenCV CUDA build required.  The coordinate maps (map_x / map_y)
+    are generated in NumPy on the CPU once per (camera params + image size)
+    and then uploaded to the GPU as persistent UMat objects.
+
+    Drop-in replacement for E2PTransform when OpenCL is available.
+    Falls back to plain cv2.remap (CPU) transparently.
+    """
+
+    def __init__(self):
+        self._cpu_fallback = E2PTransform()
+        self._map_cache: dict = {}   # cache_key -> (cv2.UMat map_x, cv2.UMat map_y)
+        self.use_opencl = _has_opencl()
+        if self.use_opencl:
+            cv2.ocl.setUseOpenCL(True)
+            logger.info("[OpenCL E2P] OpenCL enabled — remap will run on GPU")
+        else:
+            logger.warning("[OpenCL E2P] OpenCL not available — using CPU fallback")
+
+    # ------------------------------------------------------------------
+    # Public API (same signature as E2PTransform.equirect_to_pinhole)
+    # ------------------------------------------------------------------
+
+    def equirect_to_pinhole(self, equirect_img, yaw=0, pitch=0, roll=0,
+                            h_fov=90, v_fov=None, output_width=1920, output_height=1080):
+        """
+        Convert equirectangular numpy array to a perspective view.
+
+        Args:
+            equirect_img: numpy array (any channel count, uint8/float32)
+            yaw, pitch, roll: degrees
+            h_fov, v_fov: field of view (v_fov auto from aspect ratio if None)
+            output_width, output_height: pixels
+
+        Returns:
+            numpy array (same dtype, same channels as input)
+        """
+        if not self.use_opencl:
+            return self._cpu_fallback.equirect_to_pinhole(
+                equirect_img, yaw, pitch, roll, h_fov, v_fov, output_width, output_height
+            )
+
+        if v_fov is None:
+            v_fov = h_fov * output_height / output_width
+
+        cache_key = (yaw, pitch, roll, h_fov, v_fov, output_width, output_height,
+                     equirect_img.shape[0], equirect_img.shape[1])
+
+        if cache_key not in self._map_cache:
+            map_x_np, map_y_np = self._cpu_fallback._generate_transform_map(
+                equirect_img.shape, yaw, pitch, roll, h_fov, v_fov,
+                output_width, output_height
+            )
+            # Upload coordinate maps to GPU once — reused for every frame
+            self._map_cache[cache_key] = (cv2.UMat(map_x_np), cv2.UMat(map_y_np))
+            logger.debug("[OpenCL E2P] Uploaded map to GPU for yaw=%s pitch=%s", yaw, pitch)
+
+        umap_x, umap_y = self._map_cache[cache_key]
+
+        # Upload source image and run remap on GPU
+        u_src = cv2.UMat(equirect_img)
+        u_out = cv2.remap(u_src, umap_x, umap_y, cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_WRAP)
+        # Download result back to CPU numpy array
+        return u_out.get()
+
+    def clear_cache(self):
+        self._map_cache.clear()
+        self._cpu_fallback.clear_cache()
+
+    def get_cache_size(self):
+        return len(self._map_cache)
+

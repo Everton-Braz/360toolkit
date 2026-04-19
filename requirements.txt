@@ -18,18 +18,16 @@ PyQt6-Qt6==6.7.3
 PyQt6-sip==13.8.0
 
 # ============================================================================
-# AI MASKING - Choose ONE option:
+# AI MASKING
 # ============================================================================
 
-# OPTION A: ONNX Runtime (RECOMMENDED for production)
-# Lightweight, fast, ~300 MB binary size
+# YOLO runtime: ONNX-first with PyTorch fallback
 onnxruntime>=1.20.0
 
 # For GPU acceleration (optional):
 # pip install onnxruntime-gpu>=1.20.0
 
-# OPTION B: PyTorch + Ultralytics (INSTALLED - for full YOLOv8 support)
-# Required for YOLOv8 masking with model auto-download
+# PyTorch + Ultralytics fallback/runtime support
 ultralytics>=8.0.200
 
 # PyTorch with CUDA 12.8 support (RTX 30/40/50 series - ALL NATIVE)
@@ -37,12 +35,6 @@ ultralytics>=8.0.200
 # Install with: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 torch>=2.10.0
 torchvision>=0.25.0
-
-# OPTION C: SAM (Segment Anything Model) - Best quality segmentation
-# Superior edge precision and quality, requires PyTorch
-# Install with: pip install segment-anything
-# Download checkpoint: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
-segment-anything>=1.0
 
 # ============================================================================
 # SFM & ALIGNMENT

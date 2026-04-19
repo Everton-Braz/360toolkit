@@ -79,6 +79,19 @@ DEFAULT_TRANSFORM_TYPE = 'cubemap_8tile'  # CHANGED: Default is now 8-tile cubem
 DEFAULT_OUTPUT_WIDTH = 1920  # CHANGED: 1920x1920 for Perspective Split
 DEFAULT_OUTPUT_HEIGHT = 1920
 
+# Stage 2 output naming and layout
+STAGE2_NUMBERING_MODES = {
+    'preserve_source': 'Preserve source frame numbers',
+    'sequential': 'Sequential renumbering',
+}
+DEFAULT_STAGE2_NUMBERING_MODE = 'preserve_source'
+
+STAGE2_LAYOUT_MODES = {
+    'flat': 'Flat folder',
+    'by_camera': 'Separate by camera',
+}
+DEFAULT_STAGE2_LAYOUT_MODE = 'flat'
+
 # Cubemap settings
 DEFAULT_CUBEMAP_TILE_WIDTH = 1920  # Default: 3/4 of input width (auto-calculated)
 DEFAULT_CUBEMAP_TILE_HEIGHT = 1920  # Default: 3/4 of input height (auto-calculated)
@@ -238,27 +251,21 @@ BATCH_SIZE_MAX = 16
 
 # Masking engine selection
 MASKING_ENGINES = {
-    'yolo_onnx': {
-        'name': 'YOLO (ONNX)',
-        'description': 'Fast, lightweight YOLO with ONNX Runtime',
-        'requires': ['onnxruntime'],
+    'yolo': {
+        'name': 'YOLO',
+        'description': 'Single YOLO mode with ONNX-first runtime and PyTorch fallback',
+        'requires': ['onnxruntime or torch+ultralytics'],
         'default_model': 'yolo26s-seg.onnx'
     },
-    'yolo_pytorch': {
-        'name': 'YOLO (PyTorch)',
-        'description': 'Full-featured YOLO with PyTorch/Ultralytics',
-        'requires': ['torch', 'ultralytics'],
-        'default_model': 'yolov8m-seg.pt'
-    },
-    'sam_vitb': {
-        'name': 'SAM ViT-B',
-        'description': 'Superior segmentation quality with Segment Anything',
-        'requires': ['torch', 'segment-anything'],
-        'default_model': 'sam_vit_b_01ec64.pth'
+    'sam3_cpp': {
+        'name': 'SAM3.cpp External',
+        'description': 'Windows-native external SAM3.cpp executable integration',
+        'requires': ['segment_persons.exe', 'sam3 model'],
+        'default_model': 'sam3-q4_0.ggml'
     }
 }
 
-DEFAULT_MASKING_ENGINE = 'yolo_onnx'  # Default to YOLO ONNX for best balance
+DEFAULT_MASKING_ENGINE = 'yolo'
 
 # SAM-specific settings
 SAM_CHECKPOINT_URL = 'https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth'

@@ -12,7 +12,7 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QSlider, QSpinBox, QPushButton, QGroupBox, QComboBox,
-    QSizePolicy, QFileDialog, QToolButton,
+    QSizePolicy, QFileDialog, QToolButton, QDoubleSpinBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QRect, QThread, QTimer
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QBrush, QFont
@@ -655,10 +655,11 @@ class _SDKPreviewWorker(QThread):
     frame_ready = pyqtSignal(str)   # absolute path to the extracted JPEG
     failed      = pyqtSignal(str)   # human-readable error message
 
-    def __init__(self, sdk_extractor, input_path: str, parent=None):
+    def __init__(self, sdk_extractor, input_path: str, timestamp: float = 0.0, parent=None):
         super().__init__(parent)
         self._extractor  = sdk_extractor
         self._input_path = input_path
+        self._timestamp = max(0.0, float(timestamp))
 
     def run(self):
         import tempfile
@@ -670,8 +671,8 @@ class _SDKPreviewWorker(QThread):
                 fps          = 0.5,      # 0.5 fps → 1 frame in first 2 s
                 quality      = 'good',   # dynamicstitch + flowstate → same orientation as pipeline
                 output_format= 'jpg',
-                start_time   = 0.0,
-                end_time     = 2.0,
+                start_time   = self._timestamp,
+                end_time     = self._timestamp + 2.0,
             )
             if frames and Path(frames[0]).exists():
                 self.frame_ready.emit(str(frames[0]))
@@ -689,11 +690,12 @@ class _FFmpegLensPreviewWorker(QThread):
     frames_ready = pyqtSignal(dict)   # {'lens_1': path, 'lens_2': path} (subset)
     failed       = pyqtSignal(str)
 
-    def __init__(self, ffmpeg_path: str, input_path: str, mode: str = 'both', parent=None):
+    def __init__(self, ffmpeg_path: str, input_path: str, mode: str = 'both', timestamp: float = 0.0, parent=None):
         super().__init__(parent)
         self._ffmpeg = ffmpeg_path
         self._path   = input_path
         self._mode   = mode
+        self._timestamp = max(0.0, float(timestamp))
 
     def run(self):
         import tempfile
@@ -710,7 +712,7 @@ class _FFmpegLensPreviewWorker(QThread):
                 out = str(Path(tmp) / f"{name}.jpg")
                 cmd = [
                     self._ffmpeg,
-                    '-y', '-ss', '0',
+                    '-y', '-ss', f'{self._timestamp:.3f}',
                     '-i', self._path,
                     '-map', f'0:v:{stream}',
                     '-frames:v', '1',
@@ -731,6 +733,61 @@ class _FFmpegLensPreviewWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class _FFmpegStillPreviewWorker(QThread):
+    frame_ready = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, ffmpeg_path: str, input_path: str, stream_index: int = 0, timestamp: float = 0.0, parent=None):
+        super().__init__(parent)
+        self._ffmpeg = ffmpeg_path
+        self._path = input_path
+        self._stream_index = max(0, int(stream_index))
+        self._timestamp = max(0.0, float(timestamp))
+
+    def run(self):
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix="360tk_video_prev_")
+        output_path = str(Path(tmp) / "first_frame.png")
+        try:
+            cmd = build_ffmpeg_still_preview_command(
+                self._ffmpeg,
+                self._path,
+                output_path,
+                stream_index=self._stream_index,
+                timestamp=self._timestamp,
+            )
+            proc = subprocess.run(cmd, capture_output=True, timeout=30)
+            if proc.returncode == 0 and Path(output_path).exists():
+                self.frame_ready.emit(output_path)
+                return
+
+            stderr = (proc.stderr or b'').decode(errors='ignore').strip()
+            self.failed.emit(stderr or 'FFmpeg could not extract the first frame')
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+def build_ffmpeg_still_preview_command(
+    ffmpeg_path: str,
+    input_path: str,
+    output_path: str,
+    *,
+    stream_index: int = 0,
+    timestamp: float = 0.0,
+) -> list[str]:
+    command = [ffmpeg_path, '-y']
+    if timestamp > 0:
+        command.extend(['-ss', f'{timestamp:.3f}'])
+    command.extend([
+        '-i', input_path,
+        '-map', f'0:v:{max(0, int(stream_index))}',
+        '-frames:v', '1',
+        output_path,
+    ])
+    return command
+
+
 class _PanoRenderWorker(QThread):
     """
     Background thread: applies colour corrections to the equirectangular image
@@ -740,32 +797,35 @@ class _PanoRenderWorker(QThread):
     result_ready = pyqtSignal(object)   # np.ndarray BGR uint8
 
     def __init__(self, orig_bgr: np.ndarray, yaw: float, color_opts: dict,
-                 skip_roll: bool = False, parent=None):
+                 preview_mode: str = 'panorama', parent=None):
         super().__init__(parent)
         self._orig       = orig_bgr
         self._yaw        = float(yaw)
         self._color_opts = dict(color_opts)
-        self._skip_roll  = skip_roll
+        self._preview_mode = preview_mode
 
     def run(self):
         try:
             src = self._orig
-            # Downscale for display speed (preview only)
-            pano_w = 1280
-            pano_h = pano_w // 2
-            if src.shape[1] != pano_w or src.shape[0] != pano_h:
-                src = cv2.resize(src, (pano_w, pano_h), interpolation=cv2.INTER_AREA)
+            if self._preview_mode == 'panorama':
+                target_w = 1280
+                target_h = target_w // 2
+                if src.shape[1] != target_w or src.shape[0] != target_h:
+                    src = cv2.resize(src, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            else:
+                target_w = 1280
+                if src.shape[1] > target_w:
+                    target_h = max(1, int(src.shape[0] * (target_w / src.shape[1])))
+                    src = cv2.resize(src, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
             # Apply colour corrections first
             corrected = _apply_color_corrections(src, self._color_opts)
 
-            # Horizontal shift by Yaw — disabled for fisheye (skip_roll) mode
-            if self._skip_roll:
-                self.result_ready.emit(corrected)
-            else:
-                # yaw range -180..180 maps to pixel shift 0..width
-                shift = int((self._yaw / 360.0) * pano_w)
+            if self._preview_mode == 'panorama':
+                shift = int((self._yaw / 360.0) * corrected.shape[1])
                 self.result_ready.emit(np.roll(corrected, shift, axis=1))
+            else:
+                self.result_ready.emit(corrected)
         except Exception as exc:  # noqa: BLE001
             import logging
             logging.getLogger(__name__).warning(f"Pano render failed: {exc}")
@@ -826,13 +886,18 @@ class EquirectPreviewWidget(QWidget):
     always shown as a flat equirectangular strip.
     """
 
+    preview_timestamp_changed = pyqtSignal(float)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._video_path: Optional[str]        = None
         self._orig_bgr:   Optional[np.ndarray] = None   # raw stitched equirectangular
+        self._last_rendered_bgr: Optional[np.ndarray] = None
         self._yaw:        float                = -180.0  # default: left edge (same as slider default)
         self._color_opts: dict                 = {}
         self._extraction_method: str                     = 'sdk_stitching'
+        self._preview_mode: str                          = 'panorama'
+        self._preview_timestamp: float                   = 0.0
         self._fisheye_mode:      bool                     = False
         self._rotation:          int                      = 0   # 0 | 90 | 180 | 270
         self._fisheye_labels:    list                     = []  # [(text, x_fraction), ...]
@@ -840,6 +905,7 @@ class EquirectPreviewWidget(QWidget):
         self._sdk_worker: Optional[_SDKPreviewWorker]     = None
         self._ffmpeg_extractor                            = None
         self._ffmpeg_lens_worker                          = None
+        self._ffmpeg_still_worker                         = None
         self._render_worker: Optional[_PanoRenderWorker]  = None
 
         # 120 ms debounce so slider drags don't flood the worker thread
@@ -847,6 +913,11 @@ class EquirectPreviewWidget(QWidget):
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(120)
         self._render_timer.timeout.connect(self._start_render)
+
+        self._preview_extract_timer = QTimer(self)
+        self._preview_extract_timer.setSingleShot(True)
+        self._preview_extract_timer.setInterval(180)
+        self._preview_extract_timer.timeout.connect(self._refresh_preview_for_timestamp)
 
         self._build_ui()
 
@@ -870,6 +941,26 @@ class EquirectPreviewWidget(QWidget):
         self._status_lbl.setProperty("role", "muted")
         bar.addWidget(self._status_lbl, stretch=1)
 
+        bar.addWidget(QLabel("Frame"))
+        self._preview_time_slider = QSlider(Qt.Orientation.Horizontal)
+        self._preview_time_slider.setRange(0, 0)
+        self._preview_time_slider.setSingleStep(25)
+        self._preview_time_slider.setPageStep(100)
+        self._preview_time_slider.setFixedWidth(180)
+        self._preview_time_slider.setToolTip("Scrub the preview frame timestamp")
+        self._preview_time_slider.valueChanged.connect(self._on_preview_time_slider_changed)
+        bar.addWidget(self._preview_time_slider)
+
+        self._preview_time_spin = QDoubleSpinBox()
+        self._preview_time_spin.setRange(0.0, 999999.0)
+        self._preview_time_spin.setDecimals(2)
+        self._preview_time_spin.setSingleStep(0.25)
+        self._preview_time_spin.setSuffix(" s")
+        self._preview_time_spin.setFixedWidth(92)
+        self._preview_time_spin.setToolTip("Preview timestamp for video frame extraction")
+        self._preview_time_spin.valueChanged.connect(self._on_preview_time_changed)
+        bar.addWidget(self._preview_time_spin)
+
         # Rotation button — cycles 0°→90°→180°→270°→0°
         self._rotate_btn = QToolButton()
         self._rotate_btn.setText("↻ 0°")
@@ -888,6 +979,8 @@ class EquirectPreviewWidget(QWidget):
         self._extract_btn.setFixedWidth(168)
         self._extract_btn.clicked.connect(self._extract_preview)
         bar.addWidget(self._extract_btn)
+
+        self._set_preview_time_controls_enabled(False)
 
         root.addWidget(bar_widget)
 
@@ -908,15 +1001,26 @@ class EquirectPreviewWidget(QWidget):
 
     def set_video_path(self, path: str):
         """Called when the input file path changes."""
-        self._video_path = path.strip() if path else ""
+        next_path = path.strip() if path else ""
+        if next_path != (self._video_path or ""):
+            self._orig_bgr = None
+            self._last_rendered_bgr = None
+            self._fisheye_labels = []
+            self._canvas.set_pixmap(None)
+            self._preview_extract_timer.stop()
+
+        self._video_path = next_path
         has_path = bool(self._video_path)
         self._extract_btn.setEnabled(has_path)
+        self._set_preview_time_controls_enabled(False)
         if has_path:
             suffix = Path(self._video_path).suffix.lower()
             if suffix == '.insv':
+                self._set_preview_time_controls_enabled(True)
                 self._status_lbl.setText("Ready — extracting preview frame…")
                 self._extract_preview()
             elif suffix in {'.mp4', '.mov', '.avi', '.mkv'}:
+                self._set_preview_time_controls_enabled(True)
                 self._status_lbl.setText("Ready — loading video still preview…")
                 self._extract_preview()
             elif suffix in {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}:
@@ -937,6 +1041,55 @@ class EquirectPreviewWidget(QWidget):
         if self._video_path and Path(self._video_path).exists():
             self._extract_preview()
 
+    def set_preview_timestamp(self, seconds: float):
+        self._update_preview_timestamp(seconds, emit_signal=False, trigger_refresh=False)
+
+    def set_preview_timestamp_maximum(self, seconds: float):
+        maximum = max(0.0, float(seconds))
+        self._preview_time_spin.setMaximum(maximum)
+        self._preview_time_slider.setMaximum(max(0, int(round(maximum * 100))))
+        if self._preview_time_spin.value() > maximum:
+            self.set_preview_timestamp(maximum)
+
+    def _update_preview_timestamp(self, seconds: float, *, emit_signal: bool, trigger_refresh: bool):
+        normalized = max(0.0, float(seconds))
+        if abs(normalized - self._preview_timestamp) < 0.005:
+            if emit_signal:
+                self.preview_timestamp_changed.emit(self._preview_timestamp)
+            return
+
+        self._preview_timestamp = normalized
+
+        self._preview_time_spin.blockSignals(True)
+        self._preview_time_spin.setValue(normalized)
+        self._preview_time_spin.blockSignals(False)
+
+        self._preview_time_slider.blockSignals(True)
+        self._preview_time_slider.setValue(max(0, int(round(normalized * 100))))
+        self._preview_time_slider.blockSignals(False)
+
+        if emit_signal:
+            self.preview_timestamp_changed.emit(normalized)
+        if trigger_refresh:
+            self._schedule_timestamp_preview_refresh()
+
+    def _schedule_timestamp_preview_refresh(self):
+        if not self._video_path or not Path(self._video_path).exists():
+            return
+
+        suffix = Path(self._video_path).suffix.lower()
+        if suffix not in {'.insv', '.mp4', '.mov', '.avi', '.mkv'}:
+            return
+
+        self._preview_extract_timer.start()
+
+    def _refresh_preview_for_timestamp(self):
+        if self._video_path and Path(self._video_path).exists():
+            self._extract_preview()
+
+    def _on_preview_time_slider_changed(self, value: int):
+        self._update_preview_timestamp(value / 100.0, emit_signal=True, trigger_refresh=True)
+
     def load_image_path(self, path: str):
         """Load an equirectangular image file directly from disk."""
         try:
@@ -944,6 +1097,8 @@ class EquirectPreviewWidget(QWidget):
             if img is None:
                 self._status_lbl.setText("Failed to read image file")
                 return
+            self._preview_mode = 'panorama'
+            self._set_preview_time_controls_enabled(False)
             self._store_orig(img)
             self._status_lbl.setText(f"{Path(path).name}  ({img.shape[1]}×{img.shape[0]})")
         except Exception as exc:
@@ -953,12 +1108,104 @@ class EquirectPreviewWidget(QWidget):
         """Load directly from a numpy BGR array."""
         self._store_orig(img_bgr)
 
+    def has_preview_frame(self) -> bool:
+        return self._last_rendered_bgr is not None or self._orig_bgr is not None
+
+    def export_current_preview_frame(self, output_path: str | Path | None = None) -> Optional[Path]:
+        """Save the currently displayed preview frame to disk for downstream tools.
+
+        SAM3 preview uses this to segment the exact frame shown in the Extraction tab,
+        including current color corrections and preview rotation.
+        """
+        source = self._build_full_resolution_preview_frame()
+        if source is None:
+            return self._extract_preview_frame_to_path(output_path)
+
+        if output_path is None:
+            import tempfile
+
+            output_path = Path(tempfile.gettempdir()) / '360toolkit_sam3' / 'stage1_preview_frame.png'
+        else:
+            output_path = Path(output_path)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(output_path), source)
+        return output_path
+
+    def _extract_preview_frame_to_path(self, output_path: str | Path | None = None) -> Optional[Path]:
+        path = self._video_path
+        if not path or not Path(path).exists():
+            return None
+
+        if output_path is None:
+            import tempfile
+
+            target_path = Path(tempfile.gettempdir()) / '360toolkit_sam3' / 'stage1_preview_frame.png'
+        else:
+            target_path = Path(output_path)
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        suffix = Path(path).suffix.lower()
+        if suffix in {'.mp4', '.mov', '.avi', '.mkv'}:
+            return self._extract_standard_video_preview_to_path(path, target_path)
+
+        return None
+
+    def _extract_standard_video_preview_to_path(self, path: str, output_path: Path) -> Optional[Path]:
+        if self._ffmpeg_extractor is None:
+            try:
+                from ..extraction.frame_extractor import FrameExtractor
+                self._ffmpeg_extractor = FrameExtractor()
+            except Exception:
+                return None
+
+        ffmpeg_path = self._ffmpeg_extractor.ffmpeg_path
+        if not ffmpeg_path:
+            return None
+
+        try:
+            primary_stream_index = max(0, self._ffmpeg_extractor.get_primary_video_stream_index(path))
+        except Exception:
+            primary_stream_index = 0
+
+        command = build_ffmpeg_still_preview_command(
+            ffmpeg_path,
+            path,
+            str(output_path),
+            stream_index=primary_stream_index,
+            timestamp=self._preview_timestamp,
+        )
+        result = subprocess.run(command, capture_output=True, timeout=30)
+        if result.returncode == 0 and output_path.exists():
+            return output_path
+        return None
+
+    def _build_full_resolution_preview_frame(self) -> Optional[np.ndarray]:
+        if self._orig_bgr is None:
+            return None
+
+        source = _apply_color_corrections(self._orig_bgr.copy(), self._color_opts)
+
+        if self._preview_mode == 'panorama':
+            shift = int((self._yaw / 360.0) * source.shape[1])
+            source = np.roll(source, shift, axis=1)
+
+        if self._rotation == 90:
+            source = cv2.rotate(source, cv2.ROTATE_90_CLOCKWISE)
+        elif self._rotation == 180:
+            source = cv2.rotate(source, cv2.ROTATE_180)
+        elif self._rotation == 270:
+            source = cv2.rotate(source, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        return source
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _store_orig(self, img_bgr: np.ndarray):
         self._orig_bgr = img_bgr.copy()
+        self._last_rendered_bgr = None
         self._trigger_render()
 
     def _trigger_render(self):
@@ -972,8 +1219,11 @@ class EquirectPreviewWidget(QWidget):
             self._render_worker.terminate()
             self._render_worker.wait()
         self._render_worker = _PanoRenderWorker(
-            self._orig_bgr, self._yaw, self._color_opts,
-            skip_roll=self._fisheye_mode, parent=self
+            self._orig_bgr,
+            self._yaw,
+            self._color_opts,
+            preview_mode=self._preview_mode,
+            parent=self,
         )
         self._render_worker.result_ready.connect(self._on_render_done)
         self._render_worker.start()
@@ -985,6 +1235,13 @@ class EquirectPreviewWidget(QWidget):
         if self._orig_bgr is not None:
             self._trigger_render()
 
+    def _on_preview_time_changed(self, value: float):
+        self._update_preview_timestamp(value, emit_signal=True, trigger_refresh=True)
+
+    def _set_preview_time_controls_enabled(self, enabled: bool):
+        self._preview_time_slider.setEnabled(enabled)
+        self._preview_time_spin.setEnabled(enabled)
+
     def _on_render_done(self, rendered_bgr: np.ndarray):
         # Apply rotation to the image
         if self._rotation == 90:
@@ -993,6 +1250,8 @@ class EquirectPreviewWidget(QWidget):
             rendered_bgr = cv2.rotate(rendered_bgr, cv2.ROTATE_180)
         elif self._rotation == 270:
             rendered_bgr = cv2.rotate(rendered_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        self._last_rendered_bgr = rendered_bgr.copy()
 
         h, w = rendered_bgr.shape[:2]
         rgb  = cv2.cvtColor(rendered_bgr, cv2.COLOR_BGR2RGB)
@@ -1021,19 +1280,27 @@ class EquirectPreviewWidget(QWidget):
         self._canvas.set_pixmap(pixmap)
 
     def _extract_preview(self):
-        # Route to lens preview for FFmpeg fisheye methods
-        if self._extraction_method in ('ffmpeg_dual_lens', 'ffmpeg_lens1', 'ffmpeg_lens2'):
-            self._extract_lens_preview()
-            return
-
         path = self._video_path
         if not path or not Path(path).exists():
             self._status_lbl.setText("Input file not found")
             return
 
         suffix = Path(path).suffix.lower()
+        is_lens_method = self._extraction_method in ('ffmpeg_dual_lens', 'ffmpeg_lens1', 'ffmpeg_lens2')
+
         if suffix in {'.mp4', '.mov', '.avi', '.mkv'}:
+            if is_lens_method:
+                stream_count = self._get_video_stream_count(path)
+                if stream_count > 1:
+                    self._extract_lens_preview()
+                else:
+                    self._load_standard_video_preview(path)
+                return
             self._load_standard_video_preview(path)
+            return
+
+        if is_lens_method:
+            self._extract_lens_preview()
             return
 
         if self._sdk is None:
@@ -1055,30 +1322,114 @@ class EquirectPreviewWidget(QWidget):
         self._status_lbl.setText("Stitching equirectangular preview…")
         self._extract_btn.setEnabled(False)
 
-        self._sdk_worker = _SDKPreviewWorker(self._sdk, path, self)
+        self._sdk_worker = _SDKPreviewWorker(self._sdk, path, self._preview_timestamp, self)
         self._sdk_worker.frame_ready.connect(self._on_sdk_frame_ready)
         self._sdk_worker.failed.connect(self._on_sdk_failed)
         self._sdk_worker.finished.connect(lambda: self._extract_btn.setEnabled(True))
         self._sdk_worker.start()
 
+    def _get_video_stream_count(self, path: str) -> int:
+        if self._ffmpeg_extractor is None:
+            try:
+                from ..extraction.frame_extractor import FrameExtractor
+                self._ffmpeg_extractor = FrameExtractor()
+            except Exception:
+                return 1
+
+        try:
+            return max(1, self._ffmpeg_extractor.get_video_stream_count(path))
+        except Exception:
+            return 1
+
     def _load_standard_video_preview(self, path: str):
+        if self._ffmpeg_extractor is None:
+            try:
+                from ..extraction.frame_extractor import FrameExtractor
+                self._ffmpeg_extractor = FrameExtractor()
+            except Exception as exc:
+                self._status_lbl.setText(f"FFmpeg init failed: {exc}")
+                return
+
+        ffmpeg_path = self._ffmpeg_extractor.ffmpeg_path
+        if not ffmpeg_path:
+            self._load_standard_video_preview_cv2(path, "FFmpeg not found for video preview; using OpenCV fallback")
+            return
+
+        if self._ffmpeg_still_worker and self._ffmpeg_still_worker.isRunning():
+            self._ffmpeg_still_worker.terminate()
+            self._ffmpeg_still_worker.wait()
+
+        self._preview_mode = 'standard_video'
+        self._fisheye_mode = False
+        self._fisheye_labels = []
+
+        video_stream_count = 1
+        primary_stream_index = 0
+        try:
+            video_stream_count = max(1, self._ffmpeg_extractor.get_video_stream_count(path))
+            primary_stream_index = max(0, self._ffmpeg_extractor.get_primary_video_stream_index(path))
+        except Exception:
+            video_stream_count = 1
+            primary_stream_index = 0
+
+        if video_stream_count > 1:
+            self._status_lbl.setText(
+                f"Extracting video preview frame at {self._preview_timestamp:.2f}s from primary stream {primary_stream_index}…"
+            )
+        else:
+            self._status_lbl.setText(f"Extracting video preview frame at {self._preview_timestamp:.2f}s with FFmpeg…")
+        self._extract_btn.setEnabled(False)
+        self._ffmpeg_still_worker = _FFmpegStillPreviewWorker(
+            ffmpeg_path,
+            path,
+            stream_index=primary_stream_index,
+            timestamp=self._preview_timestamp,
+            parent=self,
+        )
+        self._ffmpeg_still_worker.frame_ready.connect(self._on_standard_video_frame_ready)
+        self._ffmpeg_still_worker.failed.connect(lambda err: self._on_standard_video_frame_failed(path, err))
+        self._ffmpeg_still_worker.finished.connect(lambda: self._extract_btn.setEnabled(True))
+        self._ffmpeg_still_worker.start()
+
+    def _load_standard_video_preview_cv2(self, path: str, status_prefix: str | None = None):
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
-            self._status_lbl.setText("Could not open video preview")
+            self._status_lbl.setText(status_prefix or "Could not open video preview")
             return
+
+        if self._preview_timestamp > 0:
+            cap.set(cv2.CAP_PROP_POS_MSEC, self._preview_timestamp * 1000.0)
 
         ok, frame = cap.read()
         cap.release()
         if not ok or frame is None:
-            self._status_lbl.setText("Could not read preview frame")
+            self._status_lbl.setText(status_prefix or "Could not read preview frame")
             return
 
         self._fisheye_mode = False
         self._fisheye_labels = []
+        self._preview_mode = 'standard_video'
         self._status_lbl.setText(
-            f"Video still preview: {Path(path).name}  ({frame.shape[1]}×{frame.shape[0]})"
+            f"Video preview frame @ {self._preview_timestamp:.2f}s: {Path(path).name}  ({frame.shape[1]}×{frame.shape[0]})"
         )
         self._store_orig(frame)
+
+    def _on_standard_video_frame_ready(self, img_path: str):
+        frame = cv2.imread(img_path)
+        if frame is None:
+            self._status_lbl.setText("Could not load FFmpeg preview frame")
+            return
+
+        self._fisheye_mode = False
+        self._fisheye_labels = []
+        self._preview_mode = 'standard_video'
+        self._status_lbl.setText(
+            f"Video preview frame @ {self._preview_timestamp:.2f}s: {Path(self._video_path or img_path).name}  ({frame.shape[1]}×{frame.shape[0]})"
+        )
+        self._store_orig(frame)
+
+    def _on_standard_video_frame_failed(self, path: str, err: str):
+        self._load_standard_video_preview_cv2(path, "FFmpeg preview extraction failed; using OpenCV fallback")
 
     def _extract_lens_preview(self):
         """Extract and display fisheye lens preview(s) using FFmpeg."""
@@ -1109,10 +1460,16 @@ class EquirectPreviewWidget(QWidget):
             self._ffmpeg_lens_worker.terminate()
             self._ffmpeg_lens_worker.wait()
 
-        self._status_lbl.setText("Extracting fisheye lens preview…")
+        self._status_lbl.setText(f"Extracting fisheye lens preview at {self._preview_timestamp:.2f}s…")
         self._extract_btn.setEnabled(False)
 
-        self._ffmpeg_lens_worker = _FFmpegLensPreviewWorker(ffmpeg_path, path, mode, self)
+        self._ffmpeg_lens_worker = _FFmpegLensPreviewWorker(
+            ffmpeg_path,
+            path,
+            mode,
+            self._preview_timestamp,
+            self,
+        )
         self._ffmpeg_lens_worker.frames_ready.connect(self._on_lens_frames_ready)
         self._ffmpeg_lens_worker.failed.connect(self._on_lens_preview_failed)
         self._ffmpeg_lens_worker.finished.connect(lambda: self._extract_btn.setEnabled(True))
@@ -1127,6 +1484,7 @@ class EquirectPreviewWidget(QWidget):
         self._status_lbl.setText(
             f"Panorama: {src}  ({img.shape[1]}×{img.shape[0]})  — drag Yaw slider to pan"
         )
+        self._preview_mode = 'panorama'
         self._fisheye_mode = False   # equirectangular: yaw rolling enabled
         self._fisheye_labels = []     # no labels for equirectangular
         self._store_orig(img)
@@ -1169,6 +1527,7 @@ class EquirectPreviewWidget(QWidget):
 
         fn = Path(self._video_path).name if self._video_path else ""
         self._status_lbl.setText(f"{fn} — {status}")
+        self._preview_mode = 'fisheye'
         self._fisheye_mode = True   # disable yaw roll for fisheye
         self._store_orig(composite)
 

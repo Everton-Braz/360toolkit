@@ -7,6 +7,7 @@ from .scaffold import (
 	StagePageScaffold,
 )
 from .media_processing_panel import MediaProcessingPanel
+from .sam3_preview_widget import SAM3PreviewWidget
 
 __all__ = [
 	"StageHeader",
@@ -16,4 +17,5 @@ __all__ = [
 	"FormRow",
 	"StagePageScaffold",
 	"MediaProcessingPanel",
+	"SAM3PreviewWidget",
 ]

@@ -77,6 +77,23 @@ from src.utils.resource_path import get_base_path
 logger = logging.getLogger(__name__)
 
 
+class IncompleteSDKExtractionError(RuntimeError):
+    """Raised when MediaSDK exits or stalls before producing the requested frame set."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        expected_count: int,
+        actual_count: int,
+        missing_indices: Optional[List[int]] = None,
+    ):
+        super().__init__(message)
+        self.expected_count = expected_count
+        self.actual_count = actual_count
+        self.missing_indices = list(missing_indices or [])
+
+
 # Auto-detect SDK path (supports frozen PyInstaller apps)
 def _get_default_sdk_path():
     """Get SDK path from environment or bundled locations only."""
@@ -151,6 +168,11 @@ _COLOR_DEFAULTS = {
     'tint':        0,   # [-100, 100]
     'definition':  0,   # [0, 100]
 }
+
+_NATIVE_COLOR_KEYS = (
+    'exposure', 'highlights', 'shadows', 'contrast', 'brightness',
+    'blackpoint', 'saturation', 'vibrance', 'warmth', 'tint', 'definition',
+)
 
 QUALITY_PRESETS = {
     'best': {
@@ -670,23 +692,27 @@ class SDKExtractor:
                 env=env       # CRITICAL: Include _internal in PATH
             )
             
-            # Calculate timeout based on frame count
-            # Empirical: ~0.5-1.5s per frame for optflow stitching + 180s overhead
-            # For 7680x3840 output with stitching and stitchfusion, can take 1-2s per frame
-            # Add 50% safety margin for system load variations
+            # Calculate watchdog thresholds.
+            # max_runtime is a hard upper bound only; successful completion still requires
+            # the exact requested frame set. stall_timeout detects SDK runs that stop
+            # producing new requested frames while the process stays alive.
             frame_count = len(frame_indices)
-            base_time = frame_count * 1.5  # 1.5s per frame average (conservative)
-            overhead = 180  # 3 minutes overhead for SDK startup/shutdown/finalization
-            safety_margin = (base_time + overhead) * 0.5  # 50% safety margin
-            estimated_time = base_time + overhead + safety_margin
-            estimated_time = max(600, min(7200, estimated_time))  # Min 10min, Max 2 hours
-            logger.info(f"[INFO] Timeout set to {estimated_time:.0f}s for {frame_count} frames (~{estimated_time/frame_count:.2f}s/frame with safety margin)")
+            base_time = frame_count * 4.0
+            overhead = 300
+            max_runtime = max(1800, min(14400, base_time + overhead))
+            timeout_slice = 300
+            stall_timeout = max(120, min(600, frame_count * 4))
+            logger.info(
+                "[INFO] SDK watchdog configured: max_runtime=%ss, stall_timeout=%ss for %s frames",
+                int(max_runtime),
+                int(stall_timeout),
+                frame_count,
+            )
             
             # Monitor progress in real-time with smart completion detection
             import time
             import threading
             
-            extracted_frames = []
             last_count = 0
             completion_detected = False
             no_change_duration = 0
@@ -698,8 +724,7 @@ class SDKExtractor:
                 
                 while self._current_process and self._current_process.poll() is None:
                     try:
-                        current_files = list(output_dir.glob('*.*'))
-                        current_count = len(current_files)
+                        current_count = len(self._collect_existing_frame_indices(output_dir, frame_indices, output_format))
                         
                         if current_count > last_count:
                             # Progress detected
@@ -715,23 +740,12 @@ class SDKExtractor:
                             consecutive_no_change += 1
                             no_change_duration += 2  # 2 seconds per check
                             
-                            # If we have all expected frames and no changes for 10+ seconds → completed
+                            # If we have the exact requested frame set and no changes for 10+ seconds,
+                            # the SDK has finished writing images even if the process is still alive.
                             if current_count >= frame_count and consecutive_no_change >= 5:
                                 logger.info(f"[DETECTION] All {current_count} frames extracted, no changes for {no_change_duration}s")
                                 completion_detected = True
                                 # Terminate the waiting process
-                                if self._current_process and self._current_process.poll() is None:
-                                    logger.info("[DETECTION] SDK appears complete - terminating wait")
-                                    try:
-                                        self._current_process.terminate()
-                                    except:
-                                        pass
-                                break
-                            
-                            # If we have substantial frames (>90%) and no changes for 30s → likely completed
-                            elif current_count > 0 and current_count >= frame_count * 0.9 and consecutive_no_change >= 15:
-                                logger.info(f"[DETECTION] {current_count}/{frame_count} frames extracted, no changes for {no_change_duration}s")
-                                completion_detected = True
                                 if self._current_process and self._current_process.poll() is None:
                                     logger.info("[DETECTION] SDK appears complete - terminating wait")
                                     try:
@@ -748,15 +762,48 @@ class SDKExtractor:
             monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
             monitor_thread.start()
             
-            # Wait for completion with timeout
+            # Wait for completion with watchdog extensions while progress continues.
             stdout = ""
             stderr = ""
             returncode = 0
             
             try:
-                stdout, stderr = self._current_process.communicate(timeout=estimated_time)
-                returncode = self._current_process.returncode
-                self._current_process = None
+                wait_started = time.monotonic()
+                while True:
+                    remaining_runtime = max_runtime - (time.monotonic() - wait_started)
+                    if remaining_runtime <= 0:
+                        raise subprocess.TimeoutExpired(cmd, max_runtime)
+
+                    try:
+                        stdout, stderr = self._current_process.communicate(timeout=min(timeout_slice, remaining_runtime))
+                        returncode = self._current_process.returncode
+                        self._current_process = None
+                        break
+                    except subprocess.TimeoutExpired:
+                        current_count = len(self._collect_existing_frame_indices(output_dir, frame_indices, output_format))
+                        if current_count >= frame_count:
+                            logger.info("[OK] All requested frames are present - stopping SDK wait")
+                            completion_detected = True
+                            try:
+                                self._current_process.terminate()
+                                stdout, stderr = self._current_process.communicate(timeout=10)
+                            except Exception:
+                                self._current_process.kill()
+                                stdout, stderr = self._current_process.communicate()
+                            finally:
+                                returncode = self._current_process.returncode
+                                self._current_process = None
+                            break
+
+                        if no_change_duration >= stall_timeout:
+                            raise subprocess.TimeoutExpired(cmd, no_change_duration)
+
+                        logger.info(
+                            "[INFO] SDK still progressing (%s/%s frames, %ss since last new frame) - extending wait",
+                            current_count,
+                            frame_count,
+                            no_change_duration,
+                        )
                 
                 # Log SDK output immediately for diagnostics
                 if stdout:
@@ -766,10 +813,10 @@ class SDKExtractor:
                     stderr_text = stderr.decode('utf-8', errors='replace') if isinstance(stderr, bytes) else str(stderr)
                     logger.warning(f"[SDK STDERR]\n{stderr_text}")
                 
-                # Final progress update
-                if progress_callback:
-                    progress_callback(100)
-                
+                current_count = len(self._collect_existing_frame_indices(output_dir, frame_indices, output_format))
+                if current_count >= frame_count:
+                    completion_detected = True
+
                 if returncode != 0 and not completion_detected:
                     # Handle specific error codes
                     if returncode == 3221225781 or returncode == -1073741515: # 0xC0000135
@@ -795,13 +842,9 @@ class SDKExtractor:
                     logger.debug(f"SDK output: {stdout}")
                     
             except subprocess.TimeoutExpired:
-                # Timeout - check if extraction actually completed
-                logger.warning(f"[WARNING] SDK timeout after {estimated_time:.0f}s")
-                
-                # Check current file count
-                current_files = list(output_dir.glob('*.*'))
-                current_count = len(current_files)
-                
+                logger.warning("[WARNING] SDK watchdog triggered before extraction completed")
+                current_count = len(self._collect_existing_frame_indices(output_dir, frame_indices, output_format))
+
                 if current_count >= frame_count:
                     logger.info(f"[OK] All {current_count} frames extracted - SDK completed despite timeout")
                     completion_detected = True
@@ -814,19 +857,9 @@ class SDKExtractor:
                         self._current_process.wait()
                     finally:
                         self._current_process = None
-                elif current_count >= frame_count * 0.9:
-                    logger.warning(f"[WARNING] {current_count}/{frame_count} frames extracted - accepting partial result")
-                    completion_detected = True
-                    try:
-                        self._current_process.terminate()
-                        self._current_process.wait(timeout=5)
-                    except:
-                        self._current_process.kill()
-                        self._current_process.wait()
-                    finally:
-                        self._current_process = None
                 else:
-                    logger.error(f"[ERROR] Only {current_count}/{frame_count} frames extracted before timeout")
+                    missing_indices = self._get_missing_frame_indices(output_dir, frame_indices, output_format)
+                    logger.error(f"[ERROR] Only {current_count}/{frame_count} frames extracted before watchdog timeout")
                     try:
                         self._current_process.kill()
                         self._current_process.wait()
@@ -834,24 +867,24 @@ class SDKExtractor:
                         pass
                     finally:
                         self._current_process = None
-                    raise RuntimeError(f"SDK timeout with insufficient frames: {current_count}/{frame_count}")
+                    raise IncompleteSDKExtractionError(
+                        f"SDK stalled before completing extraction: {current_count}/{frame_count} frames",
+                        expected_count=frame_count,
+                        actual_count=current_count,
+                        missing_indices=missing_indices,
+                    )
                 
                 logger.debug(f"SDK output: {stdout}")
             
-            # Collect extracted frame paths
-            extracted_frames = self._collect_frame_paths(output_dir, frame_indices, output_format)
-            
-            # Validate extraction - should have at least 70% of expected frames
-            expected_count = len(frame_indices)
-            actual_count = len(extracted_frames)
-            success_rate = (actual_count / expected_count * 100) if expected_count > 0 else 0
-            
-            if actual_count == 0:
-                raise RuntimeError(f"SDK produced no output frames in {output_dir}")
-            elif success_rate < 70:
-                logger.warning(f"[WARNING] Low extraction rate: {actual_count}/{expected_count} ({success_rate:.1f}%)")
-            
-            logger.info(f"[OK] Extracted {actual_count}/{expected_count} frames ({success_rate:.1f}%)")
+            extracted_frames = self._validate_requested_frame_set(
+                output_dir,
+                frame_indices,
+                output_format,
+                operation_label="SDK extraction",
+            )
+
+            if progress_callback:
+                progress_callback(100)
 
             if output_rotation:
                 self._rotate_output_frames(extracted_frames, output_rotation)
@@ -1014,6 +1047,45 @@ class SDKExtractor:
         enabled = True if sdk_options is None else sdk_options.get('enable_sparse_retry_recovery', True)
         return bool(enabled) and len(frame_indices) <= 120
 
+    def _get_missing_frame_indices(
+        self,
+        output_dir: Path,
+        frame_indices: List[int],
+        output_format: str,
+    ) -> List[int]:
+        existing = self._collect_existing_frame_indices(output_dir, frame_indices, output_format)
+        return [frame_index for frame_index in frame_indices if frame_index not in existing]
+
+    def _validate_requested_frame_set(
+        self,
+        output_dir: Path,
+        frame_indices: List[int],
+        output_format: str,
+        *,
+        operation_label: str,
+    ) -> List[str]:
+        extracted_frames = self._collect_frame_paths(output_dir, frame_indices, output_format)
+        missing_indices = self._get_missing_frame_indices(output_dir, frame_indices, output_format)
+        expected_count = len(frame_indices)
+        actual_count = len(extracted_frames)
+
+        if actual_count == 0:
+            raise RuntimeError(f"{operation_label} produced no output frames in {output_dir}")
+
+        if missing_indices:
+            preview = ", ".join(str(index) for index in missing_indices[:10])
+            if len(missing_indices) > 10:
+                preview += ", ..."
+            raise IncompleteSDKExtractionError(
+                f"{operation_label} incomplete: {actual_count}/{expected_count} frames (missing: {preview})",
+                expected_count=expected_count,
+                actual_count=actual_count,
+                missing_indices=missing_indices,
+            )
+
+        logger.info(f"[OK] Extracted {actual_count}/{expected_count} frames (100.0%)")
+        return extracted_frames
+
     def _extract_dense_sequence_with_overlap(
         self,
         input_path: str,
@@ -1085,18 +1157,15 @@ class SDKExtractor:
                 recovered = len(self._collect_frame_paths(output_path, frame_indices, output_format))
                 progress_callback(int(recovered / expected_count * 100))
 
-        extracted_frames = self._collect_frame_paths(output_path, frame_indices, output_format)
-        actual_count = len(extracted_frames)
-        success_rate = (actual_count / expected_count * 100) if expected_count > 0 else 0
-        logger.info(f"[SDK] Dense overlap recovery extracted {actual_count}/{expected_count} frames ({success_rate:.1f}%)")
-
         if progress_callback:
             progress_callback(100)
 
-        if actual_count == 0:
-            raise RuntimeError(f"SDK dense overlap recovery produced no output frames in {output_dir}")
-
-        return extracted_frames
+        return self._validate_requested_frame_set(
+            output_path,
+            frame_indices,
+            output_format,
+            operation_label="SDK dense overlap recovery",
+        )
 
     def _extract_sparse_indices_with_retry(
         self,
@@ -1188,11 +1257,12 @@ class SDKExtractor:
             if progress_callback:
                 progress_callback(100)
 
-            final_frames = self._collect_frame_paths(output_path, frame_indices, output_format)
-            if not final_frames:
-                raise RuntimeError(f"SDK sparse retry recovery produced no output frames in {output_dir}")
-
-            return final_frames
+            return self._validate_requested_frame_set(
+                output_path,
+                frame_indices,
+                output_format,
+                operation_label="SDK sparse retry recovery",
+            )
         finally:
             for tmp_path in retry_temp_files:
                 try:
@@ -1546,17 +1616,18 @@ class SDKExtractor:
             cmd.append("-enable_defringe")
 
         # ---- Color Correction (all values passed only when non-zero) ----
-        # NOTE: Color correction flags (exposure, highlights, shadows, etc.)
-        # are intentionally NOT passed to the SDK CLI.
-        # All colour adjustments are applied via OpenCV post-processing in
-        # batch_orchestrator.py so the output exactly matches the live preview.
-        _color_keys = [
-            'exposure','highlights','shadows','contrast','brightness',
-            'blackpoint','saturation','vibrance','warmth','tint','definition',
-        ]
-        _active = {k: preset.get(k, 0) for k in _color_keys if preset.get(k, 0) != 0}
+        # Bulk extraction uses the SDK's native colour pipeline by default.
+        # This avoids a second full-image OpenCV rewrite pass over every 8K frame,
+        # which can stall large jobs before Stage 3 starts.
+        use_native_color_corrections = bool(preset.get('_use_sdk_native_color_corrections', True))
+        _active = {k: preset.get(k, 0) for k in _NATIVE_COLOR_KEYS if preset.get(k, 0) != 0}
         if _active:
-            logger.info(f"[SDK] Color values will be applied via OpenCV post-process: {_active}")
+            if use_native_color_corrections:
+                for key, value in _active.items():
+                    cmd.extend([f"-{key}", str(int(value))])
+                logger.info(f"[SDK] Applying native color corrections during extraction: {_active}")
+            else:
+                logger.info(f"[SDK] Color values will be applied via OpenCV post-process: {_active}")
         
         # Output resolution (SetOutputSize - must be 2:1 ratio)
         if resolution:
@@ -1606,7 +1677,6 @@ class SDKExtractor:
         Collect paths to extracted frames.
         
         MediaSDK names files by frame index: 0.jpg, 10.jpg, 20.jpg, etc.
-        Tolerates missing frames (up to 30%) due to SDK behavior on some systems.
         """
         ext = f".{output_format.lower()}"
         extracted = []

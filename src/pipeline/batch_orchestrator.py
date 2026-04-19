@@ -122,8 +122,8 @@ def _test_torch_cuda():
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from src.extraction import FrameExtractor
-from src.extraction.sdk_extractor import SDKExtractor
-from src.transforms import E2PTransform, E2CTransform
+from src.extraction.sdk_extractor import SDKExtractor, IncompleteSDKExtractionError
+from src.transforms import E2PTransform, E2CTransform, OpenCLE2PTransform
 from src.pipeline.metadata_handler import MetadataHandler
 from src.utils.dependency_provisioning import resolve_masking_model_path
 from src.utils.resource_path import get_resource_path
@@ -131,6 +131,15 @@ from src.utils.color_correction import apply_color_corrections
 from src.config.defaults import (
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
     DEFAULT_OUTPUT_WIDTH, DEFAULT_OUTPUT_HEIGHT
+)
+from src.pipeline.stage2_naming import (
+    build_stage2_frame_records,
+    normalize_stage2_layout_mode,
+    normalize_stage2_numbering_mode,
+    perspective_output_sort_key,
+    resolve_cubemap_output_path,
+    resolve_perspective_output_path,
+    sort_stage2_input_frames,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,13 +156,14 @@ def process_frame_cpu(frame_data):
     Must be at module level for pickling.
     Uses absolute imports for PyInstaller compatibility.
     """
-    frame_path, frame_idx, cameras, output_dir, width, height, fmt = frame_data
+    frame_path, output_frame_id, cameras, output_dir, width, height, fmt, layout_mode = frame_data
     
     # Re-import locally using ABSOLUTE imports for PyInstaller compatibility
     import cv2
     from PIL import Image
     from src.transforms import E2PTransform
     from src.pipeline.metadata_handler import MetadataHandler
+    from src.pipeline.stage2_naming import resolve_perspective_output_path
     
     transformer = E2PTransform()
     meta_handler = MetadataHandler()
@@ -161,10 +171,13 @@ def process_frame_cpu(frame_data):
     results = []
     
     try:
-        equirect_img = cv2.imread(str(frame_path))
+        equirect_img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
         if equirect_img is None:
             return {'success': False, 'error': f"Failed to load {frame_path}"}
-            
+
+        # Detect alpha channel — if present, output MUST be PNG (JPEG has no alpha)
+        has_alpha = equirect_img.ndim == 3 and equirect_img.shape[2] == 4
+
         for cam_idx, camera in enumerate(cameras):
             yaw = camera['yaw']
             pitch = camera.get('pitch', 0)
@@ -176,15 +189,21 @@ def process_frame_cpu(frame_data):
             )
             
             ext = fmt if fmt in ['png', 'jpg', 'jpeg'] else 'png'
-            out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
-            out_path = Path(output_dir) / out_name
+            if has_alpha and ext != 'png':
+                ext = 'png'  # Force PNG to preserve alpha channel
+            out_path = resolve_perspective_output_path(output_dir, output_frame_id, cam_idx, ext, layout_mode)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Save logic
             success = False
             if ext == 'png':
                 try:
-                    rgb = cv2.cvtColor(perspective_img, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(rgb)
+                    if has_alpha:
+                        rgba = cv2.cvtColor(perspective_img, cv2.COLOR_BGRA2RGBA)
+                        pil_img = Image.fromarray(rgba, 'RGBA')
+                    else:
+                        rgb = cv2.cvtColor(perspective_img, cv2.COLOR_BGR2RGB)
+                        pil_img = Image.fromarray(rgb)
                     pil_img.save(str(out_path), 'PNG', compress_level=6)
                     pil_img.close()
                     success = True
@@ -253,22 +272,20 @@ class PipelineWorker(QThread):
         elif stage == 2:
             # Look for extracted_frames folder (match common image extensions, case-insensitive)
             stage1_folder = output_path / 'extracted_frames'
-            image_patterns = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
-            if stage1_folder.exists() and any(stage1_folder.glob(p) for p in image_patterns):
+            if self._dir_has_images(stage1_folder):
                 logger.info(f"[OK] Auto-discovered extraction output: {stage1_folder}")
                 return stage1_folder
             return None
         
         elif stage == 3:
             # Look for perspective_views first, then extracted_frames (equirect masking)
-            image_patterns = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
             # If output_path itself is an images folder (user set output dir to the images folder)
-            if output_path.exists() and any(output_path.glob(p) for p in image_patterns):
+            if self._dir_has_images(output_path):
                 logger.info(f"[OK] output_dir itself is the masking input: {output_path}")
                 return output_path
             for candidate in ('perspective_views', 'extracted_frames'):
                 folder = output_path / candidate
-                if folder.exists() and any(folder.glob(p) for p in image_patterns):
+                if self._dir_has_images(folder):
                     logger.info(f"[OK] Auto-discovered masking input: {folder}")
                     return folder
             return None
@@ -343,6 +360,23 @@ class PipelineWorker(QThread):
                 return folder
         return None
 
+    def _images_have_alpha_channel(self, folder: Optional[Path], sample_limit: int = 8) -> bool:
+        if not folder or not folder.exists() or not folder.is_dir():
+            return False
+
+        image_paths: list[Path] = []
+        for pattern in self._image_patterns():
+            image_paths.extend(path for path in folder.rglob(pattern) if path.is_file())
+
+        for path in sorted(image_paths)[:sample_limit]:
+            try:
+                image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            except Exception:
+                image = None
+            if image is not None and image.ndim == 3 and image.shape[2] == 4:
+                return True
+        return False
+
     def _resolve_project_masks_dir(
         self,
         output_root: Path,
@@ -386,6 +420,57 @@ class PipelineWorker(QThread):
         if legacy_dir.exists():
             shutil.rmtree(legacy_dir)
         shutil.copytree(source_dir, legacy_dir)
+
+    def _should_mask_before_split(self) -> bool:
+        if not self.config.get('enable_stage2', True):
+            return False
+        if not self.config.get('enable_stage3', True):
+            return False
+        if self.config.get('skip_transform', False):
+            return False
+
+        image_format = str(self.config.get('stage2_format', 'png') or 'png').strip().lower()
+        return image_format == 'png'
+
+    def _pre_split_alpha_dir(self) -> Path:
+        return Path(self.config['output_dir']) / 'alpha_cutouts'
+
+    def _prepare_pre_split_masking_config(self) -> dict:
+        previous = {
+            'stage3_input_dir': self.config.get('stage3_input_dir'),
+            'stage3_image_source': self.config.get('stage3_image_source'),
+            'mask_target': self.config.get('mask_target'),
+            'sam3_alpha_export': self.config.get('sam3_alpha_export'),
+            'sam3_alpha_only': self.config.get('sam3_alpha_only'),
+            'stage2_input_dir': self.config.get('stage2_input_dir'),
+        }
+
+        self.config['stage3_input_dir'] = str(Path(self.config['output_dir']) / 'extracted_frames')
+        self.config['stage3_image_source'] = 'equirect'
+        self.config['mask_target'] = 'equirect'
+        self.config['sam3_alpha_export'] = True
+        self.config['sam3_alpha_only'] = True
+        return previous
+
+    def _restore_config_values(self, previous: dict):
+        for key, value in previous.items():
+            if value is None:
+                self.config.pop(key, None)
+            else:
+                self.config[key] = value
+
+    def _resolve_stage2_input_dir(self) -> Optional[Path]:
+        stage2_input = self.config.get('stage2_input_dir')
+        if stage2_input:
+            return Path(stage2_input)
+
+        if self.config.get('enable_stage1', True):
+            return Path(self.config['output_dir']) / 'extracted_frames'
+
+        discovered = self.discover_stage_input_folder(2, self.config['output_dir'])
+        if discovered:
+            return discovered
+        return None
     
     def run(self):
         """Execute the pipeline"""
@@ -430,6 +515,45 @@ class PipelineWorker(QThread):
             
             # Perspective Splitting (Skip if direct masking mode)
             skip_transform = self.config.get('skip_transform', False)
+            mask_before_split = self._should_mask_before_split()
+            stage3_already_executed = False
+
+            previous_stage2_input_dir = self.config.get('stage2_input_dir')
+
+            if mask_before_split:
+                if self.is_cancelled:
+                    logger.info("Pipeline cancelled before pre-split masking")
+                    results['stages_executed'] = stages_executed
+                    self.finished.emit({'success': False, 'error': 'Cancelled by user'})
+                    return
+
+                logger.info("=== Starting Mask Generation (Pre-Split PNG Pipeline) ===")
+                previous_config = self._prepare_pre_split_masking_config()
+                try:
+                    stage3_result = self._execute_stage3()
+                finally:
+                    self._restore_config_values(previous_config)
+
+                results['stage3'] = stage3_result
+                stages_executed.append(3)
+                stage3_already_executed = True
+                self.stage_complete.emit(3, stage3_result)
+
+                if not stage3_result.get('success'):
+                    self.error.emit(f"Masking failed: {stage3_result.get('error')}")
+                    results['success'] = False
+                    results['stages_executed'] = stages_executed
+                    self.finished.emit(results)
+                    return
+
+                alpha_dir = self._pre_split_alpha_dir()
+                if not self._dir_has_images(alpha_dir, recursive=False):
+                    self.error.emit('Pre-split masking did not produce alpha cutouts for Stage 2 input')
+                    results['success'] = False
+                    results['stages_executed'] = stages_executed
+                    self.finished.emit(results)
+                    return
+                self.config['stage2_input_dir'] = str(alpha_dir)
             
             if skip_transform:
                 logger.info("=== Perspective Split: SKIPPED (Direct Masking Mode) ===")
@@ -451,6 +575,11 @@ class PipelineWorker(QThread):
                 
                 logger.info("=== Starting Perspective Splitting ===")
                 stage2_result = self._execute_stage2()
+                if mask_before_split:
+                    if previous_stage2_input_dir is None:
+                        self.config.pop('stage2_input_dir', None)
+                    else:
+                        self.config['stage2_input_dir'] = previous_stage2_input_dir
                 results['stage2'] = stage2_result
                 stages_executed.append(2)
                 self.stage_complete.emit(2, stage2_result)
@@ -477,7 +606,7 @@ class PipelineWorker(QThread):
                     return
             
             # AI Masking
-            if self.config.get('enable_stage3', True):
+            if self.config.get('enable_stage3', True) and not stage3_already_executed:
                 if self.is_cancelled:
                     logger.info("Pipeline cancelled before Masking")
                     results['stages_executed'] = stages_executed
@@ -556,6 +685,19 @@ class PipelineWorker(QThread):
                 method = 'opencv'
             elif method.lower() == 'ffmpeg':
                 method = 'ffmpeg_stitched'
+
+            input_suffix = Path(input_file).suffix.lower()
+            if input_suffix == '.mp4' and method.lower() in ['sdk', 'sdk_stitching']:
+                logger.info("MP4 input detected - forcing FFmpeg extraction instead of SDK stitching")
+                method = 'ffmpeg_stitched'
+
+            if self._is_invalid_ffmpeg_stitched_request(method, input_file):
+                return {
+                    'success': False,
+                    'error': self._build_insv_stitched_sdk_error(),
+                    'frames': [],
+                    'count': 0,
+                }
             
             # Use SDK extractor if method is 'sdk' or 'sdk_stitching' (PRIMARY METHOD)
             if method.lower() in ['sdk', 'sdk_stitching']:
@@ -563,12 +705,16 @@ class PipelineWorker(QThread):
                 
                 if not self.sdk_extractor.is_available():
                     logger.warning("WARNING: Insta360 MediaSDK not available")
-                    logger.warning("INFO: Auto-fallback to FFmpeg stitching")
-                    if Path(input_file).suffix.lower() == '.insv':
-                        logger.info("INFO: .insv dual-fisheye file - using v360 dual-stitch fallback")
-                        method = 'ffmpeg_v360_dual'
-                    else:
-                        method = 'ffmpeg_stitched'
+                    fallback_method = self._resolve_stitched_ffmpeg_fallback_method(input_file)
+                    if fallback_method is None:
+                        return {
+                            'success': False,
+                            'error': self._build_insv_stitched_sdk_error(),
+                            'frames': [],
+                            'count': 0,
+                        }
+                    logger.warning("INFO: Falling back to FFmpeg stitched extraction for non-INSV input")
+                    method = fallback_method
                 else:
                     logger.info("INFO: Insta360 MediaSDK detected - using SDK stitching")
                     
@@ -618,6 +764,13 @@ class PipelineWorker(QThread):
                                     sdk_options[_k] = int(_val)
                             sdk_options = sdk_options if sdk_options else None
 
+                        use_sdk_native_color_corrections = bool(
+                            self.config.get('sdk_use_native_color_corrections', True)
+                        )
+                        if sdk_options is None:
+                            sdk_options = {}
+                        sdk_options['_use_sdk_native_color_corrections'] = use_sdk_native_color_corrections
+
                         # Call new MediaSDK extractor with all parameters
                         frame_paths = self.sdk_extractor.extract_frames(
                             input_path=str(input_file),
@@ -644,16 +797,20 @@ class PipelineWorker(QThread):
                                 'exposure','highlights','shadows','contrast','brightness',
                                 'blackpoint','saturation','vibrance','warmth','tint','definition'
                             ) if sdk_options.get(k, 0) != 0}
-                            if _color_opts:
+                            if _color_opts and not use_sdk_native_color_corrections:
                                 logger.info(f"[Color] Post-processing {len(frame_paths)} frames with OpenCV corrections: {_color_opts}")
-                                for _fp in frame_paths:
+                                for _index, _fp in enumerate(frame_paths, start=1):
                                     try:
                                         _img = cv2.imread(_fp)
                                         if _img is not None:
                                             _corrected = apply_color_corrections(_img, _color_opts)
                                             cv2.imwrite(_fp, _corrected)
+                                            if _index == 1 or _index % 5 == 0 or _index == len(frame_paths):
+                                                progress_callback(_index, len(frame_paths), f"Color post-process {_index}/{len(frame_paths)}")
                                     except Exception as _ce:
                                         logger.warning(f"[Color] Failed to correct {_fp}: {_ce}")
+                            elif _color_opts:
+                                logger.info("[Color] Native SDK color corrections already applied during extraction")
 
                         # ── Post-process: apply frame rotation if set in preview ──────
                         _frame_rotation = self.config.get('frame_rotation', 0)
@@ -667,47 +824,52 @@ class PipelineWorker(QThread):
                             'count': len(frame_paths)
                         }
                     
-                    except subprocess.TimeoutExpired as timeout_error:
-                        # SDK timeout - check if frames were actually extracted
-                        logger.warning(f"[WARNING] SDK extraction timeout: {timeout_error}")
-                        extracted_dir = Path(output_dir)
-                        frame_files = list(extracted_dir.glob('*.*'))  # Find any extracted files
-                        
-                        if frame_files:
-                            # SDK did extract frames before timing out - use them!
-                            logger.info(f"[OK] SDK partially completed: {len(frame_files)} frames extracted before timeout")
-                            frame_paths = [str(f) for f in sorted(frame_files)]
+                    except IncompleteSDKExtractionError as incomplete_error:
+                        logger.warning(f"[WARNING] SDK extraction incomplete: {incomplete_error}")
+
+                        if self._requires_sdk_for_stitched_extraction(input_file):
+                            removed = self._purge_stage1_partial_outputs(output_dir)
+                            if removed:
+                                logger.warning(f"[WARNING] Removed {removed} partial SDK frame(s) after failed stitched INSV extraction")
                             return {
-                                'success': True,
-                                'frames': frame_paths,
-                                'method': 'sdk_stitching',
-                                'count': len(frame_paths),
-                                'warning': f'Timeout after {len(frame_files)} frames'
+                                'success': False,
+                                'error': self._build_insv_stitched_sdk_error(str(incomplete_error)),
+                                'frames': [],
+                                'count': 0,
                             }
-                        else:
-                            # No frames produced - fallback to FFmpeg
-                            logger.warning("INFO: No frames extracted by SDK timeout - Falling back to FFmpeg method")
-                            if Path(input_file).suffix.lower() == '.insv':
-                                logger.info("INFO: .insv dual-fisheye file - using v360 dual-stitch fallback")
-                                method = 'ffmpeg_v360_dual'
-                            else:
-                                method = 'ffmpeg_stitched'
+
+                        if not self.config.get('allow_fallback', True):
+                            logger.error("Fallback disabled by configuration. Aborting.")
+                            raise
+
+                        removed = self._purge_stage1_partial_outputs(output_dir)
+                        if removed:
+                            logger.warning(f"[WARNING] Removed {removed} partial SDK frame(s) before FFmpeg fallback")
+
+                        fallback_method = self._resolve_stitched_ffmpeg_fallback_method(input_file)
+                        if fallback_method is None:
+                            return {
+                                'success': False,
+                                'error': self._build_insv_stitched_sdk_error(str(incomplete_error)),
+                                'frames': [],
+                                'count': 0,
+                            }
+
+                        logger.warning("INFO: Falling back to FFmpeg stitched extraction after incomplete SDK extraction")
+                        method = fallback_method
                     
                     except Exception as sdk_error:
-                        # Other SDK errors - check if any frames were created anyway
                         logger.error(f"[ERROR] SDK extraction failed: {sdk_error}")
-                        extracted_dir = Path(output_dir)
-                        frame_files = list(extracted_dir.glob('*.*'))
-                        
-                        if frame_files and len(frame_files) > 10:  # At least 10 frames produced
-                            logger.warning(f"[WARNING] SDK error but {len(frame_files)} frames were extracted - using them")
-                            frame_paths = [str(f) for f in sorted(frame_files)]
+
+                        if self._requires_sdk_for_stitched_extraction(input_file):
+                            removed = self._purge_stage1_partial_outputs(output_dir)
+                            if removed:
+                                logger.warning(f"[WARNING] Removed {removed} partial SDK frame(s) after failed stitched INSV extraction")
                             return {
-                                'success': True,
-                                'frames': frame_paths,
-                                'method': 'sdk_stitching',
-                                'count': len(frame_paths),
-                                'warning': f'SDK error but {len(frame_files)} frames recovered'
+                                'success': False,
+                                'error': self._build_insv_stitched_sdk_error(str(sdk_error)),
+                                'frames': [],
+                                'count': 0,
                             }
                         
                         # Check if fallback is allowed
@@ -715,12 +877,21 @@ class PipelineWorker(QThread):
                             logger.error("Fallback disabled by configuration. Aborting.")
                             raise sdk_error
 
-                        logger.warning("INFO: Falling back to FFmpeg method")
-                        if Path(input_file).suffix.lower() == '.insv':
-                            logger.info("INFO: .insv dual-fisheye file - using v360 dual-stitch fallback")
-                            method = 'ffmpeg_v360_dual'
-                        else:
-                            method = 'ffmpeg_stitched'
+                        removed = self._purge_stage1_partial_outputs(output_dir)
+                        if removed:
+                            logger.warning(f"[WARNING] Removed {removed} partial SDK frame(s) before FFmpeg fallback")
+
+                        fallback_method = self._resolve_stitched_ffmpeg_fallback_method(input_file)
+                        if fallback_method is None:
+                            return {
+                                'success': False,
+                                'error': self._build_insv_stitched_sdk_error(str(sdk_error)),
+                                'frames': [],
+                                'count': 0,
+                            }
+
+                        logger.warning("INFO: Falling back to FFmpeg stitched extraction")
+                        method = fallback_method
             
             # Use standard FrameExtractor (FFmpeg or OpenCV)
             result = self.frame_extractor.extract_frames(
@@ -749,6 +920,41 @@ class PipelineWorker(QThread):
         except Exception as e:
             logger.error(f"Extraction error: {e}")
             return {'success': False, 'error': str(e)}
+
+    def _requires_sdk_for_stitched_extraction(self, input_file: str) -> bool:
+        return Path(input_file).suffix.lower() == '.insv'
+
+    def _resolve_stitched_ffmpeg_fallback_method(self, input_file: str) -> Optional[str]:
+        return 'ffmpeg_stitched' if Path(input_file).suffix.lower() == '.mp4' else None
+
+    def _is_invalid_ffmpeg_stitched_request(self, method: str, input_file: str) -> bool:
+        return method.lower() == 'ffmpeg_stitched' and self._requires_sdk_for_stitched_extraction(input_file)
+
+    def _build_insv_stitched_sdk_error(self, reason: Optional[str] = None) -> str:
+        base = (
+            'Stitched .insv extraction requires Insta360 MediaSDK. '
+            'FFmpeg stitched fallback is disabled for .insv because it produces incorrect stitched results. '
+            'Use SDK Stitching for stitched frames, or choose FFmpeg dual-lens/lens-specific methods only for raw fisheye export.'
+        )
+        if reason:
+            return f'{base} SDK detail: {reason}'
+        return base
+
+    def _purge_stage1_partial_outputs(self, output_dir: Path) -> int:
+        """Remove partial extraction images so fallback methods start from a clean Stage 1 folder."""
+        image_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+        removed = 0
+
+        for path in output_dir.rglob('*'):
+            if not path.is_file() or path.suffix.lower() not in image_exts:
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError as exc:
+                logger.warning(f"[WARNING] Failed to remove partial Stage 1 output {path}: {exc}")
+
+        return removed
     
     def _apply_frame_rotation(self, frame_paths: list, rotation: int) -> None:
         """
@@ -788,25 +994,13 @@ class PipelineWorker(QThread):
         """Execute Perspective Splitting"""
         try:
             # Get input frames (auto-discovery runs ONLY ONCE)
-            if self.config.get('enable_stage1', True):
-                # Extraction was enabled - use its output directly
-                input_dir = Path(self.config['output_dir']) / 'extracted_frames'
-            else:
-                # Extraction disabled - check for explicit input or auto-discover ONCE
-                stage2_input = self.config.get('stage2_input_dir')
-                if not stage2_input:
-                    # Single auto-discovery attempt
-                    discovered = self.discover_stage_input_folder(2, self.config['output_dir'])
-                    if discovered:
-                        input_dir = discovered
-                    else:
-                        return {
-                            'success': False,
-                            'error': 'Split input directory not specified and auto-discovery failed (extraction is disabled)',
-                            'output_files': []
-                        }
-                else:
-                    input_dir = Path(stage2_input)
+            input_dir = self._resolve_stage2_input_dir()
+            if input_dir is None:
+                return {
+                    'success': False,
+                    'error': 'Split input directory not specified and auto-discovery failed',
+                    'output_files': []
+                }
             
             if not input_dir.exists():
                 return {
@@ -825,32 +1019,38 @@ class PipelineWorker(QThread):
             
             # Get all input frames (support many extensions, case-insensitive)
             image_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
-            input_frames = sorted([p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in image_exts])
-            total_frames = len(input_frames)
+            input_frames = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in image_exts]
+            frame_records = build_stage2_frame_records(
+                input_frames,
+                normalize_stage2_numbering_mode(self.config.get('stage2_numbering_mode')),
+            )
+            total_frames = len(frame_records)
             
             # Route based on transform type
             if transform_type == 'cubemap':
                 logger.info(f"Processing {total_frames} frames in CUBEMAP mode")
-                return self._execute_stage2_cubemap(input_frames, output_dir)
+                return self._execute_stage2_cubemap(frame_records, output_dir)
             else:
                 # Perspective mode - use cameras
                 camera_config = self.config.get('camera_config', {})
                 cameras = camera_config.get('cameras', self._get_default_cameras())
                 total_operations = total_frames * len(cameras)
                 logger.info(f"Processing {total_frames} frames with {len(cameras)} cameras (PERSPECTIVE mode)")
-                return self._execute_stage2_perspective(input_frames, cameras, output_dir, output_width, output_height)
+                return self._execute_stage2_perspective(frame_records, cameras, output_dir, output_width, output_height)
         
         except Exception as e:
             logger.error(f"Perspective Split failed: {e}", exc_info=True)
             return {'success': False, 'error': str(e), 'output_files': []}
     
-    def _execute_stage2_perspective(self, input_frames, cameras, output_dir, output_width, output_height) -> Dict:
+    def _execute_stage2_perspective(self, frame_records, cameras, output_dir, output_width, output_height) -> Dict:
         """Execute perspective splitting (E2P) with GPU/CPU optimization"""
         try:
             output_files = []
-            total_frames = len(input_frames)
+            total_frames = len(frame_records)
             total_operations = total_frames * len(cameras)
             image_format = self.config.get('stage2_format', 'png')
+            layout_mode = normalize_stage2_layout_mode(self.config.get('stage2_perspective_layout'))
+            processing_backend = 'cpu'
             
             # Check for GPU acceleration with comprehensive compatibility testing
             use_gpu = False
@@ -910,11 +1110,13 @@ class PipelineWorker(QThread):
                     logger.info(f"[Split GPU] Transformer initialized on device: {transformer.device}")
                     
                     # Get sample image dimensions for batch size calculation
-                    sample_img = cv2.imread(str(input_frames[0]))
+                    sample_img = cv2.imread(str(frame_records[0][0]), cv2.IMREAD_UNCHANGED)
                     if sample_img is None:
                         raise RuntimeError("Failed to load sample image for batch size calculation")
                     
                     input_height, input_width = sample_img.shape[:2]
+                    input_n_channels = sample_img.shape[2] if sample_img.ndim == 3 else 1
+                    input_has_alpha = (input_n_channels == 4)
                     
                     # Pass num_cameras to batch size calculation for accurate VRAM estimation
                     num_cameras = len(cameras)
@@ -938,6 +1140,9 @@ class PipelineWorker(QThread):
                     
                     # Use JPEG for faster saving (10x faster than PNG)
                     ext = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'jpg'
+                    if input_has_alpha and ext != 'png':
+                        logger.info("[Split GPU] Input images have alpha channel — forcing PNG output to preserve transparency")
+                        ext = 'png'
                     if ext == 'png':
                         logger.warning("PNG format selected - saving will be slower. Consider JPEG for faster processing.")
                     
@@ -994,7 +1199,7 @@ class PipelineWorker(QThread):
                                 return image_cache[path_str].clone()
                         
                         # Cache miss - load from disk
-                        img = cv2.imread(path_str)
+                        img = cv2.imread(path_str, cv2.IMREAD_UNCHANGED)
                         if img is None:
                             return None
                         
@@ -1027,12 +1232,14 @@ class PipelineWorker(QThread):
                             return {'success': False, 'error': 'Cancelled by user'}
                         
                         batch_end = min(batch_start + batch_size, total_frames)
-                        batch_paths = input_frames[batch_start:batch_end]
+                        batch_records = frame_records[batch_start:batch_end]
                         
                         # If first batch or no prefetch, submit load now
                         if pending_load_futures is None:
-                            load_futures = {load_executor.submit(load_image, p): (i, p) 
-                                           for i, p in enumerate(batch_paths, start=batch_start)}
+                            load_futures = {
+                                load_executor.submit(load_image, path): (output_frame_id, path)
+                                for path, output_frame_id in batch_records
+                            }
                         else:
                             # Use prefetched futures
                             load_futures = pending_load_futures
@@ -1041,9 +1248,11 @@ class PipelineWorker(QThread):
                         next_batch_start = batch_end
                         if next_batch_start < total_frames:
                             next_batch_end = min(next_batch_start + batch_size, total_frames)
-                            next_batch_paths = input_frames[next_batch_start:next_batch_end]
-                            pending_load_futures = {load_executor.submit(load_image, p): (i, p) 
-                                                   for i, p in enumerate(next_batch_paths, start=next_batch_start)}
+                            next_batch_records = frame_records[next_batch_start:next_batch_end]
+                            pending_load_futures = {
+                                load_executor.submit(load_image, path): (output_frame_id, path)
+                                for path, output_frame_id in next_batch_records
+                            }
                         else:
                             pending_load_futures = None
                         
@@ -1107,8 +1316,8 @@ class PipelineWorker(QThread):
                         
                         # Submit all saves asynchronously
                         for frame_idx, cam_idx, out_img, yaw, pitch, roll, fov in all_outputs:
-                            out_name = f"frame_{frame_idx:05d}_cam_{cam_idx:02d}.{ext}"
-                            out_path = output_dir / out_name
+                            out_path = resolve_perspective_output_path(output_dir, frame_idx, cam_idx, ext, layout_mode)
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
                             future = save_executor.submit(save_image_async, out_img.copy(), out_path, ext, yaw, pitch, roll, fov)
                             save_futures.append(future)
                         
@@ -1127,14 +1336,17 @@ class PipelineWorker(QThread):
                     
                     save_executor.shutdown(wait=True)
                     load_executor.shutdown(wait=True)
+                    output_files = sorted(output_files, key=perspective_output_sort_key)
                     
                     # Completed successfully on GPU
                     logger.info(f"[OK] GPU batch processing complete: {len(output_files)} perspectives created")
+                    processing_backend = 'gpu'
                     return {
                         'success': True,
                         'perspective_count': len(output_files),
                         'output_files': output_files,
-                        'output_dir': str(output_dir)
+                        'output_dir': str(output_dir),
+                        'processing_backend': processing_backend,
                     }
 
                 except RuntimeError as e:
@@ -1160,40 +1372,118 @@ class PipelineWorker(QThread):
 
             # CPU Execution Block (Fallback or Default)
             if not use_gpu:
-                # CPU Path: Multiprocessing
-                logger.info("[Split CPU] Using CPU multiprocessing (GPU not available or failed)")
-                # Limit workers to avoid OOM with 8K images. 
-                # 8K image ~100MB. 20 workers = 2GB. Safe.
-                max_workers = min(os.cpu_count(), 12) 
-                logger.info(f"[Split CPU] Using {max_workers} CPU workers")
-                
-                # Prepare tasks
-                tasks = []
-                for idx, path in enumerate(input_frames):
-                    tasks.append((
-                        str(path), idx, cameras, str(output_dir), 
-                        output_width, output_height, image_format
-                    ))
-                
-                completed_ops = 0
-                # Use 'spawn' context for PyInstaller compatibility on Windows
-                mp_context = multiprocessing.get_context('spawn')
-                with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_context) as executor:
-                    futures = {executor.submit(process_frame_cpu, task): task for task in tasks}
+                # Try OpenCL (cv2.UMat) before falling back to plain CPU multiprocessing.
+                # OpenCL is available on any GPU via the driver, requires no special install.
+                _opencl_ok = cv2.ocl.haveOpenCL()
+                if _opencl_ok:
+                    logger.info("[Split OpenCL] OpenCL available — using cv2.UMat GPU-accelerated remap")
+                    try:
+                        cv2.ocl.setUseOpenCL(True)
+                        opencl_transformer = OpenCLE2PTransform()
+                        _opencl_failed = False
+
+                        # Check whether input images have alpha channel
+                        _sample_ocl = cv2.imread(str(frame_records[0][0]), cv2.IMREAD_UNCHANGED)
+                        _ocl_has_alpha = (_sample_ocl is not None and
+                                          _sample_ocl.ndim == 3 and _sample_ocl.shape[2] == 4)
+                        del _sample_ocl
+                        ext = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'jpg'
+                        if _ocl_has_alpha and ext != 'png':
+                            logger.info("[Split OpenCL] Alpha channel detected — forcing PNG output")
+                            ext = 'png'
+
+                        total_ops_done = 0
+                        for frame_position, (frame_path, output_frame_id) in enumerate(frame_records):
+                            if self.is_cancelled:
+                                return {'success': False, 'error': 'Cancelled by user'}
+                            while self.is_paused:
+                                if self.is_cancelled:
+                                    return {'success': False, 'error': 'Cancelled by user'}
+                                self.msleep(100)
+
+                            equirect_img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
+                            if equirect_img is None:
+                                logger.warning("[Split OpenCL] Failed to load %s", frame_path)
+                                continue
+
+                            for cam_idx, camera in enumerate(cameras):
+                                yaw  = camera['yaw']
+                                pitch = camera.get('pitch', 0)
+                                roll  = camera.get('roll', 0)
+                                fov   = camera.get('fov', DEFAULT_H_FOV)
+
+                                out_img = opencl_transformer.equirect_to_pinhole(
+                                    equirect_img, yaw, pitch, roll, fov, None,
+                                    output_width, output_height
+                                )
+
+                                out_path = resolve_perspective_output_path(output_dir, output_frame_id, cam_idx, ext, layout_mode)
+                                out_path.parent.mkdir(parents=True, exist_ok=True)
+
+                                if ext == 'png':
+                                    ok = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+                                elif ext in ('jpg', 'jpeg'):
+                                    ok = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                else:
+                                    ok = cv2.imwrite(str(out_path), out_img)
+
+                                if ok:
+                                    try:
+                                        self.metadata_handler.embed_camera_orientation(
+                                            str(out_path), yaw, pitch, roll, fov)
+                                    except Exception:
+                                        pass
+                                    output_files.append(str(out_path))
+
+                                total_ops_done += 1
+                            self.progress.emit(total_ops_done, total_operations,
+                                               f"Split (OpenCL): frame {frame_position + 1}/{total_frames}")
+
+                        logger.info("[Split OpenCL] Done — %d perspective views", len(output_files))
+                        processing_backend = 'opencl'
+
+                    except Exception as _ocl_err:
+                        logger.warning("[Split OpenCL] Failed: %s — falling back to CPU", _ocl_err)
+                        output_files = []  # Reset; CPU block below re-does everything
+                        _opencl_failed = True
+                else:
+                    _opencl_failed = True
+
+                if not _opencl_ok or _opencl_failed:
+                    # CPU Path: Multiprocessing
+                    logger.info("[Split CPU] Using CPU multiprocessing (GPU not available or failed)")
+                    # Limit workers to avoid OOM with 8K images. 
+                    # 8K image ~100MB. 20 workers = 2GB. Safe.
+                    max_workers = min(os.cpu_count(), 12)
+                    logger.info(f"[Split CPU] Using {max_workers} CPU workers")
                     
-                    for future in as_completed(futures):
-                        if self.is_cancelled:
-                            executor.shutdown(wait=False)
-                            return {'success': False, 'error': 'Cancelled'}
-                            
-                        result = future.result()
-                        if result['success']:
-                            output_files.extend(result['files'])
-                            completed_ops += len(cameras)
-                            self.progress.emit(completed_ops, total_operations, 
-                                f"Split (CPU): {completed_ops}/{total_operations} views")
-                        else:
-                            logger.error(f"Frame processing failed: {result.get('error')}")
+                    # Prepare tasks
+                    tasks = []
+                    for path, output_frame_id in frame_records:
+                        tasks.append((
+                            str(path), output_frame_id, cameras, str(output_dir),
+                            output_width, output_height, image_format, layout_mode
+                        ))
+                    
+                    completed_ops = 0
+                    # Use 'spawn' context for PyInstaller compatibility on Windows
+                    mp_context = multiprocessing.get_context('spawn')
+                    with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_context) as executor:
+                        futures = {executor.submit(process_frame_cpu, task): task for task in tasks}
+                        
+                        for future in as_completed(futures):
+                            if self.is_cancelled:
+                                executor.shutdown(wait=False)
+                                return {'success': False, 'error': 'Cancelled'}
+                                
+                            result = future.result()
+                            if result['success']:
+                                output_files.extend(result['files'])
+                                completed_ops += len(cameras)
+                                self.progress.emit(completed_ops, total_operations, 
+                                    f"Split (CPU): {completed_ops}/{total_operations} views")
+                            else:
+                                logger.error(f"Frame processing failed: {result.get('error')}")
 
             # Clean up GPU resources at end of splitting
             if use_gpu and HAS_TORCH_CUDA:
@@ -1205,11 +1495,14 @@ class PipelineWorker(QThread):
                 except Exception as e:
                     logger.warning(f"[GPU Cleanup] Failed: {e}")
 
+            output_files = sorted(output_files, key=perspective_output_sort_key)
+
             return {
                 'success': True,
                 'perspective_count': len(output_files),
                 'output_files': output_files,
-                'output_dir': str(output_dir)
+                'output_dir': str(output_dir),
+                'processing_backend': processing_backend,
             }
 
         except Exception as e:
@@ -1222,10 +1515,11 @@ class PipelineWorker(QThread):
                     pass
             return {'success': False, 'error': str(e)}
     
-    def _execute_stage2_cubemap(self, input_frames, output_dir) -> Dict:
+    def _execute_stage2_cubemap(self, frame_records, output_dir) -> Dict:
         """Execute cubemap splitting (E2C)"""
         try:
             output_files = []
+            processing_backend = 'cpu'
             
             # Get cubemap configuration
             cubemap_params = self.config.get('cubemap_params', {})
@@ -1233,11 +1527,10 @@ class PipelineWorker(QThread):
             tile_width = cubemap_params.get('tile_width', 2048)
             tile_height = cubemap_params.get('tile_height', 2048)
             fov = cubemap_params.get('fov', 90)
+            layout_mode = normalize_stage2_layout_mode(self.config.get('stage2_cubemap_layout'))
 
             logger.info(f"Cubemap mode: {cubemap_type}, tile_size={tile_width}×{tile_height}, fov={fov}°")
-
-            # Define face names for 6-tile cubemap
-            face_names_6 = ['front', 'back', 'left', 'right', 'top', 'bottom']
+            logger.info("[Split Cubemap] E2C currently runs on the CPU transform path")
 
             # Setup tile positions for 8-tile mode (4×2 grid)
             if cubemap_type == '8-tile':
@@ -1256,18 +1549,20 @@ class PipelineWorker(QThread):
                             'name': f'tile_{row}_{col}'
                         })
             
-            total_operations = len(input_frames)
+            total_operations = len(frame_records)
             
-            for frame_idx, frame_path in enumerate(input_frames):
+            for frame_idx, (frame_path, output_frame_id) in enumerate(frame_records):
                 if self.is_cancelled:
                     return {'success': False, 'error': 'Cancelled by user'}
                 
-                # Load equirectangular image
-                equirect_img = cv2.imread(str(frame_path))
+                # Load equirectangular image (UNCHANGED to preserve alpha channel if present)
+                equirect_img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
                 
                 if equirect_img is None:
                     logger.warning(f"Failed to load {frame_path}")
                     continue
+
+                frame_has_alpha = (equirect_img.ndim == 3 and equirect_img.shape[2] == 4)
                 
                 # Extract camera metadata
                 camera_metadata = self.metadata_handler.extract_camera_metadata(str(frame_path))
@@ -1299,15 +1594,28 @@ class PipelineWorker(QThread):
                         # Save face with configured format - use PIL for PNG, cv2 for JPEG
                         image_format = self.config.get('stage2_format', 'png')
                         extension = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
-                        output_filename = f"frame_{frame_idx:05d}_{face_config['name']}.{extension}"
-                        output_path = output_dir / output_filename
+                        if frame_has_alpha and extension != 'png':
+                            extension = 'png'  # JPEG cannot carry alpha
+                        output_path = resolve_cubemap_output_path(
+                            output_dir,
+                            output_frame_id,
+                            face_config['name'],
+                            extension,
+                            layout_mode,
+                        )
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        output_filename = output_path.name
                         
                         # Save image - use PIL for PNG (prevents corruption), cv2 for JPEG
                         success = False
                         if extension == 'png':
                             try:
-                                face_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-                                pil_img = Image.fromarray(face_rgb)
+                                if frame_has_alpha:
+                                    face_rgba = cv2.cvtColor(face_img, cv2.COLOR_BGRA2RGBA)
+                                    pil_img = Image.fromarray(face_rgba, 'RGBA')
+                                else:
+                                    face_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
+                                    pil_img = Image.fromarray(face_rgb)
                                 pil_img.save(str(output_path), 'PNG', compress_level=6)
                                 # Explicitly close file handle to prevent WinError 32 on metadata embedding
                                 pil_img.close()
@@ -1367,15 +1675,28 @@ class PipelineWorker(QThread):
                         # Save tile with configured format - use PIL for PNG, cv2 for JPEG
                         image_format = self.config.get('stage2_format', 'png')
                         extension = image_format if image_format in ['png', 'jpg', 'jpeg'] else 'png'
-                        output_filename = f"frame_{frame_idx:05d}_{tile['name']}.{extension}"
-                        output_path = output_dir / output_filename
+                        if frame_has_alpha and extension != 'png':
+                            extension = 'png'  # JPEG cannot carry alpha
+                        output_path = resolve_cubemap_output_path(
+                            output_dir,
+                            output_frame_id,
+                            tile['name'],
+                            extension,
+                            layout_mode,
+                        )
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        output_filename = output_path.name
                         
                         # Save image - use PIL for PNG (prevents corruption), cv2 for JPEG
                         success = False
                         if extension == 'png':
                             try:
-                                tile_rgb = cv2.cvtColor(tile_img, cv2.COLOR_BGR2RGB)
-                                pil_img = Image.fromarray(tile_rgb)
+                                if frame_has_alpha:
+                                    tile_rgba = cv2.cvtColor(tile_img, cv2.COLOR_BGRA2RGBA)
+                                    pil_img = Image.fromarray(tile_rgba, 'RGBA')
+                                else:
+                                    tile_rgb = cv2.cvtColor(tile_img, cv2.COLOR_BGR2RGB)
+                                    pil_img = Image.fromarray(tile_rgb)
                                 pil_img.save(str(output_path), 'PNG', compress_level=6)
                                 # Explicitly close file handle to prevent WinError 32 on metadata embedding
                                 pil_img.close()
@@ -1423,18 +1744,21 @@ class PipelineWorker(QThread):
                 self.progress.emit(
                     frame_idx + 1,
                     total_operations,
-                    f"Split CUBEMAP: Frame {frame_idx+1}/{len(input_frames)} ({cubemap_type})"
+                    f"Split CUBEMAP: Frame {frame_idx+1}/{len(frame_records)} ({cubemap_type})"
                 )
             
             faces_per_frame = 6 if cubemap_type == '6-face' else 8
             logger.info(f"Generated {len(output_files)} cubemap faces ({faces_per_frame} per frame)")
             
+            output_files = sorted(output_files, key=perspective_output_sort_key)
+
             return {
                 'success': True,
                 'cubemap_count': len(output_files),
                 'output_files': output_files,
                 'output_dir': str(output_dir),
-                'cubemap_type': cubemap_type
+                'cubemap_type': cubemap_type,
+                'processing_backend': processing_backend,
             }
         
         except Exception as e:
@@ -1498,105 +1822,55 @@ class PipelineWorker(QThread):
                 model_size = self.config.get('model_size', 'small')
                 confidence = self.config.get('confidence_threshold', 0.5)
                 use_gpu = self.config.get('use_gpu', True)
-                masking_engine = self.config.get('masking_engine', 'yolo_onnx')
-                
-                # Handle SAM engine separately
+                masking_engine = str(self.config.get('masking_engine', 'yolo')).strip().lower()
                 if masking_engine == 'sam_vitb':
+                    masking_engine = 'sam3_cpp'
+                elif masking_engine in {'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
+                    masking_engine = 'yolo'
+                
+                # Handle SAM3 separately
+                if masking_engine == 'sam3_cpp':
                     try:
-                        logger.info("Initializing SAM ViT-B masker...")
-                        from ..masking.sam_masker import SAMMasker, download_sam_checkpoint
-                        
-                        # Check if checkpoint exists, download if needed
-                        sam_checkpoint = Path('sam_vit_b_01ec64.pth')
-                        if not sam_checkpoint.exists():
-                            logger.warning("SAM checkpoint not found. Attempting download...")
-                            sam_checkpoint = download_sam_checkpoint('vit_b', Path('.'))
-                        
-                        self.masker = SAMMasker(
-                            model_checkpoint=str(sam_checkpoint),
+                        logger.info("Initializing SAM3.cpp external masker...")
+                        from ..masking.sam3_external_masker import SAM3ExternalMasker
+
+                        self.masker = SAM3ExternalMasker(
+                            segment_persons_exe=self.config.get('sam3_segmenter_path', ''),
+                            model_path=self.config.get('sam3_model_path', ''),
+                            sam3_image_exe=self.config.get('sam3_image_exe_path') or None,
                             use_gpu=use_gpu,
-                            mask_dilation_pixels=15
+                            feather_radius=self.config.get('sam3_feather_radius', 8),
+                            morph_radius=self.config.get('sam3_morph_radius', 0),
+                            alpha_export=self.config.get('sam3_alpha_export', False),
+                            alpha_only=self.config.get('sam3_alpha_only', False),
+                            max_input_width=self.config.get('sam3_max_input_width', 3840),
+                            score_threshold=self.config.get('sam3_score_threshold', 0.5),
+                            nms_threshold=self.config.get('sam3_nms_threshold', 0.1),
+                            enable_refinement=self.config.get('sam3_enable_refinement', True),
+                            refine_sky_only=self.config.get('sam3_refine_sky_only', True),
+                            seam_aware_refinement=self.config.get('sam3_seam_aware_refinement', True),
+                            edge_sharpen_strength=self.config.get('sam3_edge_sharpen_strength', 0.75),
                         )
-                        logger.info("SAM ViT-B masker initialized successfully")
-                        use_onnx = False  # Skip ONNX/PyTorch fallback
-                        
-                        # Set enabled categories
-                        categories = self.config.get('masking_categories', {})
-                        self.masker.set_enabled_categories(categories)
-                        
-                    except ImportError as e:
-                        logger.error(f"SAM not available: {e}. Install with: pip install segment-anything")
-                        return {
-                            'success': False,
-                            'error': f'SAM not installed: {e}',
-                            'masks_created': 0,
-                            'skipped': 0,
-                            'failed': 0
-                        }
+                        logger.info("SAM3.cpp masker initialized successfully")
+                        self.masker.set_enabled_categories(
+                            self.config.get('sam3_prompts', {})
+                        )
+                        self.masker.set_custom_prompts(
+                            self.config.get('sam3_custom_prompts', '')
+                        )
+                        use_onnx = False
                     except Exception as e:
-                        logger.error(f"Failed to initialize SAM: {e}", exc_info=True)
+                        logger.error(f"Failed to initialize SAM3.cpp masker: {e}", exc_info=True)
                         return {
                             'success': False,
-                            'error': f'SAM initialization failed: {e}',
+                            'error': f'SAM3.cpp initialization failed: {e}',
                             'masks_created': 0,
                             'skipped': 0,
                             'failed': 0
                         }
-                        
-                elif masking_engine == 'hybrid':
-                    # YOLO+SAM Hybrid engine (RECOMMENDED)
-                    try:
-                        logger.info("Initializing YOLO+SAM Hybrid masker...")
-                        from ..masking.hybrid_yolo_sam_masker import HybridYOLOSAMMasker
-                        
-                        # Check if SAM checkpoint exists, download if needed
-                        sam_checkpoint = Path('sam_vit_b_01ec64.pth')
-                        if not sam_checkpoint.exists():
-                            logger.warning("SAM checkpoint not found. Attempting download...")
-                            from ..masking.sam_masker import download_sam_checkpoint
-                            sam_checkpoint = download_sam_checkpoint('vit_b', Path('.'))
-                        
-                        # Use YOLOv8m for detection (or YOLO26 if available)
-                        yolo_model = 'yolov8m.pt'
-                        
-                        self.masker = HybridYOLOSAMMasker(
-                            yolo_model=yolo_model,
-                            sam_checkpoint=str(sam_checkpoint),
-                            use_gpu=use_gpu,
-                            mask_dilation_pixels=15,
-                            yolo_confidence=confidence
-                        )
-                        logger.info("YOLO+SAM Hybrid masker initialized successfully")
-                        use_onnx = False  # Skip ONNX/PyTorch fallback
-                        
-                        # Set enabled categories
-                        categories = self.config.get('masking_categories', {})
-                        self.masker.set_enabled_categories(categories)
-                        
-                    except (ImportError, Exception) as e:
-                        logger.warning(f"Hybrid masker not available: {e}")
-                        logger.info("Falling back to YOLO-only masker (MultiCategoryMasker)...")
-                        try:
-                            from ..masking import MultiCategoryMasker
-                            self.masker = MultiCategoryMasker(
-                                model_size=model_size,
-                                confidence_threshold=confidence,
-                                use_gpu=use_gpu
-                            )
-                            use_onnx = False
-                            logger.info("[OK] YOLO-only fallback initialized successfully")
-                        except Exception as e2:
-                            logger.error(f"YOLO-only fallback also failed: {e2}", exc_info=True)
-                            return {
-                                'success': False,
-                                'error': f'All masking engines failed. Hybrid: {e}. YOLO fallback: {e2}',
-                                'masks_created': 0,
-                                'skipped': 0,
-                                'failed': 0
-                            }
-                        
+
                 else:
-                    # YOLO engines (ONNX or PyTorch)
+                    # Single YOLO mode with ONNX-first runtime and PyTorch fallback
                     # Check for ONNX model availability - prefer YOLO26 (faster, NMS-free)
                     # YOLO26 is 3-4x faster than YOLOv8 with same accuracy
                     model_map_yolo26 = {
@@ -1842,11 +2116,16 @@ class PipelineWorker(QThread):
                 # Re-detect resolved_source from the (possibly updated) input_dir
                 resolved_source = self._detect_project_image_source(output_root, input_dir)
             
-            masks_subdir = {
-                'perspective': 'masks_perspective',
-                'equirect': 'masks_equirect',
-                'custom': 'masks_custom',
-            }.get(resolved_source, 'masks_custom')
+            # alpha_only mode uses a dedicated subfolder so no _mask.png files appear
+            # alongside the source images when the user opens the output folder.
+            if self.config.get('sam3_alpha_only', False):
+                masks_subdir = 'alpha_cutouts'
+            else:
+                masks_subdir = {
+                    'perspective': 'masks_perspective',
+                    'equirect': 'masks_equirect',
+                    'custom': 'masks_custom',
+                }.get(resolved_source, 'masks_custom')
             output_dir = output_root / masks_subdir
             save_visualization = self.config.get('save_visualization', False)
             
@@ -1871,9 +2150,6 @@ class PipelineWorker(QThread):
                 progress_callback=progress_callback,
                 cancellation_check=cancellation_check
             )
-
-            if result.get('masks_created', 0) > 0 and output_dir.exists():
-                self._sync_legacy_masks_dir(output_dir, output_root)
 
             result['input_dir'] = str(input_dir)
             result['mask_source'] = resolved_source
@@ -1909,11 +2185,16 @@ class PipelineWorker(QThread):
             export_masks_dir = None
             if self.config.get('export_include_masks', True):
                 image_source = self._detect_project_image_source(output_root, images_dir)
-                export_masks_dir = self._resolve_project_masks_dir(
-                    output_root,
-                    self.config.get('export_mask_source', 'auto'),
-                    image_source,
-                )
+                mask_source = self.config.get('export_mask_source', 'auto')
+                images_have_alpha = self._images_have_alpha_channel(images_dir)
+                if images_have_alpha and mask_source in {'auto', 'match_images', 'match_reconstruction'}:
+                    logger.info('[Export] Selected images already contain alpha channel; skipping automatic separate-mask export')
+                else:
+                    export_masks_dir = self._resolve_project_masks_dir(
+                        output_root,
+                        mask_source,
+                        image_source,
+                    )
 
             # Create output structure
             out_images = realityscan_dir / 'images'
@@ -1950,6 +2231,8 @@ class PipelineWorker(QThread):
                 'realityscan_export': str(realityscan_dir),
                 'images_exported': copied,
                 'masks_exported': mask_count,
+                'image_count': copied,
+                'mask_count': mask_count,
                 'mode': 'images_masks_only',
             }
 

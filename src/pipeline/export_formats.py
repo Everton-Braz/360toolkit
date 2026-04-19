@@ -17,6 +17,14 @@ from xml.etree import ElementTree as ET
 import numpy as np
 import shutil
 
+from src.pipeline.stage2_naming import (
+    collect_perspective_images,
+    extract_frame_id,
+    parse_perspective_output,
+    perspective_output_sort_key,
+    sort_stage2_input_frames,
+)
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -443,9 +451,9 @@ class RealityScanExporter:
         """
         Build mapping from equirect frames to perspective images.
         
-        Example mapping:
-          0.png → frame_00000_cam_00.png, frame_00000_cam_01.png, ..., frame_00000_cam_07.png
-          4.png → frame_00001_cam_00.png, frame_00001_cam_01.png, ..., frame_00001_cam_07.png
+                Example mapping:
+                    994.png → frame_00994_cam_00.png, frame_00994_cam_01.png, ..., frame_00994_cam_07.png
+                    1008.png → frame_01008_cam_00.png, frame_01008_cam_01.png, ..., frame_01008_cam_07.png
           
         Args:
             perspective_dir: Path to perspective images directory
@@ -462,23 +470,47 @@ class RealityScanExporter:
         
         try:
             # Get all perspective images
-            perspective_images = sorted(self.perspective_dir.glob('frame_*_cam_*.png'))
+            perspective_images = collect_perspective_images(self.perspective_dir)
             if not perspective_images:
                 logger.warning(f"No perspective images found in {self.perspective_dir}")
                 return False
+
+            grouped_by_frame_id = {}
+            for image_path in perspective_images:
+                parsed = parse_perspective_output(image_path)
+                if parsed is None:
+                    continue
+                frame_id, _cam_idx = parsed
+                grouped_by_frame_id.setdefault(frame_id, []).append(
+                    image_path.relative_to(self.perspective_dir).as_posix()
+                )
+            for image_names in grouped_by_frame_id.values():
+                image_names.sort(key=perspective_output_sort_key)
             
             # Get equirect frames in order
-            equirect_frames = sorted([img['name'] for img in self.images.values()])
+            equirect_frames = [path.name for path in sort_stage2_input_frames([img['name'] for img in self.images.values()])]
+            self.perspective_mapping = {}
             
-            # Build mapping: frame index → perspective images
-            for idx, equirect_name in enumerate(equirect_frames):
-                # Find all perspective images for this frame index
-                pattern = f"frame_{idx:05d}_cam_*.png"
-                matching_images = sorted(self.perspective_dir.glob(pattern))
-                
+            # Preferred mapping: actual source frame id → perspective images.
+            mapped_by_source_id = False
+            for equirect_name in equirect_frames:
+                frame_id = extract_frame_id(equirect_name)
+                matching_images = grouped_by_frame_id.get(frame_id) if frame_id is not None else None
                 if matching_images:
-                    self.perspective_mapping[equirect_name] = [img.name for img in matching_images]
+                    self.perspective_mapping[equirect_name] = list(matching_images)
+                    mapped_by_source_id = True
                     logger.debug(f"Mapped {equirect_name} → {len(matching_images)} perspective images")
+
+            # Backward-compatible fallback for legacy sequential numbering mode.
+            if not mapped_by_source_id:
+                ordered_frame_ids = sorted(grouped_by_frame_id)
+                for idx, equirect_name in enumerate(equirect_frames):
+                    if idx >= len(ordered_frame_ids):
+                        break
+                    matching_images = grouped_by_frame_id.get(ordered_frame_ids[idx], [])
+                    if matching_images:
+                        self.perspective_mapping[equirect_name] = list(matching_images)
+                        logger.debug(f"Mapped {equirect_name} → {len(matching_images)} perspective images (sequential fallback)")
             
             logger.info(f"Built perspective mapping: {len(equirect_frames)} equirect → "
                        f"{len(perspective_images)} perspective images")
@@ -960,7 +992,7 @@ class RealityScanExporter:
             # Ideally BatchOrchestrator passed this info, but current interface doesn't.
             # Let's peek at the first perspective file to get dimensions.
             
-            first_persp = next(self.perspective_dir.glob('*.png'), None)
+            first_persp = next(iter(collect_perspective_images(self.perspective_dir)), None)
             if not first_persp:
                 logger.error("No perspective images found to determine dimensions")
                 return False
@@ -1291,7 +1323,12 @@ def export_xmp_from_exif(images_dir) -> int:
     img_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
     xmp_count = 0
 
-    for img_file in sorted(images_path.iterdir()):
+    image_files = sorted(
+        [path for path in images_path.rglob('*') if path.is_file() and path.suffix.lower() in img_exts],
+        key=perspective_output_sort_key,
+    )
+
+    for img_file in image_files:
         if not img_file.is_file() or img_file.suffix.lower() not in img_exts:
             continue
 

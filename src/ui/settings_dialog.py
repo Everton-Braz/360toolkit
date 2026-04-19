@@ -177,9 +177,47 @@ class SettingsDialog(QDialog):
         ffmpeg_group.setLayout(ffmpeg_layout)
         layout.addWidget(ffmpeg_group)
 
+        sam3_group = QGroupBox("SAM3 External Tools")
+        sam3_layout = QFormLayout()
+
+        self.sam3_segmenter_edit = QLineEdit()
+        self.sam3_segmenter_edit.setPlaceholderText("Path to segment_persons.exe")
+        sam3_layout.addRow("segment_persons.exe:", self._build_path_row(self.sam3_segmenter_edit, self.browse_sam3_segmenter))
+
+        self.sam3_model_edit = QLineEdit()
+        self.sam3_model_edit.setPlaceholderText("Path to sam3-q4_0.ggml or compatible model")
+        sam3_layout.addRow("SAM3 model:", self._build_path_row(self.sam3_model_edit, self.browse_sam3_model))
+
+        self.sam3_gui_edit = QLineEdit()
+        self.sam3_gui_edit.setPlaceholderText("Optional path to sam3_image.exe")
+        sam3_layout.addRow("sam3_image.exe:", self._build_path_row(self.sam3_gui_edit, self.browse_sam3_gui))
+
+        sam3_hint = QLabel("These paths are used by the AI Masking stage and the SAM3 preview workflow.")
+        sam3_hint.setWordWrap(True)
+        sam3_layout.addRow("", sam3_hint)
+
+        sam3_group.setLayout(sam3_layout)
+        layout.addWidget(sam3_group)
+
         
         layout.addStretch()
         return widget
+
+    def _build_path_row(self, line_edit: QLineEdit, browse_callback) -> QWidget:
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+        row_layout.addWidget(line_edit, 1)
+
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(browse_callback)
+        row_layout.addWidget(browse_btn)
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(line_edit.clear)
+        row_layout.addWidget(clear_btn)
+        return row
     
     def create_directories_tab(self) -> QWidget:
         """Create the directories tab"""
@@ -278,6 +316,15 @@ class SettingsDialog(QDialog):
         if ffmpeg_path:
             self.ffmpeg_path_edit.setText(str(ffmpeg_path))
         self.update_ffmpeg_status()
+
+        sam3_segmenter = self.settings.get_sam3_segmenter_path()
+        self.sam3_segmenter_edit.setText(str(sam3_segmenter) if sam3_segmenter else "")
+
+        sam3_model = self.settings.get_sam3_model_path()
+        self.sam3_model_edit.setText(str(sam3_model) if sam3_model else "")
+
+        sam3_gui = self.settings.get_sam3_image_exe_path()
+        self.sam3_gui_edit.setText(str(sam3_gui) if sam3_gui else "")
 
         
         theme = self.settings.get_theme()
@@ -380,6 +427,22 @@ class SettingsDialog(QDialog):
         if file_path:
             self.ffmpeg_path_edit.setText(file_path)
             self.update_ffmpeg_status()
+
+    def browse_sam3_segmenter(self):
+        self._browse_file_into(self.sam3_segmenter_edit, "Select segment_persons.exe", "Executables (*.exe);;All Files (*.*)")
+
+    def browse_sam3_model(self):
+        self._browse_file_into(self.sam3_model_edit, "Select SAM3 model", "SAM3 Models (*.ggml *.gguf);;All Files (*.*)")
+
+    def browse_sam3_gui(self):
+        self._browse_file_into(self.sam3_gui_edit, "Select sam3_image.exe", "Executables (*.exe);;All Files (*.*)")
+
+    def _browse_file_into(self, target: QLineEdit, title: str, filter_text: str):
+        current = target.text().strip()
+        start_dir = str(Path(current).parent) if current and Path(current).exists() else ""
+        file_path, _ = QFileDialog.getOpenFileName(self, title, start_dir, filter_text)
+        if file_path:
+            target.setText(file_path)
 
     def detect_paths_now(self):
         """Run auto-detection for important dependencies."""
@@ -570,6 +633,10 @@ class SettingsDialog(QDialog):
                 return
         else:
             self.settings.set_ffmpeg_path(None)
+
+        self.settings.set_sam3_segmenter_path(self.sam3_segmenter_edit.text().strip())
+        self.settings.set_sam3_model_path(self.sam3_model_edit.text().strip())
+        self.settings.set_sam3_image_exe_path(self.sam3_gui_edit.text().strip())
 
         
         # Emit signal and close

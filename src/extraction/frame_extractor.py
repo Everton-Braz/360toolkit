@@ -200,6 +200,18 @@ class FrameExtractor:
                     'output_files': [],
                     'lens_outputs': {}
                 }
+
+            if method in {'ffmpeg', 'ffmpeg_stitched'} and input_path.suffix.lower() == '.insv':
+                return {
+                    'success': False,
+                    'error': (
+                        'FFmpeg stitched extraction is not supported for .insv input. '
+                        'Use SDK Stitching for stitched frames, or FFmpeg dual-lens/lens-specific methods only for raw fisheye export.'
+                    ),
+                    'frame_count': 0,
+                    'output_files': [],
+                    'lens_outputs': {}
+                }
             
             # Route to appropriate FFmpeg extraction method
             if method.startswith('ffmpeg_'):
@@ -226,6 +238,17 @@ class FrameExtractor:
             
             # Fallback to stitched FFmpeg
             logger.warning(f"Unknown method '{method}', falling back to FFmpeg stitched")
+            if input_path.suffix.lower() == '.insv':
+                return {
+                    'success': False,
+                    'error': (
+                        'Unknown stitched extraction request for .insv input. '
+                        'FFmpeg stitched extraction is disabled for .insv because it produces incorrect results.'
+                    ),
+                    'frame_count': 0,
+                    'output_files': [],
+                    'lens_outputs': {}
+                }
             return self._extract_with_ffmpeg_stitched(input_path, output_path, fps, start_time, end_time, progress_callback)
         
         except Exception as e:
@@ -378,6 +401,8 @@ class FrameExtractor:
                 resolution_str = f"{width}×{height}"
             
             camera_model, camera_model_source = self._detect_camera_model(input_path, file_ext, width, height)
+            video_streams = self.get_video_streams(input_file)
+            primary_stream_index = self.get_primary_video_stream_index(input_file)
             
             # Format duration
             minutes = int(duration // 60)
@@ -416,6 +441,8 @@ class FrameExtractor:
                 'duration_formatted': duration_formatted,
                 'camera_model': camera_model,
                 'camera_model_source': camera_model_source,
+                'video_stream_count': len(video_streams),
+                'primary_video_stream_index': primary_stream_index,
                 'codec': codec if codec.isprintable() else 'Unknown',
                 'file_size_mb': round(input_path.stat().st_size / (1024 * 1024), 2)
             }
@@ -507,6 +534,43 @@ class FrameExtractor:
         except Exception as exc:
             logger.debug(f"ffprobe metadata read failed for {input_path.name}: {exc}")
             return {}
+
+    def get_video_streams(self, input_file: str) -> List[Dict]:
+        """Return ffprobe video streams for the input file, preserving stream order."""
+        metadata = self._read_media_metadata(Path(input_file))
+        streams = metadata.get('streams', []) if isinstance(metadata, dict) else []
+        return [stream for stream in streams if isinstance(stream, dict) and stream.get('codec_type') == 'video']
+
+    def get_video_stream_count(self, input_file: str) -> int:
+        """Return the number of video streams discovered by ffprobe."""
+        return len(self.get_video_streams(input_file))
+
+    def get_primary_video_stream_index(self, input_file: str) -> int:
+        """Choose the primary video stream for preview/extraction from a multi-stream container.
+
+        Preference order:
+        1. stream with disposition.default = 1
+        2. stream with the largest pixel area
+        3. first video stream in container order
+        """
+        streams = self.get_video_streams(input_file)
+        if not streams:
+            return 0
+
+        default_stream = next(
+            (stream for stream in streams if isinstance(stream.get('disposition'), dict) and int(stream['disposition'].get('default', 0)) == 1),
+            None,
+        )
+        if default_stream is not None:
+            return int(default_stream.get('index', 0))
+
+        def _stream_rank(stream: Dict) -> tuple[int, int, int]:
+            width = int(stream.get('width') or 0)
+            height = int(stream.get('height') or 0)
+            return (width * height, width, height)
+
+        best = max(streams, key=_stream_rank)
+        return int(best.get('index', 0))
 
     def _flatten_metadata_entries(self, value, prefix: str = '') -> List[str]:
         """Flatten nested ffprobe metadata into searchable key=value strings."""

@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--fps", type=float, default=1.0, help="Frame extraction FPS (default: 1.0)")
     parser.add_argument("--split-count", type=int, default=8, help="Number of compass splits (default: 8)")
     parser.add_argument("--fov", type=int, default=110, help="Horizontal FOV for splits (default: 110)")
-    parser.add_argument("--masking-engine", choices=["yolo", "onnx", "sam_vitb", "hybrid"], default="hybrid", help="Masking engine (default: hybrid)")
+    parser.add_argument("--masking-engine", choices=["yolo", "sam3_cpp"], default="yolo", help="Masking engine (default: yolo)")
     parser.add_argument("--categories", nargs="*", default=["persons", "personal_objects"], help="Masking categories (default: persons personal_objects)")
     parser.add_argument("--model-size", choices=["nano", "small", "medium", "large", "xlarge"], default="small", help="YOLO model size (default: small)")
     parser.add_argument("--confidence", type=float, default=0.5, help="Detection confidence threshold (default: 0.5)")

@@ -33,6 +33,8 @@ Mask Format (RealityScan Compatible):
 
 import cv2
 import numpy as np
+
+from src.pipeline.stage2_naming import perspective_output_sort_key
 from pathlib import Path
 import logging
 from typing import Optional, Tuple, List, Dict
@@ -620,12 +622,11 @@ class ONNXMasker:
         output_path.mkdir(parents=True, exist_ok=True)
         
         # Supported image formats
-        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
-        image_files = []
-        
-        for ext in image_extensions:
-            image_files.extend(input_path.glob(ext))
-            image_files.extend(input_path.glob(ext.upper()))
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+        image_files = sorted(
+            [path for path in input_path.rglob('*') if path.is_file() and path.suffix.lower() in image_extensions],
+            key=perspective_output_sort_key,
+        )
         
         total = len(image_files)
         successful = 0

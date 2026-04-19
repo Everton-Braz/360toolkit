@@ -20,6 +20,12 @@ from src.utils.resource_path import get_base_path
 
 logger = logging.getLogger(__name__)
 
+_APP_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_SAM3_ROOT = _APP_ROOT / 'downloads' / 'sam3cpp'
+_DEFAULT_SAM3_SEGMENTER = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'segment_persons.exe'
+_DEFAULT_SAM3_GUI = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'sam3_image.exe'
+_DEFAULT_SAM3_MODEL = _DEFAULT_SAM3_ROOT / 'models' / 'sam3-q4_0.ggml'
+
 
 class SettingsManager:
     """
@@ -89,15 +95,7 @@ class SettingsManager:
     
     def _load_settings(self) -> Dict:
         """Load settings from JSON file"""
-        try:
-            if self.settings_file.exists():
-                with open(self.settings_file, 'r') as f:
-                    return json.load(f)
-        except Exception as e:
-            logger.warning(f"Failed to load settings: {e}")
-        
-        # Return defaults
-        return {
+        defaults = {
             'sdk_path': None,
             'ffmpeg_path': None,
             'spheresfm_path': None,
@@ -110,8 +108,23 @@ class SettingsManager:
             'default_fps': 1.0,
             'default_h_fov': 110,
             'default_split_count': 8,
-            'yolo_model_size': 'medium'
+            'yolo_model_size': 'medium',
+            'sam3_segmenter_path': str(_DEFAULT_SAM3_SEGMENTER),
+            'sam3_model_path': str(_DEFAULT_SAM3_MODEL),
+            'sam3_image_exe_path': str(_DEFAULT_SAM3_GUI),
         }
+        try:
+            if self.settings_file.exists():
+                with open(self.settings_file, 'r') as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        defaults.update(loaded)
+                    return defaults
+        except Exception as e:
+            logger.warning(f"Failed to load settings: {e}")
+        
+        # Return defaults
+        return defaults
     
     def save_settings(self):
         """Save current settings to JSON file"""
@@ -724,6 +737,32 @@ class SettingsManager:
         
         self.settings['yolo_model_size'] = size
         self.save_settings()
+
+    # === SAM3 PATH MANAGEMENT ===
+
+    def get_sam3_segmenter_path(self) -> Optional[Path]:
+        value = self.settings.get('sam3_segmenter_path')
+        return Path(value) if value else None
+
+    def set_sam3_segmenter_path(self, path: Optional[Path | str]):
+        self.settings['sam3_segmenter_path'] = str(path) if path else ''
+        self.save_settings()
+
+    def get_sam3_model_path(self) -> Optional[Path]:
+        value = self.settings.get('sam3_model_path')
+        return Path(value) if value else None
+
+    def set_sam3_model_path(self, path: Optional[Path | str]):
+        self.settings['sam3_model_path'] = str(path) if path else ''
+        self.save_settings()
+
+    def get_sam3_image_exe_path(self) -> Optional[Path]:
+        value = self.settings.get('sam3_image_exe_path')
+        return Path(value) if value else None
+
+    def set_sam3_image_exe_path(self, path: Optional[Path | str]):
+        self.settings['sam3_image_exe_path'] = str(path) if path else ''
+        self.save_settings()
     
     # === GLOMAP PATH MANAGEMENT ===
     
@@ -943,7 +982,10 @@ class SettingsManager:
             'default_fps': 1.0,
             'default_h_fov': 110,
             'default_split_count': 8,
-            'yolo_model_size': 'medium'
+            'yolo_model_size': 'medium',
+            'sam3_segmenter_path': str(_DEFAULT_SAM3_SEGMENTER),
+            'sam3_model_path': str(_DEFAULT_SAM3_MODEL),
+            'sam3_image_exe_path': str(_DEFAULT_SAM3_GUI),
         }
         self.save_settings()
         logger.info("Settings reset to defaults")

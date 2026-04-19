@@ -15,7 +15,12 @@ if __name__ == '__main__':
 
 import logging
 
-from src.config.defaults import APP_NAME, APP_VERSION
+from src.config.defaults import (
+    APP_NAME,
+    APP_VERSION,
+    DEFAULT_STAGE2_LAYOUT_MODE,
+    DEFAULT_STAGE2_NUMBERING_MODE,
+)
 from src.utils.app_paths import get_log_file_path
 from src.utils.resource_path import get_resource_path
 
@@ -105,6 +110,12 @@ def run_cli_mode():
     parser.add_argument("--output-width", type=int, default=1920, help="Output width")
     parser.add_argument("--output-height", type=int, default=1920, help="Output height")
     parser.add_argument("--stage2-format", default="png", help="Split output format (png/jpg)")
+    parser.add_argument("--stage2-numbering", default=DEFAULT_STAGE2_NUMBERING_MODE,
+                        choices=["preserve_source", "sequential"],
+                        help="Stage 2 numbering mode")
+    parser.add_argument("--stage2-layout", default=DEFAULT_STAGE2_LAYOUT_MODE,
+                        choices=["flat", "by_camera"],
+                        help="Stage 2 perspective output layout")
     parser.add_argument("--use-gpu", action="store_true", default=True, help="Enable GPU")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     parser.add_argument("--stage2-input-dir", default=None, help="Input dir for splitting (skip extraction)")
@@ -149,8 +160,10 @@ def run_cli_mode():
         "output_width": args.output_width,
         "output_height": args.output_height,
         "stage2_format": args.stage2_format,
+        "stage2_numbering_mode": args.stage2_numbering,
+        "stage2_perspective_layout": args.stage2_layout,
         "camera_config": {"cameras": cameras},
-        "masking_engine": "yolo_pytorch",
+        "masking_engine": "yolo",
         "model_size": args.model_size,
         "confidence_threshold": args.confidence,
         "masking_categories": {cat: True for cat in args.categories},
