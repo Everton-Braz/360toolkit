@@ -1,12 +1,9 @@
-# PyInstaller hook for PyQt6
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+# PyInstaller hook for the subset of PyQt6 used by the desktop app.
 
-# Collect all PyQt6 modules
-datas, binaries, hiddenimports = collect_all('PyQt6')
-
-# Ensure all submodules are included
-hiddenimports += collect_submodules('PyQt6')
-hiddenimports += [
+datas = []
+binaries = []
+hiddenimports = [
+    'PyQt6',
     'PyQt6.QtCore',
     'PyQt6.QtGui',
     'PyQt6.QtWidgets',

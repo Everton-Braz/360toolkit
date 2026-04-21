@@ -2,13 +2,34 @@
 
 import importlib.util
 import logging
+from pathlib import Path
 
 from src.utils.runtime_backends import has_usable_torch_runtime
+from src.utils.resource_path import get_base_path
 
 logger = logging.getLogger(__name__)
 
 _TORCH_AVAILABLE = has_usable_torch_runtime()
 _ONNX_AVAILABLE = importlib.util.find_spec('onnxruntime') is not None
+
+
+def _default_onnx_model_path() -> str:
+    """Resolve the best bundled ONNX model available for lightweight releases."""
+    candidates = [
+        'yolo26s-seg.onnx',
+        'yolov8s-seg.onnx',
+        'yolov8n-seg.onnx',
+        'yolov8m-seg.onnx',
+    ]
+    base_candidates = [get_base_path(), Path.cwd()]
+
+    for base_dir in base_candidates:
+        for model_name in candidates:
+            candidate = base_dir / model_name
+            if candidate.exists():
+                return str(candidate)
+
+    return candidates[0]
 
 
 def get_masker(model_path=None, confidence_threshold=0.5, use_gpu=True, prefer_onnx=None):
@@ -29,7 +50,7 @@ def get_masker(model_path=None, confidence_threshold=0.5, use_gpu=True, prefer_o
         from .onnx_masker import ONNXMasker
         logger.info("Using ONNX Runtime backend for masking")
         return ONNXMasker(
-            model_path=model_path or 'yolo26s-seg.onnx',
+            model_path=model_path or _default_onnx_model_path(),
             confidence_threshold=confidence_threshold,
             use_gpu=use_gpu,
         )

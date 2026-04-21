@@ -40,6 +40,17 @@ from .mask_refinement import MaskRefinementSettings, refine_detected_mask
 
 logger = logging.getLogger(__name__)
 
+
+def _subprocess_no_window_kwargs() -> dict:
+    kwargs = {}
+    if os.name == 'nt':
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= getattr(subprocess, 'STARTF_USESHOWWINDOW', 0)
+        kwargs['creationflags'] = creationflags
+        kwargs['startupinfo'] = startupinfo
+    return kwargs
+
 # ---------------------------------------------------------------------------
 # Prompt catalogue
 # ---------------------------------------------------------------------------
@@ -325,6 +336,7 @@ class SAM3ExternalMasker:
                 stderr=subprocess.PIPE,
                 text=True,
                 env=env,
+                **_subprocess_no_window_kwargs(),
             )
 
             processed: Dict[str, bool] = {}
@@ -584,4 +596,5 @@ class SAM3ExternalMasker:
             cmd,
             cwd=str(self.sam3_image_exe.parent),
             env=self._build_runtime_env(self.sam3_image_exe),
+            **_subprocess_no_window_kwargs(),
         )

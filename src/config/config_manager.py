@@ -9,10 +9,22 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 
+from src.utils.resource_path import get_base_path
+
 logger = logging.getLogger(__name__)
 
 _APP_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_SAM3_ROOT = _APP_ROOT / 'downloads' / 'sam3cpp'
+
+
+def _resolve_default_sam3_root() -> Path:
+    base_path = get_base_path()
+    bundled_root = base_path / 'sam3cpp'
+    if bundled_root.exists():
+        return bundled_root
+    return _APP_ROOT / 'downloads' / 'sam3cpp'
+
+
+_DEFAULT_SAM3_ROOT = _resolve_default_sam3_root()
 _DEFAULT_SAM3_SEGMENTER = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'segment_persons.exe'
 _DEFAULT_SAM3_GUI = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'sam3_image.exe'
 _DEFAULT_SAM3_MODEL = _DEFAULT_SAM3_ROOT / 'models' / 'sam3-q4_0.ggml'
@@ -245,6 +257,7 @@ class ConfigManager:
             # AI Masking
             'stage3_enabled': True,
             'masking_engine': 'yolo',
+            'mask_output_mode': 'masks_only',
             'model_size': 'small',
             'confidence_threshold': DEFAULT_CONFIDENCE_THRESHOLD,
             'use_gpu': DEFAULT_USE_GPU,
@@ -266,6 +279,7 @@ class ConfigManager:
             },
             'sam3_custom_prompts': '',
             'sam3_morph_radius': 0,
+            'sam3_output_mode': 'masks_only',
             'sam3_alpha_export': False,
             'sam3_max_input_width': 3840,
             'sam3_score_threshold': 0.5,

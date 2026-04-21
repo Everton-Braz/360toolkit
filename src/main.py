@@ -6,6 +6,7 @@ Unified photogrammetry preprocessing pipeline.
 import sys
 import os
 import multiprocessing
+import ctypes
 from pathlib import Path
 
 # CRITICAL: Must be called at the very start for PyInstaller on Windows
@@ -57,6 +58,62 @@ def _bootstrap_windows_dlls() -> None:
 
 
 _bootstrap_windows_dlls()
+
+
+def _preload_onnxruntime() -> None:
+    if os.name != "nt":
+        return
+
+    if 'onnxruntime' in sys.modules:
+        return
+
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        base_path = Path(sys._MEIPASS)
+        candidates = [
+            base_path / 'onnxruntime' / 'capi',
+            base_path / 'numpy.libs',
+            base_path,
+        ]
+    else:
+        site_packages = Path(sys.executable).resolve().parent.parent / 'Lib' / 'site-packages'
+        candidates = [
+            site_packages / 'onnxruntime' / 'capi',
+            site_packages / 'numpy.libs',
+        ]
+
+    existing_path = os.environ.get('PATH', '')
+    prepend: list[str] = []
+    for candidate in candidates:
+        if candidate.exists():
+            candidate_str = str(candidate)
+            try:
+                if hasattr(os, 'add_dll_directory'):
+                    _DLL_DIR_HANDLES.append(os.add_dll_directory(candidate_str))
+            except Exception:
+                pass
+            if candidate_str not in existing_path:
+                prepend.append(candidate_str)
+
+    if prepend:
+        os.environ['PATH'] = os.pathsep.join(prepend + [existing_path])
+
+    ort_capi = candidates[0] if candidates else None
+    if ort_capi and ort_capi.exists():
+        for dll_name in ('onnxruntime.dll', 'onnxruntime_providers_shared.dll'):
+            dll_path = ort_capi / dll_name
+            if dll_path.exists():
+                try:
+                    ctypes.CDLL(str(dll_path))
+                except OSError:
+                    pass
+
+    try:
+        import onnxruntime  # noqa: F401
+    except Exception:
+        pass
+
+
+_preload_onnxruntime()
 
 def _configure_logging() -> None:
     log_path = get_log_file_path()
@@ -286,9 +343,12 @@ def main():
         print("Please install dependencies:")
         print("  pip install -r requirements.txt")
         print("\nFor GPU support:")
-        print("  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118")
+        print("  pip install onnxruntime-gpu")
+        print("  or")
+        print("  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128")
         print("="*60)
         sys.exit(1)
+
     
     except Exception as e:
         logger.error(f"Application error: {e}", exc_info=True)

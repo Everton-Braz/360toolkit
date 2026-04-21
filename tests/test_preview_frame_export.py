@@ -60,6 +60,33 @@ def test_export_current_preview_frame_falls_back_to_mp4_extraction(tmp_path) -> 
     assert output_path.exists()
 
 
+def test_export_current_preview_frame_falls_back_to_insv_sdk_extraction(tmp_path) -> None:
+    input_path = tmp_path / 'sample.insv'
+    input_path.write_bytes(b'video')
+    output_path = tmp_path / 'preview.png'
+    sdk_frame = tmp_path / 'sdk_frame.jpg'
+    cv2.imwrite(str(sdk_frame), np.full((16, 24, 3), 180, dtype=np.uint8))
+
+    class _FakeSDK:
+        def is_available(self):
+            return True
+
+        def extract_frames(self, **_kwargs):
+            return [str(sdk_frame)]
+
+    widget = EquirectPreviewWidget.__new__(EquirectPreviewWidget)
+    widget._video_path = str(input_path)
+    widget._preview_timestamp = 2.0
+    widget._ffmpeg_extractor = None
+    widget._sdk = _FakeSDK()
+    widget._build_full_resolution_preview_frame = lambda: None
+
+    exported = EquirectPreviewWidget.export_current_preview_frame(widget, output_path)
+
+    assert exported == output_path
+    assert output_path.exists()
+
+
 def test_preview_timestamp_slider_and_spin_stay_in_sync() -> None:
     _get_app()
     widget = EquirectPreviewWidget()
@@ -74,6 +101,18 @@ def test_preview_timestamp_slider_and_spin_stay_in_sync() -> None:
     assert widget._preview_time_slider.value() == 325
     assert widget._preview_timestamp == 3.25
     assert observed[-1] == 3.25
+    widget.close()
+
+
+def test_preview_frame_available_signal_emits_when_preview_frame_is_loaded() -> None:
+    _get_app()
+    widget = EquirectPreviewWidget()
+    observed = []
+    widget.preview_frame_available.connect(lambda: observed.append(True))
+
+    widget.load_image_array(np.full((24, 32, 3), 120, dtype=np.uint8))
+
+    assert observed == [True]
     widget.close()
 
 

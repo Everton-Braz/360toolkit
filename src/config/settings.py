@@ -21,10 +21,37 @@ from src.utils.resource_path import get_base_path
 logger = logging.getLogger(__name__)
 
 _APP_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_SAM3_ROOT = _APP_ROOT / 'downloads' / 'sam3cpp'
-_DEFAULT_SAM3_SEGMENTER = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'segment_persons.exe'
-_DEFAULT_SAM3_GUI = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'sam3_image.exe'
-_DEFAULT_SAM3_MODEL = _DEFAULT_SAM3_ROOT / 'models' / 'sam3-q4_0.ggml'
+
+
+def _sam3_root_candidates() -> List[Path]:
+    base_path = get_base_path()
+    candidates = [
+        base_path / 'sam3cpp',
+        _APP_ROOT / 'downloads' / 'sam3cpp',
+    ]
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _resolve_default_sam3_path(relative_path: str) -> Path:
+    for root in _sam3_root_candidates():
+        candidate = root / relative_path
+        if candidate.exists():
+            return candidate
+    return _sam3_root_candidates()[0] / relative_path
+
+
+_DEFAULT_SAM3_ROOT = _resolve_default_sam3_path('.')
+_DEFAULT_SAM3_SEGMENTER = _resolve_default_sam3_path('build/examples/Release/segment_persons.exe')
+_DEFAULT_SAM3_GUI = _resolve_default_sam3_path('build/examples/Release/sam3_image.exe')
+_DEFAULT_SAM3_MODEL = _resolve_default_sam3_path('models/sam3-q4_0.ggml')
 
 
 class SettingsManager:
@@ -65,6 +92,8 @@ class SettingsManager:
             if detected_ffmpeg:
                 self.settings['ffmpeg_path'] = str(detected_ffmpeg)
                 self.settings['ffmpeg_auto_detected'] = True
+
+        self._refresh_bundled_sam3_paths()
 
     def _refresh_bundled_reconstruction_paths_REMOVED(self) -> None:  # removed in simple-version
         """Prefer executables shipped with the current frozen build over stale saved paths."""
@@ -174,6 +203,43 @@ class SettingsManager:
                 logger.info(f"[OK] FFmpeg found in bundled/local path: {candidate}")
                 return candidate
         return None
+
+    def _bundled_sam3_segmenter_candidates(self) -> List[Path]:
+        return [root / 'build' / 'examples' / 'Release' / 'segment_persons.exe' for root in _sam3_root_candidates()]
+
+    def _bundled_sam3_model_candidates(self) -> List[Path]:
+        return [root / 'models' / 'sam3-q4_0.ggml' for root in _sam3_root_candidates()]
+
+    def _bundled_sam3_gui_candidates(self) -> List[Path]:
+        return [root / 'build' / 'examples' / 'Release' / 'sam3_image.exe' for root in _sam3_root_candidates()]
+
+    def _detect_bundled_file(self, candidates: List[Path], label: str) -> Optional[Path]:
+        for candidate in candidates:
+            if candidate.exists():
+                logger.info(f"[OK] {label} found in bundled/local path: {candidate}")
+                return candidate
+        return None
+
+    def _refresh_bundled_sam3_paths(self) -> None:
+        changed = False
+
+        bundled_segmenter = self._detect_bundled_file(self._bundled_sam3_segmenter_candidates(), 'SAM3 segmenter')
+        if bundled_segmenter and self.settings.get('sam3_segmenter_path') != str(bundled_segmenter):
+            self.settings['sam3_segmenter_path'] = str(bundled_segmenter)
+            changed = True
+
+        bundled_model = self._detect_bundled_file(self._bundled_sam3_model_candidates(), 'SAM3 model')
+        if bundled_model and self.settings.get('sam3_model_path') != str(bundled_model):
+            self.settings['sam3_model_path'] = str(bundled_model)
+            changed = True
+
+        bundled_gui = self._detect_bundled_file(self._bundled_sam3_gui_candidates(), 'SAM3 GUI')
+        if bundled_gui and self.settings.get('sam3_image_exe_path') != str(bundled_gui):
+            self.settings['sam3_image_exe_path'] = str(bundled_gui)
+            changed = True
+
+        if changed:
+            self.save_settings()
     
     # === SDK PATH MANAGEMENT ===
     
@@ -664,10 +730,11 @@ class SettingsManager:
             Path to YOLO model if found, None otherwise
         """
         logger.info("Searching for YOLO model...")
+        model_patterns = ['yolo*.pt', 'yolo*.onnx', 'yolo*.engine']
         
         # 1. App directory
         app_dir = Path(__file__).parent.parent.parent
-        for pattern in ['yolov8*.pt', 'yolov8*.onnx']:
+        for pattern in model_patterns:
             for model_file in app_dir.glob(pattern):
                 if self.is_yolo_model_valid(model_file):
                     logger.info(f"[OK] YOLO model found at {model_file}")
@@ -676,7 +743,7 @@ class SettingsManager:
         # 2. User cache directory
         cache_dir = Path.home() / ".cache" / "ultralytics" / "models"
         if cache_dir.exists():
-            for pattern in ['yolov8*.pt', 'yolov8*.onnx']:
+            for pattern in model_patterns:
                 for model_file in cache_dir.glob(pattern):
                     if self.is_yolo_model_valid(model_file):
                         logger.info(f"[OK] YOLO model found at {model_file}")
@@ -742,7 +809,11 @@ class SettingsManager:
 
     def get_sam3_segmenter_path(self) -> Optional[Path]:
         value = self.settings.get('sam3_segmenter_path')
-        return Path(value) if value else None
+        if value:
+            candidate = Path(value)
+            if candidate.exists():
+                return candidate
+        return self._detect_bundled_file(self._bundled_sam3_segmenter_candidates(), 'SAM3 segmenter')
 
     def set_sam3_segmenter_path(self, path: Optional[Path | str]):
         self.settings['sam3_segmenter_path'] = str(path) if path else ''
@@ -750,7 +821,11 @@ class SettingsManager:
 
     def get_sam3_model_path(self) -> Optional[Path]:
         value = self.settings.get('sam3_model_path')
-        return Path(value) if value else None
+        if value:
+            candidate = Path(value)
+            if candidate.exists():
+                return candidate
+        return self._detect_bundled_file(self._bundled_sam3_model_candidates(), 'SAM3 model')
 
     def set_sam3_model_path(self, path: Optional[Path | str]):
         self.settings['sam3_model_path'] = str(path) if path else ''
@@ -758,7 +833,11 @@ class SettingsManager:
 
     def get_sam3_image_exe_path(self) -> Optional[Path]:
         value = self.settings.get('sam3_image_exe_path')
-        return Path(value) if value else None
+        if value:
+            candidate = Path(value)
+            if candidate.exists():
+                return candidate
+        return self._detect_bundled_file(self._bundled_sam3_gui_candidates(), 'SAM3 GUI')
 
     def set_sam3_image_exe_path(self, path: Optional[Path | str]):
         self.settings['sam3_image_exe_path'] = str(path) if path else ''

@@ -169,6 +169,7 @@ def test_should_mask_before_split_only_for_png_outputs() -> None:
         'enable_stage2': True,
         'enable_stage3': True,
         'skip_transform': False,
+        'masking_engine': 'sam3_cpp',
         'stage2_format': 'png',
     }
 
@@ -180,6 +181,23 @@ def test_should_mask_before_split_only_for_png_outputs() -> None:
     worker.config['stage2_format'] = 'png'
     worker.config['enable_stage3'] = False
     assert worker._should_mask_before_split() is False
+
+    worker.config['enable_stage3'] = True
+    worker.config['masking_engine'] = 'yolo'
+    assert worker._should_mask_before_split() is True
+
+
+def test_dir_has_images_rejects_empty_existing_folder(tmp_path) -> None:
+    worker = PipelineWorker.__new__(PipelineWorker)
+
+    empty_dir = tmp_path / 'empty'
+    empty_dir.mkdir()
+    assert worker._dir_has_images(empty_dir) is False
+
+    image_dir = tmp_path / 'images'
+    image_dir.mkdir()
+    (image_dir / 'frame.png').write_bytes(b'data')
+    assert worker._dir_has_images(image_dir) is True
 
 
 def test_run_uses_pre_split_masking_for_png_outputs(tmp_path, monkeypatch) -> None:
@@ -195,6 +213,7 @@ def test_run_uses_pre_split_masking_for_png_outputs(tmp_path, monkeypatch) -> No
         'enable_stage2': True,
         'enable_stage3': True,
         'skip_transform': False,
+        'masking_engine': 'sam3_cpp',
         'stage2_format': 'png',
     }
     worker.is_cancelled = False
@@ -245,6 +264,138 @@ def test_run_uses_pre_split_masking_for_png_outputs(tmp_path, monkeypatch) -> No
     assert call_order[2] == ('stage2', str(output_root / 'alpha_cutouts'))
     assert 'stage2_input_dir' not in worker.config
     assert [args[0] for args, _ in worker.stage_complete.calls] == [1, 3, 2]
+
+
+def test_run_uses_pre_split_masking_for_yolo_png_outputs(tmp_path, monkeypatch) -> None:
+    output_root = tmp_path / 'output'
+    extracted_dir = output_root / 'extracted_frames'
+    extracted_dir.mkdir(parents=True)
+    cv2.imwrite(str(extracted_dir / 'frame_00001.png'), np.full((8, 12, 3), 255, dtype=np.uint8))
+
+    worker = PipelineWorker.__new__(PipelineWorker)
+    worker.config = {
+        'output_dir': str(output_root),
+        'enable_stage1': True,
+        'enable_stage2': True,
+        'enable_stage3': True,
+        'skip_transform': False,
+        'masking_engine': 'yolo',
+        'stage2_format': 'png',
+    }
+    worker.is_cancelled = False
+    worker.is_paused = False
+    worker.progress = _DummySignal()
+    worker.error = _RecordingSignal()
+    worker.finished = _RecordingSignal()
+    worker.stage_complete = _RecordingSignal()
+
+    call_order = []
+
+    worker._execute_stage1 = lambda: call_order.append('stage1') or {'success': True}
+
+    def _stage3():
+        call_order.append(('stage3', worker.config.get('stage3_input_dir')))
+        masks_dir = output_root / 'masks_equirect'
+        masks_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(masks_dir / 'frame_00001_mask.png'), np.full((8, 12), 255, dtype=np.uint8))
+        return {
+            'success': True,
+            'input_dir': str(extracted_dir),
+            'masks_dir': str(masks_dir),
+            'mask_source': 'equirect',
+        }
+
+    worker._execute_stage2 = lambda: call_order.append(('stage2', worker.config.get('stage2_input_dir'))) or {'success': True, 'output_files': ['dummy.png']}
+    worker._execute_stage3 = _stage3
+    worker._execute_realityscan_export_only = lambda: {'success': True}
+
+    monkeypatch.setattr(batch_orchestrator, '_test_torch_cuda', lambda: None)
+
+    worker.run()
+
+    assert call_order == [
+        'stage1',
+        ('stage3', str(extracted_dir)),
+        ('stage2', str(output_root / '_pre_split_alpha_cutouts')),
+    ]
+    assert 'stage2_input_dir' not in worker.config
+    assert not (output_root / '_pre_split_alpha_cutouts').exists()
+
+
+def test_execute_stage2_fails_when_input_directory_has_no_images(tmp_path) -> None:
+    output_root = tmp_path / 'output'
+    extracted_dir = output_root / 'extracted_frames'
+    extracted_dir.mkdir(parents=True)
+
+    worker = PipelineWorker.__new__(PipelineWorker)
+    worker.config = {
+        'output_dir': str(output_root),
+        'enable_stage1': True,
+        'transform_type': 'perspective',
+        'stage2_numbering_mode': 'preserve_source',
+    }
+
+    result = worker._execute_stage2()
+
+    assert result['success'] is False
+    assert 'No input images found for Perspective Split' in result['error']
+
+
+def test_execute_stage3_reports_batch_failures(tmp_path) -> None:
+    output_root = tmp_path / 'output'
+    input_dir = output_root / 'extracted_frames'
+    input_dir.mkdir(parents=True)
+    (input_dir / '0.png').write_bytes(b'frame')
+
+    class _FailingMasker:
+        def process_batch(self, **_kwargs):
+            return {
+                'successful': 0,
+                'failed': 1,
+                'total': 1,
+                'skipped': 0,
+            }
+
+    worker = PipelineWorker.__new__(PipelineWorker)
+    worker.config = {
+        'output_dir': str(output_root),
+        'stage3_input_dir': str(input_dir),
+        'masking_engine': 'yolo',
+    }
+    worker.masker = _FailingMasker()
+    worker.is_cancelled = False
+    worker.is_paused = False
+    worker.progress = _DummySignal()
+
+    result = worker._execute_stage3()
+
+    assert result['success'] is False
+    assert result['masks_created'] == 0
+    assert 'Mask generation failed for 1 image(s) out of 1' == result['error']
+
+
+def test_materialize_alpha_cutouts_from_masks_preserves_opaque_unmasked_frames(tmp_path) -> None:
+    worker = PipelineWorker.__new__(PipelineWorker)
+
+    input_dir = tmp_path / 'input'
+    masks_dir = tmp_path / 'masks'
+    output_dir = tmp_path / 'alpha'
+    input_dir.mkdir()
+    masks_dir.mkdir()
+
+    cv2.imwrite(str(input_dir / '0.png'), np.full((4, 5, 3), 100, dtype=np.uint8))
+    cv2.imwrite(str(input_dir / '1.png'), np.full((4, 5, 3), 150, dtype=np.uint8))
+    cv2.imwrite(str(masks_dir / '0_mask.png'), np.full((4, 5), 0, dtype=np.uint8))
+
+    result = worker._materialize_alpha_cutouts_from_masks(input_dir, masks_dir, output_dir)
+
+    assert result['success'] is True
+    alpha_zero = cv2.imread(str(output_dir / '0.png'), cv2.IMREAD_UNCHANGED)
+    alpha_one = cv2.imread(str(output_dir / '1.png'), cv2.IMREAD_UNCHANGED)
+    assert alpha_zero.shape[2] == 4
+    assert alpha_one.shape[2] == 4
+    assert np.all(alpha_zero[:, :, 3] == 0)
+    assert np.all(alpha_one[:, :, 3] == 255)
 
 
 def test_run_keeps_split_then_mask_for_jpeg_outputs(tmp_path, monkeypatch) -> None:

@@ -252,13 +252,13 @@ BATCH_SIZE_MAX = 16
 # Masking engine selection
 MASKING_ENGINES = {
     'yolo': {
-        'name': 'YOLO',
+        'name': 'YOLO Segmentation',
         'description': 'Single YOLO mode with ONNX-first runtime and PyTorch fallback',
         'requires': ['onnxruntime or torch+ultralytics'],
         'default_model': 'yolo26s-seg.onnx'
     },
     'sam3_cpp': {
-        'name': 'SAM3.cpp External',
+        'name': 'SAM 3',
         'description': 'Windows-native external SAM3.cpp executable integration',
         'requires': ['segment_persons.exe', 'sam3 model'],
         'default_model': 'sam3-q4_0.ggml'

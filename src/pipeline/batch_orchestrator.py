@@ -7,6 +7,7 @@ Uses QThread for non-blocking UI execution with progress signals.
 
 import glob
 import logging
+import shutil
 import subprocess
 import time
 import os
@@ -325,7 +326,10 @@ class PipelineWorker(QThread):
         if not folder or not folder.exists() or not folder.is_dir():
             return False
         iterator = folder.rglob if recursive else folder.glob
-        return any(iterator(pattern) for pattern in self._image_patterns())
+        for pattern in self._image_patterns():
+            if any(iterator(pattern)):
+                return True
+        return False
 
     def _detect_project_image_source(self, output_root: Path, folder: Optional[Path]) -> str:
         if folder is None:
@@ -429,11 +433,44 @@ class PipelineWorker(QThread):
         if self.config.get('skip_transform', False):
             return False
 
+        masking_engine = str(self.config.get('masking_engine', 'yolo') or 'yolo').strip().lower()
+        if masking_engine == 'sam_vitb':
+            masking_engine = 'sam3_cpp'
+        elif masking_engine in {'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
+            masking_engine = 'yolo'
+
+        if masking_engine not in {'sam3_cpp', 'yolo'}:
+            return False
+
         image_format = str(self.config.get('stage2_format', 'png') or 'png').strip().lower()
         return image_format == 'png'
 
+    def _mask_output_mode(self) -> str:
+        mode = str(
+            self.config.get('mask_output_mode')
+            or self.config.get('sam3_output_mode')
+            or ''
+        ).strip().lower()
+        if mode in {'masks_only', 'alpha_only', 'both'}:
+            return mode
+        if self.config.get('sam3_alpha_only', False):
+            return 'alpha_only'
+        if self.config.get('sam3_alpha_export', False):
+            return 'both'
+        return 'masks_only'
+
     def _pre_split_alpha_dir(self) -> Path:
         return Path(self.config['output_dir']) / 'alpha_cutouts'
+
+    def _temporary_pre_split_alpha_dir(self) -> Path:
+        return Path(self.config['output_dir']) / '_pre_split_alpha_cutouts'
+
+    def _resolve_alpha_output_dir(self, output_root: Path, resolved_source: str) -> Path:
+        return {
+            'perspective': output_root / 'alpha_cutouts_perspective',
+            'equirect': output_root / 'alpha_cutouts',
+            'custom': output_root / 'alpha_cutouts_custom',
+        }.get(resolved_source, output_root / 'alpha_cutouts_custom')
 
     def _prepare_pre_split_masking_config(self) -> dict:
         previous = {
@@ -448,9 +485,88 @@ class PipelineWorker(QThread):
         self.config['stage3_input_dir'] = str(Path(self.config['output_dir']) / 'extracted_frames')
         self.config['stage3_image_source'] = 'equirect'
         self.config['mask_target'] = 'equirect'
-        self.config['sam3_alpha_export'] = True
-        self.config['sam3_alpha_only'] = True
+        masking_engine = str(self.config.get('masking_engine', 'yolo') or 'yolo').strip().lower()
+        if masking_engine == 'sam_vitb':
+            masking_engine = 'sam3_cpp'
+        elif masking_engine in {'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
+            masking_engine = 'yolo'
+
+        if masking_engine == 'sam3_cpp':
+            self.config['sam3_alpha_export'] = True
+            self.config['sam3_alpha_only'] = True
         return previous
+
+    def _materialize_alpha_cutouts_from_masks(
+        self,
+        input_dir: Path,
+        masks_dir: Path,
+        output_dir: Path,
+    ) -> Dict:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        created = 0
+        failed = 0
+        images: list[Path] = []
+        for pattern in self._image_patterns():
+            images.extend(path for path in input_dir.rglob(pattern) if path.is_file())
+
+        for image_path in sorted(images):
+            rel_path = image_path.relative_to(input_dir)
+            target_path = (output_dir / rel_path).with_suffix('.png')
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+
+            image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
+            if image is None:
+                failed += 1
+                logger.warning('[Mask Alpha] Failed to load source image: %s', image_path)
+                continue
+
+            if image.ndim == 2:
+                rgba = cv2.cvtColor(image, cv2.COLOR_GRAY2BGRA)
+            elif image.ndim == 3 and image.shape[2] == 4:
+                rgba = image.copy()
+            else:
+                rgba = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+
+            mask_path = masks_dir / f'{image_path.stem}_mask.png'
+            if mask_path.exists():
+                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    failed += 1
+                    logger.warning('[Mask Alpha] Failed to load mask image: %s', mask_path)
+                    continue
+                if mask.ndim == 3:
+                    mask = mask[:, :, 0]
+                if mask.shape[:2] != rgba.shape[:2]:
+                    mask = cv2.resize(mask, (rgba.shape[1], rgba.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    if mask.ndim == 3:
+                        mask = mask[:, :, 0]
+            else:
+                mask = np.full(rgba.shape[:2], 255, dtype=np.uint8)
+
+            rgba[:, :, 3] = mask
+            if cv2.imwrite(str(target_path), rgba):
+                created += 1
+            else:
+                failed += 1
+                logger.warning('[Mask Alpha] Failed to save alpha cutout: %s', target_path)
+
+        return {
+            'success': failed == 0 and (created > 0 or not images),
+            'created': created,
+            'failed': failed,
+            'total': len(images),
+            'output_dir': str(output_dir),
+        }
+
+    def _remove_generated_mask_files(self, masks_dir: Path) -> None:
+        if not masks_dir.exists() or not masks_dir.is_dir():
+            return
+        for mask_path in masks_dir.rglob('*_mask.png'):
+            try:
+                mask_path.unlink()
+            except Exception as exc:
+                logger.warning('[Mask Alpha] Failed to remove mask file %s: %s', mask_path, exc)
 
     def _restore_config_values(self, previous: dict):
         for key, value in previous.items():
@@ -517,6 +633,7 @@ class PipelineWorker(QThread):
             skip_transform = self.config.get('skip_transform', False)
             mask_before_split = self._should_mask_before_split()
             stage3_already_executed = False
+            pre_split_cleanup_dir: Optional[Path] = None
 
             previous_stage2_input_dir = self.config.get('stage2_input_dir')
 
@@ -546,7 +663,32 @@ class PipelineWorker(QThread):
                     self.finished.emit(results)
                     return
 
+                masking_engine = str(self.config.get('masking_engine', 'yolo') or 'yolo').strip().lower()
+                if masking_engine == 'sam_vitb':
+                    masking_engine = 'sam3_cpp'
+                elif masking_engine in {'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
+                    masking_engine = 'yolo'
+
                 alpha_dir = self._pre_split_alpha_dir()
+                if masking_engine == 'yolo':
+                    alpha_dir_text = stage3_result.get('alpha_dir')
+                    if alpha_dir_text:
+                        alpha_dir = Path(alpha_dir_text)
+                    else:
+                        alpha_dir = self._temporary_pre_split_alpha_dir()
+                        alpha_result = self._materialize_alpha_cutouts_from_masks(
+                            Path(stage3_result['input_dir']),
+                            Path(stage3_result['masks_dir']),
+                            alpha_dir,
+                        )
+                        if not alpha_result.get('success'):
+                            self.error.emit('Pre-split masking did not produce alpha cutouts for Stage 2 input')
+                            results['success'] = False
+                            results['stages_executed'] = stages_executed
+                            self.finished.emit(results)
+                            return
+                        pre_split_cleanup_dir = alpha_dir
+
                 if not self._dir_has_images(alpha_dir, recursive=False):
                     self.error.emit('Pre-split masking did not produce alpha cutouts for Stage 2 input')
                     results['success'] = False
@@ -583,6 +725,9 @@ class PipelineWorker(QThread):
                 results['stage2'] = stage2_result
                 stages_executed.append(2)
                 self.stage_complete.emit(2, stage2_result)
+
+                if pre_split_cleanup_dir and pre_split_cleanup_dir.exists():
+                    shutil.rmtree(pre_split_cleanup_dir, ignore_errors=True)
 
                 # Clean up GPU memory after splitting to free VRAM for masking
                 if HAS_TORCH_CUDA:
@@ -1025,6 +1170,12 @@ class PipelineWorker(QThread):
                 normalize_stage2_numbering_mode(self.config.get('stage2_numbering_mode')),
             )
             total_frames = len(frame_records)
+            if total_frames == 0:
+                return {
+                    'success': False,
+                    'error': f'No input images found for Perspective Split in: {input_dir}',
+                    'output_files': []
+                }
             
             # Route based on transform type
             if transform_type == 'cubemap':
@@ -1378,9 +1529,35 @@ class PipelineWorker(QThread):
                 if _opencl_ok:
                     logger.info("[Split OpenCL] OpenCL available — using cv2.UMat GPU-accelerated remap")
                     try:
+                        from concurrent.futures import ThreadPoolExecutor
+
                         cv2.ocl.setUseOpenCL(True)
                         opencl_transformer = OpenCLE2PTransform()
                         _opencl_failed = False
+                        save_executor = ThreadPoolExecutor(max_workers=12)
+
+                        def save_image_async(out_img, out_path, ext, yaw, pitch, roll, fov):
+                            try:
+                                if ext == 'png':
+                                    ok = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+                                elif ext in ('jpg', 'jpeg'):
+                                    ok = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                else:
+                                    ok = cv2.imwrite(str(out_path), out_img)
+
+                                if not ok:
+                                    return None
+
+                                try:
+                                    self.metadata_handler.embed_camera_orientation(
+                                        str(out_path), yaw, pitch, roll, fov
+                                    )
+                                except Exception:
+                                    pass
+                                return str(out_path)
+                            except Exception as save_error:
+                                logger.warning("[Split OpenCL] Failed to save %s: %s", out_path, save_error)
+                                return None
 
                         # Check whether input images have alpha channel
                         _sample_ocl = cv2.imread(str(frame_records[0][0]), cv2.IMREAD_UNCHANGED)
@@ -1406,6 +1583,7 @@ class PipelineWorker(QThread):
                                 logger.warning("[Split OpenCL] Failed to load %s", frame_path)
                                 continue
 
+                            frame_save_futures = []
                             for cam_idx, camera in enumerate(cameras):
                                 yaw  = camera['yaw']
                                 pitch = camera.get('pitch', 0)
@@ -1419,26 +1597,29 @@ class PipelineWorker(QThread):
 
                                 out_path = resolve_perspective_output_path(output_dir, output_frame_id, cam_idx, ext, layout_mode)
                                 out_path.parent.mkdir(parents=True, exist_ok=True)
-
-                                if ext == 'png':
-                                    ok = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-                                elif ext in ('jpg', 'jpeg'):
-                                    ok = cv2.imwrite(str(out_path), out_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                                else:
-                                    ok = cv2.imwrite(str(out_path), out_img)
-
-                                if ok:
-                                    try:
-                                        self.metadata_handler.embed_camera_orientation(
-                                            str(out_path), yaw, pitch, roll, fov)
-                                    except Exception:
-                                        pass
-                                    output_files.append(str(out_path))
+                                frame_save_futures.append(
+                                    save_executor.submit(
+                                        save_image_async,
+                                        out_img.copy(),
+                                        out_path,
+                                        ext,
+                                        yaw,
+                                        pitch,
+                                        roll,
+                                        fov,
+                                    )
+                                )
 
                                 total_ops_done += 1
+
+                            for future in as_completed(frame_save_futures):
+                                saved_path = future.result()
+                                if saved_path:
+                                    output_files.append(saved_path)
                             self.progress.emit(total_ops_done, total_operations,
                                                f"Split (OpenCL): frame {frame_position + 1}/{total_frames}")
 
+                        save_executor.shutdown(wait=True)
                         logger.info("[Split OpenCL] Done — %d perspective views", len(output_files))
                         processing_backend = 'opencl'
 
@@ -1816,17 +1997,18 @@ class PipelineWorker(QThread):
                     'skipped': 0,
                     'failed': 0
                 }
+
+            masking_engine = str(self.config.get('masking_engine', 'yolo')).strip().lower()
+            if masking_engine == 'sam_vitb':
+                masking_engine = 'sam3_cpp'
+            elif masking_engine in {'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
+                masking_engine = 'yolo'
             
             # Initialize masker if not done
             if self.masker is None:
                 model_size = self.config.get('model_size', 'small')
                 confidence = self.config.get('confidence_threshold', 0.5)
                 use_gpu = self.config.get('use_gpu', True)
-                masking_engine = str(self.config.get('masking_engine', 'yolo')).strip().lower()
-                if masking_engine == 'sam_vitb':
-                    masking_engine = 'sam3_cpp'
-                elif masking_engine in {'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
-                    masking_engine = 'yolo'
                 
                 # Handle SAM3 separately
                 if masking_engine == 'sam3_cpp':
@@ -1887,146 +2069,44 @@ class PipelineWorker(QThread):
                         'large': 'yolov8l-seg.onnx',
                         'xlarge': 'yolov8x-seg.onnx'
                     }
-                    
-                    # Try YOLO26 first, then YOLOv8
-                    onnx_model_name = model_map_yolo26.get(model_size, 'yolo26s-seg.onnx')
-                    onnx_path = resolve_masking_model_path(onnx_model_name)
-                    
-                    if not onnx_path.exists():
-                        # Fallback to YOLOv8
-                        onnx_model_name = model_map_yolov8.get(model_size, 'yolov8s-seg.onnx')
-                        onnx_path = resolve_masking_model_path(onnx_model_name)
-                        logger.info(f"YOLO26 not found, falling back to YOLOv8: {onnx_model_name}")
+
+                    custom_onnx_model = str(self.config.get('yolo_model_path', '') or '').strip()
+                    if custom_onnx_model:
+                        onnx_path = Path(custom_onnx_model).expanduser()
+                        onnx_model_name = onnx_path.name
+                        logger.info(f"Using custom YOLO ONNX model: {onnx_path}")
                     else:
-                        logger.info(f"Using YOLO26 model (3-4x faster): {onnx_model_name}")
+                        # Try YOLO26 first, then YOLOv8
+                        onnx_model_name = model_map_yolo26.get(model_size, 'yolo26s-seg.onnx')
+                        onnx_path = resolve_masking_model_path(onnx_model_name)
+
+                        if not onnx_path.exists():
+                            # Fallback to YOLOv8
+                            onnx_model_name = model_map_yolov8.get(model_size, 'yolov8s-seg.onnx')
+                            onnx_path = resolve_masking_model_path(onnx_model_name)
+                            logger.info(f"YOLO26 not found, falling back to YOLOv8: {onnx_model_name}")
+                        else:
+                            logger.info(f"Using YOLO26 model (3-4x faster): {onnx_model_name}")
                     
                     use_onnx = False
                     onnx_error = "Unknown error"
                     
                     if onnx_path.exists():
                         try:
-                            # CRITICAL FIX: Add DLL directory for ONNX Runtime in frozen app
-                            import sys
-                            import os
-
-                            def _remember_dll_dir(path: Path) -> None:
-                                if hasattr(os, 'add_dll_directory') and path.exists():
-                                    try:
-                                        _DLL_DIR_HANDLES.append(os.add_dll_directory(str(path)))
-                                    except (OSError, FileNotFoundError):
-                                        pass
-                            
-                            # Determine base path for frozen app (onedir mode)
-                            if getattr(sys, 'frozen', False):
-                                # In onedir mode, sys.executable is the .exe
-                                # The _internal folder is usually next to it (PyInstaller 6+)
-                                # or dependencies are in the same folder
-                                exe_dir = Path(sys.executable).parent
-                                internal_dir = exe_dir / '_internal'
-                                
-                                # DIAGNOSTIC: List what DLLs we have
-                                logger.info("=== ONNX Runtime DLL Diagnostics ===")
-                                ort_capi_path = internal_dir / 'onnxruntime' / 'capi'
-                                numpy_libs_path = internal_dir / 'numpy.libs'
-                                if ort_capi_path.exists():
-                                    logger.info(f"ONNX capi folder exists: {ort_capi_path}")
-                                    dlls = list(glob.glob(str(ort_capi_path / '*.dll')))
-                                    logger.info(f"DLLs in capi: {[os.path.basename(d) for d in dlls]}")
-                                    
-                                    pyds = list(glob.glob(str(ort_capi_path / '*.pyd')))
-                                    logger.info(f"PYDs in capi: {[os.path.basename(d) for d in pyds]}")
-                                else:
-                                    logger.warning(f"ONNX capi folder NOT FOUND: {ort_capi_path}")
-                                
-                                # Check for MSVC runtimes
-                                msvc_dlls = list(glob.glob(str(internal_dir / 'msvcp*.dll')))
-                                msvc_dlls += list(glob.glob(str(internal_dir / 'vcruntime*.dll')))
-                                logger.info(f"MSVC runtimes in _internal: {[os.path.basename(d) for d in msvc_dlls]}")
-                                
-                                # Check current PATH
-                                logger.info(f"Current PATH dirs: {os.environ.get('PATH', '').split(os.pathsep)[:5]}")
-                                logger.info("=== End Diagnostics ===")
-                                
-                                # Add _internal/onnxruntime/capi to DLL search path
-                                if ort_capi_path.exists():
-                                    logger.info(f"Adding ONNX DLL path: {ort_capi_path}")
-                                    _remember_dll_dir(ort_capi_path)
-
-                                if numpy_libs_path.exists():
-                                    logger.info(f"Adding NumPy DLL path: {numpy_libs_path}")
-                                    _remember_dll_dir(numpy_libs_path)
-                                
-                                # Add _internal root (for msvcp140.dll etc)
-                                if internal_dir.exists():
-                                    logger.info(f"Adding Internal DLL path: {internal_dir}")
-                                    _remember_dll_dir(internal_dir)
-                                    
-                                # Add exe dir (just in case)
-                                logger.info(f"Adding Exe DLL path: {exe_dir}")
-                                _remember_dll_dir(exe_dir)
-
-                                extra_paths = [str(path) for path in (ort_capi_path, numpy_libs_path, internal_dir, exe_dir) if path.exists()]
-                                os.environ['PATH'] = os.pathsep.join(extra_paths + [os.environ.get('PATH', '')])
-
-                                # CRITICAL: Preload CUDA + ONNX DLLs via ctypes before import.
-                                # In frozen apps, implicit DLL dependency resolution for PYD
-                                # secondary deps doesn't reliably use AddDllDirectory paths.
-                                # Loading DLLs into the process first ensures they're found.
-                                import ctypes
-                                _cuda_dlls = [
-                                    # CUDA runtime (no deps)
-                                    (internal_dir, 'cudart64_12.dll'),
-                                    # zlib (needed by cuDNN for weight decompression)
-                                    (internal_dir, 'zlibwapi.dll'),
-                                    # cuBLAS
-                                    (internal_dir, 'cublasLt64_12.dll'),
-                                    (internal_dir, 'cublas64_12.dll'),
-                                    # cuFFT
-                                    (internal_dir, 'cufft64_11.dll'),
-                                    # cuDNN (depends on cudart, zlibwapi)
-                                    (internal_dir, 'cudnn64_9.dll'),
-                                    (internal_dir, 'cudnn_ops64_9.dll'),
-                                    (internal_dir, 'cudnn_cnn64_9.dll'),
-                                    (internal_dir, 'cudnn_adv64_9.dll'),
-                                    (internal_dir, 'cudnn_graph64_9.dll'),
-                                    (internal_dir, 'cudnn_heuristic64_9.dll'),
-                                    (internal_dir, 'cudnn_engines_precompiled64_9.dll'),
-                                    (internal_dir, 'cudnn_engines_runtime_compiled64_9.dll'),
-                                    # ONNX Runtime core (depends on above)
-                                    (ort_capi_path, 'onnxruntime.dll'),
-                                    (ort_capi_path, 'onnxruntime_providers_shared.dll'),
-                                    (ort_capi_path, 'onnxruntime_providers_cuda.dll'),
-                                    (ort_capi_path, 'onnxruntime_providers_tensorrt.dll'),
-                                ]
-                                _preloaded = 0
-                                for _dir, _dll_name in _cuda_dlls:
-                                    _dll_path = _dir / _dll_name
-                                    if _dll_path.exists():
-                                        try:
-                                            ctypes.CDLL(str(_dll_path))
-                                            _preloaded += 1
-                                        except OSError as _e:
-                                            logger.debug(f"ctypes preload skip {_dll_name}: {_e}")
-                                logger.info(f"ctypes preloaded {_preloaded} CUDA/ONNX DLLs")
-
-                            logger.info("Attempting to import onnxruntime...")
-                            import onnxruntime
-                            logger.info(f"Successfully imported onnxruntime {onnxruntime.__version__}")
                             from ..masking.onnx_masker import ONNXMasker
-                            logger.info(f"Found ONNX model {onnx_path}, using ONNXMasker")
+                            logger.info(f"Found ONNX model {onnx_path}, initializing ONNXMasker")
                             self.masker = ONNXMasker(
                                 model_path=str(onnx_path),
                                 confidence_threshold=confidence,
                                 use_gpu=use_gpu,
                                 mask_dilation_pixels=15  # Expand boundaries by 15 pixels (includes backpack!)
                             )
+                            backend_name = getattr(self.masker, 'backend', 'onnxruntime')
+                            logger.info(f"Masking backend ready via ONNXMasker ({backend_name})")
                             use_onnx = True
-                        except ImportError as e:
-                            onnx_error = f"ImportError: {e}"
-                            logger.warning(f"ONNX model found but onnxruntime not installed/working. Error: {e}")
                         except Exception as e:
                             onnx_error = f"InitError: {e}"
-                            logger.warning(f"Failed to initialize ONNXMasker: {e}. Falling back to PyTorch.")
+                            logger.warning(f"Failed to initialize ONNXMasker: {e}. Attempting PyTorch fallback.")
                     else:
                         onnx_error = f"File not found at {onnx_path}"
                         logger.warning(f"ONNX model file not found at: {onnx_path}")
@@ -2151,15 +2231,45 @@ class PipelineWorker(QThread):
                 cancellation_check=cancellation_check
             )
 
+            output_mode = self._mask_output_mode()
+            if masking_engine == 'yolo' and output_mode in {'alpha_only', 'both'}:
+                alpha_dir = self._resolve_alpha_output_dir(output_root, resolved_source)
+                alpha_result = self._materialize_alpha_cutouts_from_masks(input_dir, output_dir, alpha_dir)
+                if not alpha_result.get('success'):
+                    return {
+                        'success': False,
+                        'error': 'Failed to generate alpha cutout PNGs from YOLO masks',
+                        'masks_created': int(result.get('successful', 0)),
+                        'skipped': int(result.get('skipped', 0)),
+                        'failed': int(result.get('failed', 0)),
+                    }
+                result['alpha_dir'] = str(alpha_dir)
+                result['alpha_created'] = alpha_result.get('created', 0)
+                if output_mode == 'alpha_only':
+                    self._remove_generated_mask_files(output_dir)
+
             result['input_dir'] = str(input_dir)
             result['mask_source'] = resolved_source
             result['masks_dir'] = str(output_dir)
-            result['success'] = True
+            result['masks_created'] = int(result.get('successful', 0))
+            result['success'] = int(result.get('failed', 0)) == 0
+            if result['success']:
+                if int(result.get('masks_created', 0)) == 0 and int(result.get('total', 0)) > 0:
+                    logger.warning(
+                        "Mask generation completed without creating masks: %s image(s) processed, %s skipped",
+                        result.get('total', 0),
+                        result.get('skipped', 0),
+                    )
+            else:
+                result['error'] = (
+                    f"Mask generation failed for {result.get('failed', 0)} image(s) "
+                    f"out of {result.get('total', 0)}"
+                )
             return result
         
         except Exception as e:
             logger.error(f"Masking error: {e}")
-            return {'success': False, 'error': str(e)}
+            return {'success': False, 'error': str(e), 'masks_created': 0, 'skipped': 0, 'failed': 0}
 
     def _execute_realityscan_export_only(self) -> Dict:
         """Export split/masked images for RealityCapture without COLMAP."""

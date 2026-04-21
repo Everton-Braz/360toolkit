@@ -9,6 +9,7 @@ import os
 import logging
 import shlex
 import importlib
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -22,7 +23,7 @@ from PyQt6.QtWidgets import (
     QApplication, QToolButton, QGridLayout, QSpacerItem, QStyle,
     QSlider
 )
-from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal, QEvent
+from PyQt6.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, pyqtSignal, QEvent, QObject, QThread
 from PyQt6.QtGui import QFont, QAction, QIcon, QPainter, QColor, QPen, QPixmap, QShortcut, QKeySequence, QPalette, QStandardItem
 
 from src.pipeline.batch_orchestrator import BatchOrchestrator
@@ -51,8 +52,47 @@ from src.ui.widgets import (
 from src.ui.preview_panels import EquirectPreviewWidget
 from src.utils.runtime_backends import has_bundled_onnx_runtime, has_usable_torch_runtime, is_usable_torch_module
 from src.pipeline.stage2_naming import perspective_output_sort_key
+from src.utils.dependency_provisioning import resolve_masking_model_path
 
 logger = logging.getLogger(__name__)
+
+
+class _QtLogEmitter(QObject):
+    message = pyqtSignal(str)
+
+
+class _QtLogHandler(logging.Handler):
+    def __init__(self, emitter: _QtLogEmitter):
+        super().__init__(level=logging.INFO)
+        self._emitter = emitter
+        self.setFormatter(logging.Formatter('%(message)s'))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno < logging.INFO:
+            return
+        try:
+            self._emitter.message.emit(self.format(record))
+        except Exception:
+            pass
+
+
+class _InputAnalysisWorker(QThread):
+    completed = pyqtSignal(str, dict)
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, input_path: str, parent=None):
+        super().__init__(parent)
+        self._input_path = input_path
+
+    def run(self) -> None:
+        try:
+            from src.extraction import FrameExtractor
+
+            extractor = FrameExtractor()
+            info = extractor.get_video_info(self._input_path)
+            self.completed.emit(self._input_path, info)
+        except Exception as exc:
+            self.failed.emit(self._input_path, str(exc))
 
 DEFAULT_SPHERESFM_FEATURE_FLAGS = (
     "--ImageReader.single_camera 1 --SiftExtraction.max_num_orientations 2 "
@@ -212,22 +252,114 @@ class MainWindow(QMainWindow):
         self._effective_log_visible = True
         self._resolved_theme = "dark"
         self._last_auto_sdk_defaults_key = None
+        self._qt_log_emitter = _QtLogEmitter()
+        self._qt_log_handler = _QtLogHandler(self._qt_log_emitter)
+        self._input_analysis_worker = None
+        self._active_input_analysis = ""
+        self._pending_input_analysis = None
         
         self.init_ui()
+        self._attach_backend_log_handler()
         self.create_menu_bar()
         self.apply_theme()
         self._setup_shortcuts()
-        
-        # Trigger initial visibility  
         self.on_extraction_method_changed(0)
         self._update_overview_stage_summary()
         self.on_settings_changed()
-
         self.input_file_edit.textChanged.connect(self._on_input_file_changed)
         self.output_dir_edit.textChanged.connect(self._on_stage3_preview_source_changed)
-        
-        # Show maximized by default
         self.showMaximized()
+
+    def _attach_backend_log_handler(self):
+        self._qt_log_emitter.message.connect(self._append_backend_log)
+        root_logger = logging.getLogger()
+        if root_logger.level > logging.INFO:
+            root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(self._qt_log_handler)
+
+    def _append_backend_log(self, message: str):
+        if not message:
+            return
+        if not self._should_show_backend_log(message):
+            return
+        self.log_message(message)
+
+    def _should_show_backend_log(self, message: str) -> bool:
+        normalized = str(message).strip()
+        if not normalized:
+            return False
+
+        # Explicit suppression list — checked before anything else
+        never_show = (
+            '=== ONNX Runtime DLL Diagnostics ===',
+            '=== End Diagnostics ===',
+            'ONNX Runtime DLL Diagnostics',
+        )
+        if any(marker in normalized for marker in never_show):
+            return False
+
+        low_signal_markers = (
+            'Found model:',
+            'Found SDK executable:',
+            'Found bundled FFprobe',
+            'FFmpeg found at:',
+            'FFprobe found at:',
+            'Current PATH dirs:',
+            'DLLs in capi:',
+            'PYDs in capi:',
+            'MSVC runtimes in _internal:',
+            'Adding ONNX DLL path:',
+            'Adding NumPy DLL path:',
+            'Adding Internal DLL path:',
+            'Adding Exe DLL path:',
+            'ctypes preloaded',
+            'Attempting to import onnxruntime...',
+            '[GPU Detect]',
+            'SDK PATH:',
+            'DLLs in SDK bin:',
+            'Found nvcuda.dll at',
+            '[SDK STDOUT]',
+            '[SDK STDERR]',
+            '[Diagnostics]',
+        )
+        if any(marker in normalized for marker in low_signal_markers):
+            return False
+
+        high_signal_markers = (
+            'Starting pipeline',
+            'Pipeline complete',
+            'Pipeline failed',
+            '=== ',
+            '[OK] Stage',
+            '[FAIL] Stage',
+            'Error:',
+            'Masking Initialization Failed',
+            'Split (',
+            'Done \u2014',
+            'Running ',
+            'Found ',
+            'Analyzed:',
+            'SDK preview failed',
+            'Lens preview failed',
+            'Using specified input:',
+        )
+        if any(marker in normalized for marker in high_signal_markers):
+            return True
+
+        return normalized.startswith('[OK]') or normalized.startswith('[WARN]') or normalized.startswith('[FAIL]')
+
+    def closeEvent(self, event):
+        try:
+            logging.getLogger().removeHandler(self._qt_log_handler)
+        except Exception:
+            pass
+        try:
+            if self._input_analysis_worker and self._input_analysis_worker.isRunning():
+                self._input_analysis_worker.terminate()
+                self._input_analysis_worker.wait()
+        except Exception:
+            pass
+        super().closeEvent(event)
     
     def init_ui(self):
         """Initialize full-screen UI with sidebar + stacked content"""
@@ -797,6 +929,9 @@ class MainWindow(QMainWindow):
         self.stage1_eq_preview.preview_timestamp_changed.connect(
             self._on_stage1_preview_timestamp_changed
         )
+        self.stage1_eq_preview.preview_frame_available.connect(
+            self._on_stage1_preview_frame_available
+        )
         self.start_time_spin.valueChanged.connect(
             self._sync_preview_timestamp_from_stage1_range
         )
@@ -1073,20 +1208,21 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(StageSummaryStrip(
             "Masking",
-            "Choose the masking source and SAM3 processing settings, then validate before running."
+            "Choose the masking engine and source, then validate the Stage 3 settings before running."
         ))
 
         # ── Engine & Quality — merged card ─────────────────────────────────
         card_model = CardWidget("Engine & Quality")
 
         self.masking_engine_combo = QComboBox()
-        self.masking_engine_combo.addItem("SAM3.cpp External - Person Masking", "sam3_cpp")
+        self.masking_engine_combo.addItem("SAM 3", "sam3_cpp")
+        self.masking_engine_combo.addItem("YOLO Segmentation", "yolo")
         self.masking_engine_combo.setCurrentIndex(0)
         self.masking_engine_combo.setMinimumWidth(280)
         self.masking_engine_combo.currentIndexChanged.connect(self.on_masking_engine_changed)
         card_model.addWidget(FormRow("Masking Engine:", self.masking_engine_combo))
         
-        self.engine_description_label = QLabel("SAM3.cpp is the masking engine used for Stage 3 processing")
+        self.engine_description_label = QLabel("Primary engine: SAM 3. Secondary packaged option: YOLO segmentation.")
         self.engine_description_label.setProperty("role", "mutedSmall")
         card_model.addWidget(self.engine_description_label)
         self.masking_runtime_label = QLabel("Runtime: detecting ONNX / PyTorch backends...")
@@ -1132,10 +1268,41 @@ class MainWindow(QMainWindow):
         self.model_size_combo.addItem("Nano (10MB) - Fastest", "nano")
         self.model_size_combo.addItem("Small (40MB) - Balanced", "small")
         self.model_size_combo.addItem("Medium (90MB) - Best", "medium")
+        self.model_size_combo.addItem("Large (140MB) - Higher accuracy", "large")
+        self.model_size_combo.addItem("XLarge (220MB) - Maximum accuracy", "xlarge")
         self.model_size_combo.setCurrentIndex(1)
         self.model_size_combo.setFixedWidth(240)
         ms_layout.addWidget(FormRow("Model Size:", self.model_size_combo))
         card_model.addWidget(self.model_size_container)
+
+        self.yolo_model_path_container = QWidget()
+        yolo_model_layout = QHBoxLayout(self.yolo_model_path_container)
+        yolo_model_layout.setContentsMargins(0, 0, 0, 0)
+        yolo_model_layout.setSpacing(8)
+        self.yolo_model_path_edit = QLineEdit()
+        self.yolo_model_path_edit.setPlaceholderText("Optional: custom YOLO ONNX model (.onnx). Overrides size selection.")
+        self.yolo_model_path_edit.textChanged.connect(self._update_masking_runtime_status)
+        yolo_model_layout.addWidget(self.yolo_model_path_edit)
+        self.yolo_model_browse_btn = QPushButton("Browse…")
+        self.yolo_model_browse_btn.setFixedWidth(92)
+        self.yolo_model_browse_btn.clicked.connect(
+            lambda: self._browse_for_file(self.yolo_model_path_edit, "Select YOLO ONNX Model", "ONNX Models (*.onnx)")
+        )
+        yolo_model_layout.addWidget(self.yolo_model_browse_btn)
+        card_model.addWidget(FormRow("Custom ONNX:", self.yolo_model_path_container, "Optional: choose a specific YOLO ONNX file instead of the bundled size map"))
+
+        self.mask_output_mode_container = QWidget()
+        mask_output_layout = QHBoxLayout(self.mask_output_mode_container)
+        mask_output_layout.setContentsMargins(0, 0, 0, 0)
+        self.sam3_output_mode_combo = QComboBox()
+        self.sam3_output_mode_combo.addItem("Mask files only  (separate _mask.png per image)", "masks_only")
+        self.sam3_output_mode_combo.addItem("Alpha cutout PNG only  (transparent area embedded — no mask files)", "alpha_only")
+        self.sam3_output_mode_combo.addItem("Both  (alpha PNG + separate mask file)", "both")
+        self.sam3_output_mode_combo.setCurrentIndex(0)
+        self.sam3_output_mode_combo.currentIndexChanged.connect(self._on_sam3_config_changed)
+        mask_output_layout.addWidget(self.sam3_output_mode_combo)
+        mask_output_layout.addStretch()
+        card_model.addWidget(FormRow("Output mode:", self.mask_output_mode_container, "Controls whether masking writes separate masks, alpha cutouts, or both. PNG split output can reuse alpha cutouts before Stage 2."))
         
         self.confidence_container = QWidget()
         conf_row = QHBoxLayout(self.confidence_container)
@@ -1285,20 +1452,6 @@ class MainWindow(QMainWindow):
         sam3_maxw_layout.addWidget(self.sam3_maxw_combo)
         sam3_maxw_layout.addStretch()
         sam3_layout.addWidget(FormRow("Max input width:", sam3_maxw_widget))
-
-        # ── Output mode ──────────────────────────────────────────────────────
-        sam3_outmode_widget = QWidget()
-        sam3_outmode_layout = QHBoxLayout(sam3_outmode_widget)
-        sam3_outmode_layout.setContentsMargins(0, 0, 0, 0)
-        self.sam3_output_mode_combo = QComboBox()
-        self.sam3_output_mode_combo.addItem("Mask files only  (separate _mask.png per image)", "masks_only")
-        self.sam3_output_mode_combo.addItem("Alpha cutout PNG only  (transparent area embedded — no mask files)", "alpha_only")
-        self.sam3_output_mode_combo.addItem("Both  (alpha PNG + separate mask file)", "both")
-        self.sam3_output_mode_combo.setCurrentIndex(0)
-        self.sam3_output_mode_combo.currentIndexChanged.connect(self._on_sam3_config_changed)
-        sam3_outmode_layout.addWidget(self.sam3_output_mode_combo)
-        sam3_outmode_layout.addStretch()
-        sam3_layout.addWidget(FormRow("Output mode:", sam3_outmode_widget))
 
         card_model.addWidget(self.sam3_options_container)
 
@@ -1564,6 +1717,19 @@ class MainWindow(QMainWindow):
             self.log_message("[WARN] Masking validation: No masking category group is enabled.")
             self._set_control_status("No masking categories enabled", "warn")
             return
+
+        if stage_index == 4 and self._normalize_masking_engine(self.masking_engine_combo.currentData()) == 'yolo':
+            custom_model_text = self.yolo_model_path_edit.text().strip() if hasattr(self, 'yolo_model_path_edit') else ''
+            if custom_model_text:
+                custom_model = Path(custom_model_text).expanduser()
+                if not custom_model.exists() or not custom_model.is_file():
+                    self.log_message(f"[WARN] Masking validation: Custom YOLO model not found: {custom_model}")
+                    self._set_control_status("Custom YOLO model not found", "warn")
+                    return
+                if custom_model.suffix.lower() != '.onnx':
+                    self.log_message(f"[WARN] Masking validation: Custom YOLO model must be an ONNX file: {custom_model.name}")
+                    self._set_control_status("Custom YOLO model must be ONNX", "warn")
+                    return
 
         if stage_index == 4 and self.masking_engine_combo.currentData() == 'sam3_cpp':
             segmenter_text = self._get_sam3_segmenter_text()
@@ -1897,6 +2063,8 @@ class MainWindow(QMainWindow):
             'skip_transform': not self.stage2_enable.isChecked(),
             'stage3_enabled': self.stage3_enable.isChecked(),
             'masking_engine': self._normalize_masking_engine(self.masking_engine_combo.currentData()),
+            'mask_output_mode': self._get_mask_output_mode(),
+            'yolo_model_path': self.yolo_model_path_edit.text().strip() if hasattr(self, 'yolo_model_path_edit') else '',
             'model_size': self.model_size_combo.currentData(),
             'confidence_threshold': self.confidence_spin.value(),
             'use_gpu': self.use_gpu_check.isChecked(),
@@ -1911,9 +2079,9 @@ class MainWindow(QMainWindow):
             'sam3_prompts': {k: cb.isChecked() for k, cb in self.sam3_prompt_checks.items()} if hasattr(self, 'sam3_prompt_checks') else {},
             'sam3_custom_prompts': self.sam3_custom_prompts_edit.text().strip() if hasattr(self, 'sam3_custom_prompts_edit') else '',
             'sam3_morph_radius': self.sam3_morph_spin.value() if hasattr(self, 'sam3_morph_spin') else (self.sam3_morph_slider.value() if hasattr(self, 'sam3_morph_slider') else 0),
-            'sam3_output_mode': self.sam3_output_mode_combo.currentData() if hasattr(self, 'sam3_output_mode_combo') else 'masks_only',
-            'sam3_alpha_export': (self.sam3_output_mode_combo.currentData() in ('alpha_only', 'both')) if hasattr(self, 'sam3_output_mode_combo') else False,
-            'sam3_alpha_only': (self.sam3_output_mode_combo.currentData() == 'alpha_only') if hasattr(self, 'sam3_output_mode_combo') else False,
+            'sam3_output_mode': self._get_mask_output_mode(),
+            'sam3_alpha_export': self._get_mask_output_mode() in ('alpha_only', 'both'),
+            'sam3_alpha_only': self._get_mask_output_mode() == 'alpha_only',
             'sam3_max_input_width': self.sam3_maxw_combo.currentData() if hasattr(self, 'sam3_maxw_combo') else 3840,
             'masking_categories': {
                 'persons': self.persons_enable.isChecked(),
@@ -2039,6 +2207,14 @@ class MainWindow(QMainWindow):
                 mark_overlay_stale=True,
             )
 
+    def _on_stage1_preview_frame_available(self):
+        if hasattr(self, 'sam3_preview_widget'):
+            self.sam3_preview_widget.refresh_state()
+            self.sam3_preview_widget.refresh_auto_source_image(
+                force=False,
+                mark_overlay_stale=True,
+            )
+
     def _on_sam3_config_changed(self, *_args):
         self._update_masking_runtime_status()
         if hasattr(self, 'sam3_preview_widget'):
@@ -2078,11 +2254,65 @@ class MainWindow(QMainWindow):
 
     def _normalize_masking_engine(self, engine: str | None) -> str:
         engine_value = str(engine or '').strip().lower()
+        if engine_value in {'yolo', 'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
+            return 'yolo'
         if engine_value == 'sam3_cpp':
             return 'sam3_cpp'
         if engine_value == 'sam_vitb':
             return 'sam3_cpp'
         return 'sam3_cpp'
+
+    def _get_mask_output_mode(self) -> str:
+        if hasattr(self, 'sam3_output_mode_combo'):
+            mode = str(self.sam3_output_mode_combo.currentData() or '').strip().lower()
+            if mode in {'masks_only', 'alpha_only', 'both'}:
+                return mode
+        return 'masks_only'
+
+    def _get_available_yolo_model_sizes(self) -> dict[str, Path]:
+        model_candidates = {
+            'nano': ('yolo26n-seg.onnx', 'yolov8n-seg.onnx'),
+            'small': ('yolo26s-seg.onnx', 'yolov8s-seg.onnx'),
+            'medium': ('yolo26m-seg.onnx', 'yolov8m-seg.onnx'),
+            'large': ('yolov8l-seg.onnx',),
+            'xlarge': ('yolov8x-seg.onnx',),
+        }
+
+        available: dict[str, Path] = {}
+        for size, model_names in model_candidates.items():
+            for model_name in model_names:
+                candidate = resolve_masking_model_path(model_name)
+                if candidate.exists():
+                    available[size] = candidate
+                    break
+        return available
+
+    def _refresh_yolo_model_size_options(self):
+        if not hasattr(self, 'model_size_combo'):
+            return
+
+        available = self._get_available_yolo_model_sizes()
+        torch_ready = has_usable_torch_runtime()
+        model = self.model_size_combo.model()
+
+        for index in range(self.model_size_combo.count()):
+            size_key = self.model_size_combo.itemData(index)
+            item = model.item(index) if hasattr(model, 'item') else None
+            if item is not None:
+                item.setEnabled(torch_ready or size_key in available)
+
+        if not torch_ready and available and self.model_size_combo.currentData() not in available:
+            preferred_size = 'small' if 'small' in available else next(iter(available))
+            self._set_combo_data(self.model_size_combo, preferred_size)
+
+        if torch_ready:
+            tooltip = 'YOLO ONNX models are bundled when available. Additional sizes can use a local PyTorch runtime when installed.'
+        elif available:
+            pretty_sizes = ', '.join(size.title() for size in available)
+            tooltip = f'Bundled YOLO ONNX sizes in this build: {pretty_sizes}.'
+        else:
+            tooltip = 'No bundled YOLO ONNX model was found for this build.'
+        self.model_size_combo.setToolTip(tooltip)
 
     def _get_sam3_preview_config(self) -> dict:
         prompts = {}
@@ -2137,8 +2367,10 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, 'stage1_eq_preview') and self.stage1_eq_preview is not None:
             try:
+                if not self.stage1_eq_preview.has_preview_frame():
+                    return None
                 preview_path = self.stage1_eq_preview.export_current_preview_frame(
-                    APP_ROOT / 'downloads' / 'sam3cpp' / 'preview_cache' / 'stage1_preview_frame.png'
+                    Path(tempfile.gettempdir()) / '360toolkit_sam3_preview' / 'stage1_preview_frame.png'
                 )
                 if preview_path and preview_path.exists():
                     return preview_path
@@ -2313,6 +2545,8 @@ class MainWindow(QMainWindow):
                 self._set_stage3_input_dir(config['stage3_input_dir'])
             if 'masking_engine' in config and hasattr(self, 'masking_engine_combo'):
                 self._set_combo_data(self.masking_engine_combo, self._normalize_masking_engine(config['masking_engine']))
+            if 'yolo_model_path' in config and hasattr(self, 'yolo_model_path_edit'):
+                self.yolo_model_path_edit.setText(config.get('yolo_model_path') or '')
             if 'model_size' in config:
                 models = list(YOLOV8_MODELS.keys())
                 if config['model_size'] in models:
@@ -2342,8 +2576,8 @@ class MainWindow(QMainWindow):
                 self.sam3_morph_slider.setValue(v)
                 if hasattr(self, 'sam3_morph_spin'):
                     self.sam3_morph_spin.setValue(v)
-            if hasattr(self, 'sam3_output_mode_combo') and ('sam3_output_mode' in config or 'sam3_alpha_export' in config or 'sam3_alpha_only' in config):
-                mode = config.get('sam3_output_mode', '')
+            if hasattr(self, 'sam3_output_mode_combo') and ('mask_output_mode' in config or 'sam3_output_mode' in config or 'sam3_alpha_export' in config or 'sam3_alpha_only' in config):
+                mode = config.get('mask_output_mode') or config.get('sam3_output_mode', '')
                 if not mode:
                     # backward compat: derive from old bool flags
                     if config.get('sam3_alpha_only', False):
@@ -2434,17 +2668,28 @@ class MainWindow(QMainWindow):
     def on_masking_engine_changed(self, index: int):
         engine = self._normalize_masking_engine(self.masking_engine_combo.currentData())
         is_sam3 = engine == "sam3_cpp"
+        self._refresh_yolo_model_size_options()
         if hasattr(self, 'masking_categories_card'):
             self.masking_categories_card.setVisible(not is_sam3)
         self.model_size_container.setVisible(not is_sam3)
+        self.yolo_model_path_container.setVisible(not is_sam3)
         self.confidence_container.setVisible(not is_sam3)
+        self.mask_output_mode_container.setVisible(True)
         self.sam3_options_container.setVisible(is_sam3)
         self.sam3_preview_card.setVisible(is_sam3)
         if is_sam3:
-            self.engine_description_label.setText("Default masking engine | Extraction preview frame feeds SAM3 automatically | full sam3-q4_0.ggml expected")
+            self.engine_description_label.setText("Primary masking engine | extraction preview feeds SAM 3 automatically | bundled model and executable expected")
         else:
             self.confidence_spin.setEnabled(True)
-            self.engine_description_label.setText("Masking runtime selected from normalized config")
+            available = self._get_available_yolo_model_sizes()
+            custom_model_text = self.yolo_model_path_edit.text().strip() if hasattr(self, 'yolo_model_path_edit') else ''
+            if custom_model_text:
+                self.engine_description_label.setText(f"Secondary masking engine | custom YOLO ONNX model | masks equirect first and reuses alpha before split")
+            elif available:
+                pretty_sizes = ', '.join(size.title() for size in available)
+                self.engine_description_label.setText(f"Secondary masking engine | ONNX YOLO segmentation | bundled sizes: {pretty_sizes} | default PNG flow masks equirect before split")
+            else:
+                self.engine_description_label.setText("Secondary masking engine | ONNX YOLO segmentation | no bundled model detected in this build")
         if hasattr(self, 'sam3_preview_widget'):
             self.sam3_preview_widget.refresh_state()
         self._update_masking_runtime_status()
@@ -2506,6 +2751,8 @@ class MainWindow(QMainWindow):
             return
 
         details = []
+        available_yolo_sizes = self._get_available_yolo_model_sizes()
+        custom_model_text = self.yolo_model_path_edit.text().strip() if hasattr(self, 'yolo_model_path_edit') else ''
         try:
             if has_bundled_onnx_runtime():
                 details.append('ONNX Runtime: packaged (checked on use)')
@@ -2518,15 +2765,26 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             details.append(f'ONNX Runtime: error ({exc})')
 
+        if custom_model_text:
+            custom_model = Path(custom_model_text).expanduser()
+            if custom_model.exists() and custom_model.is_file():
+                details.append(f'YOLO: custom model {custom_model.name}')
+            else:
+                details.append('YOLO: custom model missing')
+        elif available_yolo_sizes:
+            details.append('YOLO: bundled ' + ', '.join(size.title() for size in available_yolo_sizes) + ' ONNX model')
+        else:
+            details.append('YOLO: bundled model not found')
+
         details.append('PyTorch: installed' if has_usable_torch_runtime() else 'PyTorch: not bundled')
         segmenter_text = self._get_sam3_segmenter_text()
         model_text = self._get_sam3_model_text()
         segmenter = Path(segmenter_text) if segmenter_text else None
         model = Path(model_text) if model_text else None
         if segmenter and model and segmenter.exists() and model.exists():
-            details.append('SAM3.cpp: ready')
+            details.append('SAM 3: ready')
         else:
-            details.append('SAM3.cpp: external exe/model not configured')
+            details.append('SAM 3: external exe/model not configured')
         self.masking_runtime_label.setText(' | '.join(details))
 
     def _update_reconstruction_backend_status(self):
@@ -2822,7 +3080,6 @@ class MainWindow(QMainWindow):
         self.open_settings()
     
     def analyze_video_file(self):
-        from src.extraction import FrameExtractor
         input_file = self.input_file_edit.text()
         if not input_file or not Path(input_file).exists():
             return
@@ -2836,10 +3093,33 @@ class MainWindow(QMainWindow):
             return
 
         self._auto_apply_insv_sdk_defaults(input_file)
-        
-        extractor = FrameExtractor()
-        info = extractor.get_video_info(input_file)
-        
+
+        if self._input_analysis_worker and self._input_analysis_worker.isRunning():
+            self._pending_input_analysis = input_file
+            return
+
+        self._start_input_analysis(input_file)
+
+    def _start_input_analysis(self, input_file: str):
+        self._active_input_analysis = input_file
+        self._pending_input_analysis = None
+        self.file_metadata_label.setText("Analyzing input file metadata…")
+        self.file_metadata_label.setProperty("state", "warn")
+        self._refresh_widget_style(self.file_metadata_label)
+
+        worker = _InputAnalysisWorker(input_file, self)
+        self._input_analysis_worker = worker
+        worker.completed.connect(self._on_input_analysis_completed)
+        worker.failed.connect(self._on_input_analysis_failed)
+        worker.finished.connect(self._on_input_analysis_finished)
+        worker.start()
+
+    def _on_input_analysis_completed(self, input_file: str, info: dict):
+        if input_file != self._active_input_analysis:
+            return
+        if self.input_file_edit.text().strip() != input_file:
+            return
+
         if info.get('success'):
             camera_model = (info.get('camera_model') or '').strip()
             camera_model_source = (info.get('camera_model_source') or '').strip()
@@ -2865,7 +3145,7 @@ class MainWindow(QMainWindow):
                 self.stage1_eq_preview.set_preview_timestamp_maximum(duration)
                 current_preview_time = self.start_time_spin.value() if not self.full_video_check.isChecked() else 0.0
                 self.stage1_eq_preview.set_preview_timestamp(min(current_preview_time, duration))
-            
+
             w = info.get('width', 0)
             h = info.get('height', 0)
             if w > 0 and h > 0:
@@ -2884,6 +3164,22 @@ class MainWindow(QMainWindow):
             self.file_metadata_label.setText(f"Error: {info.get('error', 'Unknown')}")
             self.file_metadata_label.setProperty("state", "error")
             self._refresh_widget_style(self.file_metadata_label)
+
+    def _on_input_analysis_failed(self, input_file: str, error: str):
+        if input_file != self._active_input_analysis:
+            return
+        if self.input_file_edit.text().strip() != input_file:
+            return
+        self.file_metadata_label.setText(f"Error: {error}")
+        self.file_metadata_label.setProperty("state", "error")
+        self._refresh_widget_style(self.file_metadata_label)
+
+    def _on_input_analysis_finished(self):
+        self._input_analysis_worker = None
+        if self._pending_input_analysis and self._pending_input_analysis != self._active_input_analysis:
+            pending_input = self._pending_input_analysis
+            self._pending_input_analysis = None
+            QTimer.singleShot(0, lambda path=pending_input: self._start_input_analysis(path))
 
     def _auto_apply_insv_sdk_defaults(self, input_file: str):
         """Enable FlowState and Direction Lock defaults when a new INSV file is analyzed."""
@@ -3083,6 +3379,8 @@ class MainWindow(QMainWindow):
 
             self.pipeline_config.update({
                 'masking_engine': self._normalize_masking_engine(self.masking_engine_combo.currentData()),
+                'mask_output_mode': self._get_mask_output_mode(),
+                'yolo_model_path': self.yolo_model_path_edit.text().strip() if hasattr(self, 'yolo_model_path_edit') else '',
                 'model_size': self.model_size_combo.currentData(),
                 'confidence_threshold': self.confidence_spin.value(),
                 'use_gpu': self.use_gpu_check.isChecked(),
@@ -3095,9 +3393,9 @@ class MainWindow(QMainWindow):
                 'sam3_seam_aware_refinement': getattr(self, 'sam3_seam_aware_refinement', True),
                 'sam3_edge_sharpen_strength': self.sam3_edge_sharpen_spin.value() if hasattr(self, 'sam3_edge_sharpen_spin') else 0.75,
                 'sam3_morph_radius': self.sam3_morph_spin.value() if hasattr(self, 'sam3_morph_spin') else (self.sam3_morph_slider.value() if hasattr(self, 'sam3_morph_slider') else 0),
-                'sam3_output_mode': self.sam3_output_mode_combo.currentData() if hasattr(self, 'sam3_output_mode_combo') else 'masks_only',
-                'sam3_alpha_export': (self.sam3_output_mode_combo.currentData() in ('alpha_only', 'both')) if hasattr(self, 'sam3_output_mode_combo') else False,
-                'sam3_alpha_only': (self.sam3_output_mode_combo.currentData() == 'alpha_only') if hasattr(self, 'sam3_output_mode_combo') else False,
+                'sam3_output_mode': self._get_mask_output_mode(),
+                'sam3_alpha_export': self._get_mask_output_mode() in ('alpha_only', 'both'),
+                'sam3_alpha_only': self._get_mask_output_mode() == 'alpha_only',
                 'sam3_max_input_width': self.sam3_maxw_combo.currentData() if hasattr(self, 'sam3_maxw_combo') else 3840,
                 'sam3_score_threshold': self.sam3_score_spin.value() if hasattr(self, 'sam3_score_spin') else 0.5,
                 'sam3_nms_threshold': self.sam3_nms_spin.value() if hasattr(self, 'sam3_nms_spin') else 0.1,

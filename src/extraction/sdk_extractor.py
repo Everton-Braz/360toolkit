@@ -77,6 +77,17 @@ from src.utils.resource_path import get_base_path
 logger = logging.getLogger(__name__)
 
 
+def _subprocess_no_window_kwargs() -> dict:
+    kwargs = {}
+    if os.name == 'nt':
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= getattr(subprocess, 'STARTF_USESHOWWINDOW', 0)
+        kwargs['creationflags'] = creationflags
+        kwargs['startupinfo'] = startupinfo
+    return kwargs
+
+
 class IncompleteSDKExtractionError(RuntimeError):
     """Raised when MediaSDK exits or stalls before producing the requested frame set."""
 
@@ -321,7 +332,8 @@ class SDKExtractor:
                         subprocess.run(
                             ["cmd", "/c", "mklink", "/J", str(bin_models), str(sdk_models)],
                             check=True,
-                            capture_output=True
+                            capture_output=True,
+                            **_subprocess_no_window_kwargs(),
                         )
                         logger.info(f"[OK] Created models junction: {bin_models} -> {sdk_models}")
                     except Exception as e:
@@ -689,7 +701,8 @@ class SDKExtractor:
                 encoding='utf-8',
                 errors='replace',
                 cwd=sdk_cwd,  # CRITICAL: Run from SDK bin folder to find DLLs
-                env=env       # CRITICAL: Include _internal in PATH
+                env=env,      # CRITICAL: Include _internal in PATH
+                **_subprocess_no_window_kwargs(),
             )
             
             # Calculate watchdog thresholds.
@@ -776,7 +789,7 @@ class SDKExtractor:
 
                     try:
                         stdout, stderr = self._current_process.communicate(timeout=min(timeout_slice, remaining_runtime))
-                        returncode = self._current_process.returncode
+                        returncode = self._current_process.returncode if self._current_process is not None else returncode
                         self._current_process = None
                         break
                     except subprocess.TimeoutExpired:
@@ -784,14 +797,18 @@ class SDKExtractor:
                         if current_count >= frame_count:
                             logger.info("[OK] All requested frames are present - stopping SDK wait")
                             completion_detected = True
+                            process = self._current_process
                             try:
-                                self._current_process.terminate()
-                                stdout, stderr = self._current_process.communicate(timeout=10)
+                                if process is not None:
+                                    process.terminate()
+                                    stdout, stderr = process.communicate(timeout=10)
                             except Exception:
-                                self._current_process.kill()
-                                stdout, stderr = self._current_process.communicate()
+                                if process is not None:
+                                    process.kill()
+                                    stdout, stderr = process.communicate()
                             finally:
-                                returncode = self._current_process.returncode
+                                if process is not None:
+                                    returncode = process.returncode if process.returncode is not None else returncode
                                 self._current_process = None
                             break
 

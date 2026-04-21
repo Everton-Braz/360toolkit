@@ -1,4 +1,4 @@
-"""
+﻿"""
 ONNX-based Multi-Category Masking Module
 Lightweight replacement for PyTorch-based YOLO masking.
 
@@ -32,6 +32,8 @@ Mask Format (RealityScan Compatible):
 """
 
 import cv2
+import os
+import sys
 import numpy as np
 
 from src.pipeline.stage2_naming import perspective_output_sort_key
@@ -42,8 +44,48 @@ from typing import Optional, Tuple, List, Dict
 # Defer onnxruntime import to avoid build-time issues
 ONNX_AVAILABLE = False
 ort = None
+_DLL_DIR_HANDLES = []
+import re as _re
+_MASK_FRAME_RE = _re.compile(r'^frame_(\d+)_cam_(\d+)\.[^.]+$', _re.IGNORECASE)
+
+
+def _mask_input_sort_key(path_or_name):
+    candidate = Path(path_or_name)
+    match = _MASK_FRAME_RE.match(candidate.name)
+    if match:
+        return (0, int(match.group(1)), int(match.group(2)), candidate.as_posix().lower())
+    numbers = _re.findall(r'\d+', candidate.stem)
+    frame_id = int(numbers[-1]) if numbers else 0
+    return (1 if numbers else 2, frame_id, 0, candidate.as_posix().lower())
+
+
+def _prepare_onnxruntime_dll_search_path() -> None:
+    if os.name != 'nt' or not hasattr(os, 'add_dll_directory'):
+        return
+    candidates = []
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        base_path = Path(sys._MEIPASS)
+        candidates.extend([
+            base_path / 'onnxruntime' / 'capi',
+            base_path / 'numpy.libs',
+            base_path,
+        ])
+    else:
+        site_packages = Path(sys.executable).resolve().parent.parent / 'Lib' / 'site-packages'
+        candidates.extend([
+            site_packages / 'onnxruntime' / 'capi',
+            site_packages / 'numpy.libs',
+        ])
+    for candidate in candidates:
+        if candidate.exists():
+            try:
+                _DLL_DIR_HANDLES.append(os.add_dll_directory(str(candidate)))
+            except OSError:
+                pass
+
 
 try:
+    _prepare_onnxruntime_dll_search_path()
     import onnxruntime as ort
     ONNX_AVAILABLE = True
     logging.info(f"ONNX Runtime loaded successfully. Version: {ort.__version__}")
@@ -52,12 +94,24 @@ except ImportError as e:
 except Exception as e:
     logging.error(f"ONNX Runtime import failed: {e}", exc_info=True)
 
+# OpenCV DNN fallback — always present via the bundled cv2
+CV2DNN_AVAILABLE = hasattr(cv2, 'dnn') and hasattr(cv2.dnn, 'readNetFromONNX')
+
 from ..config.defaults import (
     DEFAULT_CONFIDENCE_THRESHOLD, MASKING_CATEGORIES,
     MASK_VALUE_REMOVE, MASK_VALUE_KEEP, DEFAULT_USE_GPU
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _opencv_dnn_cuda_supported() -> bool:
+    if not hasattr(cv2, 'cuda') or not hasattr(cv2.cuda, 'getCudaEnabledDeviceCount'):
+        return False
+    try:
+        return cv2.cuda.getCudaEnabledDeviceCount() > 0
+    except Exception:
+        return False
 
 
 # COCO class names (80 classes for YOLOv8)
@@ -97,47 +151,65 @@ class ONNXMasker:
             use_gpu: Enable GPU acceleration if available
             mask_dilation_pixels: Pixels to expand mask boundaries (fixes cutoff issues)
         """
-        if not ONNX_AVAILABLE:
-            raise ImportError("ONNX Runtime not installed. Run: pip install onnxruntime or onnxruntime-gpu")
-        
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.cancelled = False
         self.mask_dilation_pixels = mask_dilation_pixels
-        
+        self.backend = None   # 'onnxruntime' or 'cv2dnn'
+        self.session = None
+        self.net = None
+        self._cv2dnn_uses_gpu = False
+        self._cv2dnn_fallback_to_cpu = False
+
         logger.info(f"[ONNX] Mask dilation: {mask_dilation_pixels}px (expands boundaries to include attached objects)")
-        
+
         # Initialize enabled categories (all enabled by default)
         self.enabled_categories = {
             'persons': True,
             'personal_objects': True,
             'animals': True
         }
-        
-        # Select execution provider (GPU or CPU)
-        self.providers = self._select_providers(use_gpu)
-        logger.info(f"Using ONNX providers: {self.providers}")
-        
-        # Load ONNX model
-        self.session = self._load_model()
-        
-        # Get model input/output info
-        self.input_name = self.session.get_inputs()[0].name
-        self.output_names = [output.name for output in self.session.get_outputs()]
-        
-        # Get input shape
-        input_shape = self.session.get_inputs()[0].shape
-        self.input_height = input_shape[2] if len(input_shape) > 2 else 640
-        self.input_width = input_shape[3] if len(input_shape) > 3 else 640
-        
-        # Log active providers
-        active_providers = self.session.get_providers()
-        logger.info(f"[ONNX] Model loaded: {self.model_path.name}, input: {self.input_width}×{self.input_height}")
-        logger.info(f"[ONNX] Active providers: {active_providers}")
-        if 'CUDAExecutionProvider' in active_providers:
-            logger.info("[ONNX] 🚀 GPU acceleration ACTIVE")
-        else:
-            logger.warning("[ONNX] ⚠️ Running on CPU (GPU not active)")
+
+        _loaded = False
+
+        # ── Primary: onnxruntime ───────────────────────────────────────────
+        if ONNX_AVAILABLE:
+            try:
+                self.providers = self._select_providers(use_gpu)
+                logger.info(f"Using ONNX providers: {self.providers}")
+                self.session = self._load_model()
+                self.input_name = self.session.get_inputs()[0].name
+                self.output_names = [output.name for output in self.session.get_outputs()]
+                input_shape = self.session.get_inputs()[0].shape
+                self.input_height = input_shape[2] if len(input_shape) > 2 else 640
+                self.input_width = input_shape[3] if len(input_shape) > 3 else 640
+                active_providers = self.session.get_providers()
+                logger.info(f"[ONNX] Model loaded: {self.model_path.name}, input: {self.input_width}×{self.input_height}")
+                logger.info(f"[ONNX] Active providers: {active_providers}")
+                if 'CUDAExecutionProvider' in active_providers:
+                    logger.info("[ONNX] 🚀 GPU acceleration ACTIVE")
+                else:
+                    logger.warning("[ONNX] ⚠️ Running on CPU (GPU not active)")
+                self.backend = 'onnxruntime'
+                _loaded = True
+            except Exception as _ort_err:
+                logger.warning(f"[Masking] onnxruntime unavailable ({_ort_err}), switching to OpenCV DNN")
+
+        # ── Fallback: OpenCV DNN (bundled cv2, always present) ─────────────────
+        if not _loaded:
+            if not CV2DNN_AVAILABLE:
+                raise RuntimeError(
+                    "Neither onnxruntime nor cv2.dnn is available. "
+                    "Ensure the packaged app includes cv2 with DNN support."
+                )
+            self.net, self.output_names, self.input_height, self.input_width = \
+                self._load_model_cv2dnn(use_gpu)
+            self.input_name = None
+            self.backend = 'cv2dnn'
+            logger.info(
+                f"[cv2.dnn] Model loaded: {self.model_path.name}, "
+                f"input: {self.input_width}×{self.input_height}"
+            )
     
     def _select_providers(self, use_gpu: bool) -> List[str]:
         """Select ONNX Runtime execution providers (GPU or CPU)"""
@@ -148,7 +220,7 @@ class ONNXMasker:
             
             # Try CUDAExecutionProvider with optimized options
             if 'CUDAExecutionProvider' in available_providers:
-                logger.info("[ONNX] ✅ CUDA provider available - using GPU acceleration")
+                logger.info("[ONNX] Ô£à CUDA provider available - using GPU acceleration")
                 # Optimized CUDA settings for RTX 5070 Ti
                 cuda_options = {
                     'device_id': 0,
@@ -164,7 +236,7 @@ class ONNXMasker:
                     'CPUExecutionProvider'
                 ]
             else:
-                logger.warning("[ONNX] ⚠️ GPU requested but CUDA provider not available. Using CPU.")
+                logger.warning("[ONNX] ÔÜá´©Å GPU requested but CUDA provider not available. Using CPU.")
                 logger.warning(f"[ONNX] Available: {available_providers}")
                 logger.warning("[ONNX] Install: pip install onnxruntime-gpu")
                 return ['CPUExecutionProvider']
@@ -196,6 +268,55 @@ class ONNXMasker:
         except Exception as e:
             logger.error(f"Failed to load ONNX model: {e}")
             raise
+
+
+    def _load_model_cv2dnn(self, use_gpu: bool = True):
+        """Load ONNX model via OpenCV DNN (fallback when onnxruntime is unavailable)."""
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"ONNX model not found: {self.model_path}")
+        net = cv2.dnn.readNetFromONNX(str(self.model_path))
+        self._configure_cv2dnn_backend(net, use_gpu=use_gpu)
+        output_names = net.getUnconnectedOutLayersNames()
+        logger.info(f"[cv2.dnn] Output layers: {output_names}")
+        return net, list(output_names), 640, 640
+
+    def _configure_cv2dnn_backend(self, net, use_gpu: bool) -> None:
+        if use_gpu and _opencv_dnn_cuda_supported():
+            try:
+                net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+                net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+                self._cv2dnn_uses_gpu = True
+                logger.info("[cv2.dnn] CUDA backend enabled")
+                return
+            except Exception as error:
+                logger.warning(f"[cv2.dnn] CUDA backend unavailable ({error}); falling back to CPU")
+
+        net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        self._cv2dnn_uses_gpu = False
+        logger.info("[cv2.dnn] CPU mode selected")
+
+    def _run_inference(self, input_tensor: np.ndarray) -> list:
+        """Run inference using whichever backend is active."""
+        if self.backend == 'onnxruntime':
+            return self.session.run(self.output_names, {self.input_name: input_tensor})
+        # cv2.dnn backend
+        try:
+            self.net.setInput(input_tensor)
+            raw = self.net.forward(list(self.output_names))
+        except cv2.error as error:
+            if self._cv2dnn_uses_gpu and not self._cv2dnn_fallback_to_cpu:
+                logger.warning(f"[cv2.dnn] GPU inference failed ({error}); retrying on CPU")
+                self._cv2dnn_fallback_to_cpu = True
+                self._configure_cv2dnn_backend(self.net, use_gpu=False)
+                self.net.setInput(input_tensor)
+                raw = self.net.forward(list(self.output_names))
+            else:
+                raise
+        result = []
+        for out in raw:
+            result.append(out if out.ndim >= 3 else out[np.newaxis])
+        return result
     
     def set_enabled_categories(self, persons: bool = True, personal_objects: bool = True,
                               animals: bool = True):
@@ -532,9 +653,9 @@ class ONNXMasker:
             # Preprocess image
             input_tensor = self._preprocess(image)
             
-            # Run ONNX inference
-            outputs = self.session.run(self.output_names, {self.input_name: input_tensor})
-            
+            # Run inference (onnxruntime or cv2.dnn)
+            outputs = self._run_inference(input_tensor)
+
             # Postprocess outputs
             mask = self._postprocess(outputs, original_shape)
             
@@ -564,8 +685,8 @@ class ONNXMasker:
             input_tensor = self._preprocess(image)
             
             # Run inference
-            outputs = self.session.run(self.output_names, {self.input_name: input_tensor})
-            
+            outputs = self._run_inference(input_tensor)
+
             # Quick check for detections
             detections = outputs[0][0]
             
@@ -596,7 +717,7 @@ class ONNXMasker:
             
         except Exception as e:
             logger.error(f"Error checking for objects: {e}")
-            return False
+            raise
     
     def process_batch(self, input_dir: str, output_dir: str,
                      save_visualization: bool = False,
@@ -696,7 +817,8 @@ class ONNXMasker:
                     logger.error(f"Error processing {img_path.name}: {e}")
             
             # Clear GPU cache after each batch
-            if 'CUDAExecutionProvider' in self.session.get_providers():
+            if (self.backend == 'onnxruntime' and self.session is not None
+                    and 'CUDAExecutionProvider' in self.session.get_providers()):
                 import gc
                 gc.collect()
         

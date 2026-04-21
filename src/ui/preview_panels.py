@@ -4,6 +4,7 @@ Real-time preview for perspective split with circular compass.
 """
 
 import cv2
+import shutil
 import subprocess
 import numpy as np
 from pathlib import Path
@@ -665,6 +666,14 @@ class _SDKPreviewWorker(QThread):
         import tempfile
         tmp = tempfile.mkdtemp(prefix="360tk_prev_")
         try:
+            if self._extractor is None:
+                from ..extraction.sdk_extractor import SDKExtractor
+                self._extractor = SDKExtractor()
+
+            if not self._extractor or not self._extractor.is_available():
+                self.failed.emit("SDK not available — configure SDK path in Settings")
+                return
+
             frames = self._extractor.extract_frames(
                 input_path   = self._input_path,
                 output_dir   = tmp,
@@ -887,6 +896,7 @@ class EquirectPreviewWidget(QWidget):
     """
 
     preview_timestamp_changed = pyqtSignal(float)
+    preview_frame_available = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1018,11 +1028,11 @@ class EquirectPreviewWidget(QWidget):
             if suffix == '.insv':
                 self._set_preview_time_controls_enabled(True)
                 self._status_lbl.setText("Ready — extracting preview frame…")
-                self._extract_preview()
+                self._schedule_timestamp_preview_refresh()
             elif suffix in {'.mp4', '.mov', '.avi', '.mkv'}:
                 self._set_preview_time_controls_enabled(True)
                 self._status_lbl.setText("Ready — loading video still preview…")
-                self._extract_preview()
+                self._schedule_timestamp_preview_refresh()
             elif suffix in {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}:
                 self.load_image_path(self._video_path)
             else:
@@ -1146,10 +1156,48 @@ class EquirectPreviewWidget(QWidget):
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
         suffix = Path(path).suffix.lower()
+        if suffix == '.insv':
+            return self._extract_sdk_preview_to_path(path, target_path)
         if suffix in {'.mp4', '.mov', '.avi', '.mkv'}:
             return self._extract_standard_video_preview_to_path(path, target_path)
 
         return None
+
+    def _extract_sdk_preview_to_path(self, path: str, output_path: Path) -> Optional[Path]:
+        if self._sdk is None:
+            try:
+                from ..extraction.sdk_extractor import SDKExtractor
+                self._sdk = SDKExtractor()
+            except Exception:
+                return None
+
+        if not self._sdk or not self._sdk.is_available():
+            return None
+
+        import tempfile
+
+        temp_output_dir = Path(tempfile.mkdtemp(prefix='360tk_sam3_sdk_'))
+        try:
+            frames = self._sdk.extract_frames(
+                input_path=path,
+                output_dir=str(temp_output_dir),
+                fps=0.5,
+                quality='good',
+                output_format='jpg',
+                start_time=self._preview_timestamp,
+                end_time=self._preview_timestamp + 2.0,
+            )
+            if not frames:
+                return None
+
+            extracted_path = Path(frames[0])
+            if not extracted_path.exists():
+                return None
+
+            shutil.copy2(extracted_path, output_path)
+            return output_path
+        except Exception:
+            return None
 
     def _extract_standard_video_preview_to_path(self, path: str, output_path: Path) -> Optional[Path]:
         if self._ffmpeg_extractor is None:
@@ -1207,6 +1255,7 @@ class EquirectPreviewWidget(QWidget):
         self._orig_bgr = img_bgr.copy()
         self._last_rendered_bgr = None
         self._trigger_render()
+        self.preview_frame_available.emit()
 
     def _trigger_render(self):
         if self._orig_bgr is not None:
@@ -1301,18 +1350,6 @@ class EquirectPreviewWidget(QWidget):
 
         if is_lens_method:
             self._extract_lens_preview()
-            return
-
-        if self._sdk is None:
-            try:
-                from ..extraction.sdk_extractor import SDKExtractor
-                self._sdk = SDKExtractor()
-            except Exception as exc:
-                self._status_lbl.setText(f"SDK init failed: {exc}")
-                return
-
-        if not self._sdk.is_available():
-            self._status_lbl.setText("SDK not available — configure SDK path in Settings")
             return
 
         if self._sdk_worker and self._sdk_worker.isRunning():

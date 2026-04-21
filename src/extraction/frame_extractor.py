@@ -20,6 +20,17 @@ from src.config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
+def _subprocess_no_window_kwargs() -> dict:
+    kwargs = {}
+    if os.name == 'nt':
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= getattr(subprocess, 'STARTF_USESHOWWINDOW', 0)
+        kwargs['creationflags'] = creationflags
+        kwargs['startupinfo'] = startupinfo
+    return kwargs
+
+
 INSV_TRAILER_SCAN_BYTES = 1024 * 1024
 INSV_TRAILER_CAMERA_STRINGS = [
     (b'antigravity a1', 'Antigravity A1'),
@@ -307,7 +318,8 @@ class FrameExtractor:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            **_subprocess_no_window_kwargs(),
         )
         
         # Monitor progress (simplified)
@@ -523,6 +535,7 @@ class FrameExtractor:
                 cmd,
                 capture_output=True,
                 text=True,
+                **_subprocess_no_window_kwargs(),
                 encoding='utf-8',
                 errors='replace',
                 timeout=15,
@@ -646,7 +659,8 @@ class FrameExtractor:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            **_subprocess_no_window_kwargs(),
         )
         stdout, stderr = process.communicate()
 
@@ -767,7 +781,8 @@ class FrameExtractor:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                **_subprocess_no_window_kwargs(),
             )
             
             stdout, stderr = process.communicate()
