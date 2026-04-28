@@ -882,6 +882,19 @@ class MainWindow(QMainWindow):
         self.output_format_combo.setFixedWidth(200)
         card_extract.addWidget(FormRow("Output Format:", self.output_format_combo))
 
+        self.dual_lens_layout_widget = QWidget()
+        dual_lens_layout = QHBoxLayout(self.dual_lens_layout_widget)
+        dual_lens_layout.setContentsMargins(0, 0, 0, 0)
+        dual_lens_layout.setSpacing(8)
+        self.dual_lens_layout_combo = QComboBox()
+        self.dual_lens_layout_combo.addItem("Single Folder (frame_00001_lens1.png / frame_00001_lens2.png)", "flat")
+        self.dual_lens_layout_combo.addItem("Separate Folders (lens_1/ and lens_2/)", "separate")
+        self.dual_lens_layout_combo.setMinimumWidth(360)
+        dual_lens_layout.addWidget(self.dual_lens_layout_combo)
+        dual_lens_layout.addStretch()
+        self.dual_lens_layout_widget.setVisible(False)
+        card_extract.addWidget(FormRow("Dual-Lens Folder Mode:", self.dual_lens_layout_widget))
+
         layout.addWidget(card_extract)
 
         # ── Media Processing card (SDK only) ─────────────────────────────────
@@ -1232,6 +1245,7 @@ class MainWindow(QMainWindow):
         self.mask_input_source_combo = QComboBox()
         self.mask_input_source_combo.addItem("Auto", "auto")
         self.mask_input_source_combo.addItem("Perspective Views", "perspective")
+        self.mask_input_source_combo.addItem("Fisheye Frames", "fisheye")
         self.mask_input_source_combo.addItem("Equirect / Extracted Frames", "equirect")
         self.mask_input_source_combo.currentIndexChanged.connect(self._on_stage3_preview_source_changed)
         card_model.addWidget(FormRow("Input Source:", self.mask_input_source_combo))
@@ -1253,7 +1267,7 @@ class MainWindow(QMainWindow):
         card_model.addWidget(FormRow("Input Folder:", stage3_input_widget, "Used when running Stage 3 without Stage 1/2; leave empty for auto-discovery"))
 
         auto_note = QLabel(
-            "Auto uses perspective views when available and falls back to extracted frames. "
+            "Auto uses perspective views when available and falls back to extracted frames (including fisheye). "
             "Masks are stored separately as masks_perspective or masks_equirect."
         )
         auto_note.setProperty("role", "secondary")
@@ -2046,6 +2060,7 @@ class MainWindow(QMainWindow):
             'sdk_quality': self.sdk_quality_combo.currentData(),
             'sdk_resolution': self.sdk_resolution_combo.currentData(),
             'output_format': _normalize_image_format(self.output_format_combo.currentData(), 'jpg'),
+            'dual_lens_output_layout': self.dual_lens_layout_combo.currentData() if hasattr(self, 'dual_lens_layout_combo') else 'flat',
             'stage2_enabled': self.stage2_enable.isChecked(),
             'transform_type': self.stage2_method_combo.currentData(),
             'stage2_format': stage2_format,
@@ -2168,7 +2183,7 @@ class MainWindow(QMainWindow):
         return 'auto'
 
     def _legacy_mask_target_from_source(self, source: str) -> str:
-        if source == 'equirect':
+        if source in {'equirect', 'fisheye'}:
             return 'equirect'
         return 'split'
 
@@ -2418,7 +2433,7 @@ class MainWindow(QMainWindow):
 
         if source == 'perspective':
             return perspective_dir if self._directory_has_images(perspective_dir) else None
-        if source == 'equirect':
+        if source in {'equirect', 'fisheye'}:
             return equirect_dir if self._directory_has_images(equirect_dir) else None
 
         ordered = []
@@ -2443,6 +2458,7 @@ class MainWindow(QMainWindow):
         mask_dirs = {
             'perspective': output_root / 'masks_perspective',
             'equirect': output_root / 'masks_equirect',
+            'fisheye': output_root / 'masks_fisheye',
             'custom': output_root / 'masks_custom',
         }
         legacy_dir = output_root / 'masks'
@@ -2462,7 +2478,7 @@ class MainWindow(QMainWindow):
         ordered = []
         if image_source in mask_dirs:
             ordered.append(mask_dirs[image_source])
-        ordered.extend([legacy_dir, mask_dirs['perspective'], mask_dirs['equirect'], mask_dirs['custom']])
+        ordered.extend([legacy_dir, mask_dirs['perspective'], mask_dirs['equirect'], mask_dirs['fisheye'], mask_dirs['custom']])
         for folder in ordered:
             existing = _existing(folder)
             if existing:
@@ -2497,6 +2513,10 @@ class MainWindow(QMainWindow):
                 idx = self.output_format_combo.findData(_normalize_image_format(config['output_format'], 'jpg'))
                 if idx >= 0:
                     self.output_format_combo.setCurrentIndex(idx)
+            if 'dual_lens_output_layout' in config and hasattr(self, 'dual_lens_layout_combo'):
+                idx = self.dual_lens_layout_combo.findData(config['dual_lens_output_layout'])
+                if idx >= 0:
+                    self.dual_lens_layout_combo.setCurrentIndex(idx)
             if 'stage2_enabled' in config:
                 self.stage2_enable.setChecked(config['stage2_enabled'])
             if 'transform_type' in config:
@@ -2622,8 +2642,11 @@ class MainWindow(QMainWindow):
     def on_extraction_method_changed(self, index: int):
         method = self.extraction_method_combo.currentData()
         is_sdk = method in ['sdk', 'sdk_stitching']
+        is_dual_lens = method in ['ffmpeg_dual_lens', 'ffmpeg_lens1', 'ffmpeg_lens2']
         self.sdk_quality_widget.setVisible(is_sdk)
         self.sdk_res_widget.setVisible(is_sdk)
+        if hasattr(self, 'dual_lens_layout_widget'):
+            self.dual_lens_layout_widget.setVisible(is_dual_lens)
         if hasattr(self, 'stage1_media_card'):
             self.stage1_media_card.setVisible(is_sdk)
         # Update preview to reflect the newly selected extraction mode
@@ -3311,6 +3334,7 @@ class MainWindow(QMainWindow):
             'sdk_quality': self.sdk_quality_combo.currentData(),
             'sdk_resolution': self.sdk_resolution_combo.currentData(),
             'output_format': _normalize_image_format(self.output_format_combo.currentData(), 'jpg'),
+            'dual_lens_output_layout': self.dual_lens_layout_combo.currentData() if hasattr(self, 'dual_lens_layout_combo') else 'flat',
             'transform_type': stage2_method,
             'stage2_numbering_mode': self.stage2_numbering_combo.currentData() if hasattr(self, 'stage2_numbering_combo') else DEFAULT_STAGE2_NUMBERING_MODE,
             'stage2_perspective_layout': self.stage2_layout_combo.currentData() if hasattr(self, 'stage2_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,

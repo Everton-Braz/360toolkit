@@ -10,6 +10,7 @@ import cv2
 import json
 import subprocess
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Dict, Optional, Callable, List
@@ -163,6 +164,7 @@ class FrameExtractor:
                       start_time: float = 0.0,
                       end_time: Optional[float] = None,
                       lens_mode: str = 'both',
+                      lens_output_layout: str = 'flat',
                       progress_callback: Optional[Callable] = None) -> Dict:
         """
         Extract frames from video file with dual-lens support and time range selection.
@@ -175,6 +177,7 @@ class FrameExtractor:
             start_time: Start time in seconds (default: 0.0)
             end_time: End time in seconds (None = extract until end)
             lens_mode: 'both', 'lens1', or 'lens2' for dual-stream files
+            lens_output_layout: 'flat' for single folder naming, 'separate' for lens subfolders
             progress_callback: Optional callback(current, total, message)
             
         Returns:
@@ -231,11 +234,11 @@ class FrameExtractor:
                 elif method == 'ffmpeg_v360_dual':
                     return self._extract_with_ffmpeg_v360_dual(input_path, output_path, fps, start_time, end_time, progress_callback)
                 elif method == 'ffmpeg_dual_lens':
-                    return self._extract_dual_lens_ffmpeg(input_path, output_path, fps, start_time, end_time, 'both', progress_callback)
+                    return self._extract_dual_lens_ffmpeg(input_path, output_path, fps, start_time, end_time, 'both', lens_output_layout, progress_callback)
                 elif method == 'ffmpeg_lens1':
-                    return self._extract_dual_lens_ffmpeg(input_path, output_path, fps, start_time, end_time, 'lens1', progress_callback)
+                    return self._extract_dual_lens_ffmpeg(input_path, output_path, fps, start_time, end_time, 'lens1', lens_output_layout, progress_callback)
                 elif method == 'ffmpeg_lens2':
-                    return self._extract_dual_lens_ffmpeg(input_path, output_path, fps, start_time, end_time, 'lens2', progress_callback)
+                    return self._extract_dual_lens_ffmpeg(input_path, output_path, fps, start_time, end_time, 'lens2', lens_output_layout, progress_callback)
             elif method.startswith('opencv_'):
                 # OpenCV methods removed for size optimization
                 logger.error(f"OpenCV extraction methods have been removed. Use FFmpeg or SDK instead.")
@@ -691,7 +694,7 @@ class FrameExtractor:
 
     def _extract_dual_lens_ffmpeg(self, input_path: Path, output_path: Path,
                                    fps: float, start_time: float, end_time: Optional[float],
-                                   lens_mode: str, progress_callback: Optional[Callable]) -> Dict:
+                                   lens_mode: str, lens_output_layout: str, progress_callback: Optional[Callable]) -> Dict:
         """
         Extract frames from dual-lens video using FFmpeg (lossless stream extraction).
         
@@ -701,13 +704,17 @@ class FrameExtractor:
         Based on WORKING_WITH_DUAL_STREAM_360_CAMERAS.md best practices:
         - Uses -map 0:v:0 for lens 1 (front fisheye)
         - Uses -map 0:v:1 for lens 2 (back fisheye)
-        - Creates organized folder structure: lens_1/ and lens_2/
+        - Supports both flat output naming and separate lens folders
         - Lossless extraction with -c copy for streams
         
         Args:
             lens_mode: 'both', 'lens1', or 'lens2'
+            lens_output_layout: 'flat' or 'separate'
         """
-        logger.info(f"Extracting dual-lens frames with FFmpeg (mode: {lens_mode})")
+        logger.info(f"Extracting dual-lens frames with FFmpeg (mode: {lens_mode}, layout: {lens_output_layout})")
+        output_layout = str(lens_output_layout or 'flat').strip().lower()
+        if output_layout not in {'flat', 'separate'}:
+            output_layout = 'flat'
         
         # CRITICAL VALIDATION: Check if this is actually a dual-stream file
         file_ext = input_path.suffix.lower()
@@ -740,15 +747,17 @@ class FrameExtractor:
             lenses_to_extract = [('lens_2', 1)]
         
         for lens_name, stream_index in lenses_to_extract:
-            # Use flat naming with lens suffix directly in output_path (e.g. frame_00001_lens1.png)
-            # This avoids subdirectories that confuse downstream tools (SphereSfM, COLMAP)
             lens_suffix = lens_name.replace('_', '')  # 'lens_1' -> 'lens1', 'lens_2' -> 'lens2'
-            output_path.mkdir(parents=True, exist_ok=True)
+            lens_output_dir = output_path / lens_name if output_layout == 'separate' else output_path
+            lens_output_dir.mkdir(parents=True, exist_ok=True)
             
-            logger.info(f"Extracting {lens_name} (stream {stream_index}) -> flat naming with _{lens_suffix} suffix...")
+            logger.info(f"Extracting {lens_name} (stream {stream_index}) -> {lens_output_dir}")
             
-            # Output pattern: frame_00001_lens1.png / frame_00001_lens2.png
-            output_pattern = str(output_path / f"frame_%05d_{lens_suffix}.png")
+            if output_layout == 'separate':
+                output_pattern = str(lens_output_dir / "frame_%05d.png")
+            else:
+                # Output pattern: frame_00001_lens1.png / frame_00001_lens2.png
+                output_pattern = str(lens_output_dir / f"frame_%05d_{lens_suffix}.png")
             
             # Build FFmpeg command for this lens
             cmd = [self.ffmpeg_path]
@@ -791,16 +800,18 @@ class FrameExtractor:
                 logger.error(f"FFmpeg failed for {lens_name}: {stderr}")
                 continue
             
-            # Count extracted frames for this lens (flat naming in output_path)
-            output_files = sorted(output_path.glob(f"frame_*_{lens_suffix}.png"))
+            if output_layout == 'separate':
+                output_files = sorted(lens_output_dir.glob("frame_*.png"))
+            else:
+                output_files = sorted(lens_output_dir.glob(f"frame_*_{lens_suffix}.png"))
             frame_count = len(output_files)
             
-            logger.info(f"Successfully extracted {frame_count} frames from {lens_name} (flat, _{lens_suffix} suffix)")
+            logger.info(f"Successfully extracted {frame_count} frames from {lens_name}")
             
             lens_outputs[lens_name] = {
                 'frame_count': frame_count,
                 'output_files': [str(f) for f in output_files],
-                'output_dir': str(output_path)
+                'output_dir': str(lens_output_dir)
             }
             
             total_frames += frame_count

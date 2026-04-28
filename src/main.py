@@ -161,6 +161,8 @@ def run_cli_mode():
     parser.add_argument("--output-format", default="jpg", help="Output image format")
     parser.add_argument("--end-time", type=float, default=0, help="End time in seconds (0=full)")
     parser.add_argument("--model-size", default="small", help="YOLO model size")
+    parser.add_argument("--masking-engine", choices=["yolo", "sam3_cpp"], default="yolo",
+                        help="Masking engine to use")
     parser.add_argument("--confidence", type=float, default=0.5, help="Detection confidence")
     parser.add_argument("--categories", nargs="*", default=["persons", "personal_objects"],
                         help="Masking categories")
@@ -220,7 +222,7 @@ def run_cli_mode():
         "stage2_numbering_mode": args.stage2_numbering,
         "stage2_perspective_layout": args.stage2_layout,
         "camera_config": {"cameras": cameras},
-        "masking_engine": "yolo",
+        "masking_engine": args.masking_engine,
         "model_size": args.model_size,
         "confidence_threshold": args.confidence,
         "masking_categories": {cat: True for cat in args.categories},

@@ -529,8 +529,9 @@ class SDKExtractor:
             quality = 'draft'
         
         input_path = Path(input_path)
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        requested_output_dir = Path(output_dir)
+        requested_output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir, using_staging_output_dir = self._prepare_sdk_output_dir(requested_output_dir)
         
         # Get video info for frame calculation
         video_info = self._get_video_info(input_path)
@@ -560,35 +561,45 @@ class SDKExtractor:
         frame_indices = list(range(start_frame, end_frame, frame_interval))
 
         if self._should_use_dense_overlap_strategy(source_requires_recovery, frame_indices, frame_interval, sdk_options):
-            return self._extract_dense_sequence_with_overlap(
-                input_path=str(input_path),
-                output_dir=str(output_dir),
-                fps=fps,
-                quality=quality,
-                resolution=resolution,
-                output_format=output_format,
-                start_time=start_time,
-                end_time=end_time,
-                progress_callback=progress_callback,
-                sdk_options=sdk_options,
-                video_fps=video_fps,
-                frame_indices=frame_indices,
-            )
+            try:
+                extracted_frames = self._extract_dense_sequence_with_overlap(
+                    input_path=str(input_path),
+                    output_dir=str(output_dir),
+                    fps=fps,
+                    quality=quality,
+                    resolution=resolution,
+                    output_format=output_format,
+                    start_time=start_time,
+                    end_time=end_time,
+                    progress_callback=progress_callback,
+                    sdk_options=sdk_options,
+                    video_fps=video_fps,
+                    frame_indices=frame_indices,
+                )
+                return self._finalize_staged_output(extracted_frames, output_dir, requested_output_dir)
+            finally:
+                if using_staging_output_dir:
+                    shutil.rmtree(output_dir, ignore_errors=True)
 
         if self._should_use_sparse_retry_strategy(source_requires_recovery, frame_indices, frame_interval, sdk_options):
-            return self._extract_sparse_indices_with_retry(
-                input_path=str(input_path),
-                output_dir=str(output_dir),
-                fps=fps,
-                quality=quality,
-                resolution=resolution,
-                output_format=output_format,
-                progress_callback=progress_callback,
-                sdk_options=sdk_options,
-                video_fps=video_fps,
-                frame_indices=frame_indices,
-                total_frames=total_frames,
-            )
+            try:
+                extracted_frames = self._extract_sparse_indices_with_retry(
+                    input_path=str(input_path),
+                    output_dir=str(output_dir),
+                    fps=fps,
+                    quality=quality,
+                    resolution=resolution,
+                    output_format=output_format,
+                    progress_callback=progress_callback,
+                    sdk_options=sdk_options,
+                    video_fps=video_fps,
+                    frame_indices=frame_indices,
+                    total_frames=total_frames,
+                )
+                return self._finalize_staged_output(extracted_frames, output_dir, requested_output_dir)
+            finally:
+                if using_staging_output_dir:
+                    shutil.rmtree(output_dir, ignore_errors=True)
         
         logger.info(f"Time range: {start_time}s - {end_time}s (frames {start_frame} - {end_frame})")
         logger.info(f"Extracting {len(frame_indices)} frames from {total_frames} total")
@@ -659,7 +670,6 @@ class SDKExtractor:
                 # Copy essential VC++ runtime DLLs to SDK bin (these are safe to copy)
                 if sdk_cwd and internal_dir.exists():
                     try:
-                        import shutil
                         deps_to_copy = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll',
                                         'concrt140.dll', 'zlib.dll', 'libiomp5md.dll']
                         for dep in deps_to_copy:
@@ -905,6 +915,12 @@ class SDKExtractor:
 
             if output_rotation:
                 self._rotate_output_frames(extracted_frames, output_rotation)
+
+            extracted_frames = self._finalize_staged_output(
+                extracted_frames,
+                output_dir,
+                requested_output_dir,
+            )
             
             # Verify image file sizes (detect black/empty images)
             if extracted_frames:
@@ -947,6 +963,8 @@ class SDKExtractor:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+            if using_staging_output_dir:
+                shutil.rmtree(output_dir, ignore_errors=True)
     
     def stop(self):
         """Stop currently running SDK process."""
@@ -986,6 +1004,49 @@ class SDKExtractor:
             'width': width,
             'height': height
         }
+
+    def _prepare_sdk_output_dir(self, requested_output_dir: Path) -> Tuple[Path, bool]:
+        """Use an ASCII-safe staging directory when the user-selected output path is not ASCII-only."""
+        if str(requested_output_dir).isascii():
+            return requested_output_dir, False
+
+        staging_root = Path(tempfile.gettempdir()) / "360toolkit_sdk_stage"
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(tempfile.mkdtemp(prefix="sdk_stage_", dir=str(staging_root)))
+        logger.warning(
+            "[SDK] Output path contains non-ASCII characters; staging extraction in %s before moving files to %s",
+            staging_dir,
+            requested_output_dir,
+        )
+        return staging_dir, True
+
+    def _finalize_staged_output(
+        self,
+        extracted_frames: List[str],
+        sdk_output_dir: Path,
+        requested_output_dir: Path,
+    ) -> List[str]:
+        """Move staged SDK frames into the requested output directory and rewrite returned paths."""
+        if sdk_output_dir == requested_output_dir:
+            return extracted_frames
+
+        requested_output_dir.mkdir(parents=True, exist_ok=True)
+        finalized_frames: List[str] = []
+
+        for frame_path in extracted_frames:
+            source_path = Path(frame_path)
+            destination_path = requested_output_dir / source_path.name
+            if destination_path.exists():
+                destination_path.unlink()
+            shutil.move(str(source_path), str(destination_path))
+            finalized_frames.append(str(destination_path))
+
+        logger.info(
+            "[SDK] Moved %d extracted frame(s) from ASCII-safe staging into %s",
+            len(finalized_frames),
+            requested_output_dir,
+        )
+        return finalized_frames
     
     def _detect_input_files(self, input_path: Path) -> List[str]:
         """

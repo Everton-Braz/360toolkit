@@ -341,8 +341,25 @@ class PipelineWorker(QThread):
         if resolved == (output_root / 'perspective_views'):
             return 'perspective'
         if resolved == (output_root / 'extracted_frames'):
-            return 'equirect'
+            return 'fisheye' if self._path_has_fisheye_naming(resolved) else 'equirect'
+        if self._path_has_fisheye_naming(resolved):
+            return 'fisheye'
         return 'custom'
+
+    def _path_has_fisheye_naming(self, folder: Optional[Path], sample_limit: int = 40) -> bool:
+        if not folder or not folder.exists() or not folder.is_dir():
+            return False
+        image_paths: list[Path] = []
+        for pattern in self._image_patterns():
+            image_paths.extend(path for path in folder.rglob(pattern) if path.is_file())
+        for path in sorted(image_paths)[:sample_limit]:
+            name = path.stem.lower()
+            parent = path.parent.name.lower()
+            if '_lens1' in name or '_lens2' in name:
+                return True
+            if parent in {'lens_1', 'lens_2', 'lens1', 'lens2'}:
+                return True
+        return False
 
     def _resolve_project_image_dir(
         self,
@@ -355,7 +372,7 @@ class PipelineWorker(QThread):
 
         if source == 'perspective':
             return perspective_dir if self._dir_has_images(perspective_dir) else None
-        if source == 'equirect':
+        if source in {'equirect', 'fisheye'}:
             return equirect_dir if self._dir_has_images(equirect_dir) else None
 
         ordered = [equirect_dir, perspective_dir] if alignment_mode == 'panorama_sfm' else [perspective_dir, equirect_dir]
@@ -469,6 +486,7 @@ class PipelineWorker(QThread):
         return {
             'perspective': output_root / 'alpha_cutouts_perspective',
             'equirect': output_root / 'alpha_cutouts',
+            'fisheye': output_root / 'alpha_cutouts',
             'custom': output_root / 'alpha_cutouts_custom',
         }.get(resolved_source, output_root / 'alpha_cutouts_custom')
 
@@ -763,6 +781,14 @@ class PipelineWorker(QThread):
                 results['stage3'] = stage3_result
                 stages_executed.append(3)
                 self.stage_complete.emit(3, stage3_result)
+
+                if stage3_result.get('cancelled') or self.is_cancelled:
+                    logger.info("Pipeline cancelled during Masking")
+                    results['success'] = False
+                    results['stages_executed'] = stages_executed
+                    results['error'] = 'Cancelled by user'
+                    self.finished.emit(results)
+                    return
                 
                 if not stage3_result.get('success'):
                     self.error.emit(f"Masking failed: {stage3_result.get('error')}")
@@ -1046,6 +1072,7 @@ class PipelineWorker(QThread):
                 method=method,
                 start_time=start_time,
                 end_time=end_time,
+                lens_output_layout=str(self.config.get('dual_lens_output_layout', 'flat') or 'flat'),
                 progress_callback=progress_callback
             )
 
@@ -1976,10 +2003,10 @@ class PipelineWorker(QThread):
                 resolved_source = self._detect_project_image_source(output_root, input_dir)
                 logger.info(f"[Masking] Using specified input: {input_dir}")
             else:
-                if requested_source == 'equirect' or (requested_source == 'auto' and (mask_target == 'equirect' or skip_transform)):
+                if requested_source in {'equirect', 'fisheye'} or (requested_source == 'auto' and (mask_target == 'equirect' or skip_transform)):
                     input_dir = output_root / 'extracted_frames'
-                    resolved_source = 'equirect'
-                    logger.info("[Equirect Masking] Masking extracted equirectangular frames")
+                    resolved_source = 'fisheye' if requested_source == 'fisheye' else 'equirect'
+                    logger.info("[Fisheye Masking] Masking extracted fisheye/equirect frames")
                 elif requested_source == 'perspective':
                     input_dir = output_root / 'perspective_views'
                     resolved_source = 'perspective'
@@ -2204,6 +2231,7 @@ class PipelineWorker(QThread):
                 masks_subdir = {
                     'perspective': 'masks_perspective',
                     'equirect': 'masks_equirect',
+                    'fisheye': 'masks_fisheye',
                     'custom': 'masks_custom',
                 }.get(resolved_source, 'masks_custom')
             output_dir = output_root / masks_subdir
@@ -2230,6 +2258,19 @@ class PipelineWorker(QThread):
                 progress_callback=progress_callback,
                 cancellation_check=cancellation_check
             )
+
+            if result.get('cancelled') or self.is_cancelled:
+                return {
+                    'success': False,
+                    'cancelled': True,
+                    'error': 'Cancelled by user',
+                    'masks_created': int(result.get('successful', 0)),
+                    'skipped': int(result.get('skipped', 0)),
+                    'failed': int(result.get('failed', 0)),
+                    'input_dir': str(input_dir),
+                    'mask_source': resolved_source,
+                    'masks_dir': str(output_dir),
+                }
 
             output_mode = self._mask_output_mode()
             if masking_engine == 'yolo' and output_mode in {'alpha_only', 'both'}:
@@ -2371,6 +2412,14 @@ class PipelineWorker(QThread):
             self.frame_extractor.cancel()
         if self.sdk_extractor:
             self.sdk_extractor.cancel()
+        if self.masker:
+            try:
+                if hasattr(self.masker, 'request_cancellation'):
+                    self.masker.request_cancellation()
+                elif hasattr(self.masker, 'cancel'):
+                    self.masker.cancel()
+            except Exception as exc:
+                logger.warning("Failed to propagate cancellation to masker: %s", exc)
         logger.info("Pipeline cancellation requested")
     
     def pause(self):
