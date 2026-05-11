@@ -129,6 +129,8 @@ from src.pipeline.metadata_handler import MetadataHandler
 from src.utils.dependency_provisioning import resolve_masking_model_path
 from src.utils.resource_path import get_resource_path
 from src.utils.color_correction import apply_color_corrections
+from src.utils.fisheye_mask import apply_circle_mask_to_image, clamp_radius_percent, is_dual_fisheye_method
+from src.utils.mask_output import build_related_output_path
 from src.config.defaults import (
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
     DEFAULT_OUTPUT_WIDTH, DEFAULT_OUTPUT_HEIGHT
@@ -546,7 +548,7 @@ class PipelineWorker(QThread):
             else:
                 rgba = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
 
-            mask_path = masks_dir / f'{image_path.stem}_mask.png'
+            mask_path = build_related_output_path(image_path, input_dir, masks_dir, '_mask.png')
             if mask_path.exists():
                 mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
                 if mask is None:
@@ -1087,6 +1089,16 @@ class PipelineWorker(QThread):
                                   if p.is_file() and p.suffix.lower() in _img_exts]
                 self._apply_frame_rotation(_all_files, _frame_rotation)
 
+            if result.get('success') and self.config.get('fisheye_circle_mask_enabled', False) and is_dual_fisheye_method(self.config.get('extraction_method')):
+                _all_files = result.get('output_files', result.get('frames', []))
+                if not _all_files:
+                    _img_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+                    _all_files = [str(p) for p in output_dir.rglob('*') if p.is_file() and p.suffix.lower() in _img_exts]
+                self._apply_fisheye_circle_mask_to_outputs(
+                    _all_files,
+                    self.config.get('fisheye_circle_mask_radius_percent', 94),
+                )
+
             return result
         
         except Exception as e:
@@ -1161,6 +1173,27 @@ class PipelineWorker(QThread):
                 logger.warning(f"[Rotation] Could not rotate {fp}: {_e}")
 
         logger.info(f"[Rotation] Rotated {rotated}/{len(frame_paths)} frames by {rotation}° CW")
+
+    def _apply_fisheye_circle_mask_to_outputs(self, frame_paths: list, radius_percent: int | float) -> None:
+        if not frame_paths:
+            return
+
+        radius = clamp_radius_percent(radius_percent)
+        updated = 0
+        for fp in frame_paths:
+            try:
+                path = Path(fp)
+                image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+                if image is None:
+                    continue
+                force_alpha = path.suffix.lower() in {'.png', '.tif', '.tiff'}
+                masked = apply_circle_mask_to_image(image, radius, force_alpha=force_alpha)
+                if cv2.imwrite(str(path), masked):
+                    updated += 1
+            except Exception as exc:
+                logger.warning(f"[Fisheye Circle Mask] Could not update {fp}: {exc}")
+
+        logger.info(f"[Fisheye Circle Mask] Updated {updated}/{len(frame_paths)} extracted fisheye frame(s)")
 
     def _execute_stage2(self) -> Dict:
         """Execute Perspective Splitting"""
@@ -2048,13 +2081,15 @@ class PipelineWorker(QThread):
                             model_path=self.config.get('sam3_model_path', ''),
                             sam3_image_exe=self.config.get('sam3_image_exe_path') or None,
                             use_gpu=use_gpu,
+                            backend_mode=self.config.get('sam3_backend_mode', 'auto'),
                             feather_radius=self.config.get('sam3_feather_radius', 8),
                             morph_radius=self.config.get('sam3_morph_radius', 0),
                             alpha_export=self.config.get('sam3_alpha_export', False),
                             alpha_only=self.config.get('sam3_alpha_only', False),
-                            max_input_width=self.config.get('sam3_max_input_width', 3840),
-                            score_threshold=self.config.get('sam3_score_threshold', 0.5),
+                            max_input_width=self.config.get('sam3_max_input_width', 0),
+                            score_threshold=self.config.get('sam3_score_threshold', 0.04),
                             nms_threshold=self.config.get('sam3_nms_threshold', 0.1),
+                            mask_logit_threshold=self.config.get('sam3_mask_logit_threshold', 0.75),
                             enable_refinement=self.config.get('sam3_enable_refinement', True),
                             refine_sky_only=self.config.get('sam3_refine_sky_only', True),
                             seam_aware_refinement=self.config.get('sam3_seam_aware_refinement', True),
@@ -2185,6 +2220,16 @@ class PipelineWorker(QThread):
                             objects_classes=masking_classes.get('personal_objects'),
                             animals_classes=masking_classes.get('animals')
                         )
+
+            enable_fisheye_circle_mask = bool(
+                self.config.get('fisheye_circle_mask_enabled', False)
+                and resolved_source == 'fisheye'
+            )
+            if self.masker is not None and hasattr(self.masker, 'set_fisheye_circle_mask'):
+                self.masker.set_fisheye_circle_mask(
+                    enable_fisheye_circle_mask,
+                    self.config.get('fisheye_circle_mask_radius_percent', 94),
+                )
             
             # Get input images based on skip_transform flag
             # NOTE: if stage3_input_dir was explicitly provided, the first resolution block

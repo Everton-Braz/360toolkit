@@ -15,6 +15,24 @@ logger = logging.getLogger(__name__)
 
 _APP_ROOT = Path(__file__).resolve().parents[2]
 
+_LEGACY_SAM3_MAX_INPUT_WIDTH = 3840
+_DEFAULT_SAM3_MAX_INPUT_WIDTH = 0
+
+
+def _sam3_output_dir_candidates(root: Path) -> list[Path]:
+    return [
+        root / 'bvv' / 'examples',
+        root / 'bvv' / 'examples' / 'Release',
+        root / 'build-vulkan-verified' / 'examples',
+        root / 'build-vulkan-verified' / 'examples' / 'Release',
+        root / 'build-vulkan' / 'examples',
+        root / 'build-vulkan' / 'examples' / 'Release',
+        root / 'build-vulkan-vs' / 'examples',
+        root / 'build-vulkan-vs' / 'examples' / 'Release',
+        root / 'build' / 'examples',
+        root / 'build' / 'examples' / 'Release',
+    ]
+
 
 def _resolve_default_sam3_root() -> Path:
     base_path = get_base_path()
@@ -25,9 +43,27 @@ def _resolve_default_sam3_root() -> Path:
 
 
 _DEFAULT_SAM3_ROOT = _resolve_default_sam3_root()
-_DEFAULT_SAM3_SEGMENTER = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'segment_persons.exe'
-_DEFAULT_SAM3_GUI = _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release' / 'sam3_image.exe'
-_DEFAULT_SAM3_MODEL = _DEFAULT_SAM3_ROOT / 'models' / 'sam3-q4_0.ggml'
+_DEFAULT_SAM3_OUTPUT_DIR = next(
+    (candidate for candidate in _sam3_output_dir_candidates(_DEFAULT_SAM3_ROOT) if candidate.exists()),
+    _DEFAULT_SAM3_ROOT / 'build' / 'examples' / 'Release'
+)
+_DEFAULT_SAM3_SEGMENTER = _DEFAULT_SAM3_OUTPUT_DIR / 'segment_persons.exe'
+_DEFAULT_SAM3_GUI = _DEFAULT_SAM3_OUTPUT_DIR / 'sam3_image.exe'
+
+
+def _sam3_model_candidates(root: Path) -> list[Path]:
+    return [
+        root / 'models' / 'sam3-f16.ggml',
+        root / 'models' / 'sam3-q8_0.ggml',
+        root / 'models' / 'sam3-q4_1.ggml',
+        root / 'models' / 'sam3-q4_0.ggml',
+    ]
+
+
+_DEFAULT_SAM3_MODEL = next(
+    (candidate for candidate in _sam3_model_candidates(_DEFAULT_SAM3_ROOT) if candidate.exists()),
+    _DEFAULT_SAM3_ROOT / 'models' / 'sam3-q4_0.ggml'
+)
 
 
 class ConfigManager:
@@ -120,6 +156,9 @@ class ConfigManager:
                 config = data
                 logger.info(f"Configuration loaded (legacy format): {filepath.stem}")
             
+            if isinstance(config, dict):
+                if config.get('sam3_max_input_width') == _LEGACY_SAM3_MAX_INPUT_WIDTH:
+                    config['sam3_max_input_width'] = _DEFAULT_SAM3_MAX_INPUT_WIDTH
             self.current_config = config
             return config
             
@@ -261,6 +300,7 @@ class ConfigManager:
             'model_size': 'small',
             'confidence_threshold': DEFAULT_CONFIDENCE_THRESHOLD,
             'use_gpu': DEFAULT_USE_GPU,
+            'sam3_backend_mode': 'auto',
             'sam3_segmenter_path': str(_DEFAULT_SAM3_SEGMENTER),
             'sam3_model_path': str(_DEFAULT_SAM3_MODEL),
             'sam3_image_exe_path': str(_DEFAULT_SAM3_GUI),
@@ -271,19 +311,20 @@ class ConfigManager:
             'sam3_edge_sharpen_strength': 0.75,
             'sam3_prompts': {
                 'persons':  True,
-                'bags':     True,
-                'phones':   True,
-                'hats':     True,
-                'helmets':  True,
-                'sky':      True,
+                'bags':     False,
+                'phones':   False,
+                'hats':     False,
+                'helmets':  False,
+                'sky':      False,
             },
             'sam3_custom_prompts': '',
             'sam3_morph_radius': 0,
             'sam3_output_mode': 'masks_only',
             'sam3_alpha_export': False,
-            'sam3_max_input_width': 3840,
-            'sam3_score_threshold': 0.5,
+            'sam3_max_input_width': _DEFAULT_SAM3_MAX_INPUT_WIDTH,
+            'sam3_score_threshold': 0.04,
             'sam3_nms_threshold': 0.1,
+            'sam3_mask_logit_threshold': 0.75,
             'masking_categories': {
                 'persons': True,
                 'personal_objects': True,

@@ -185,7 +185,7 @@ class SettingsDialog(QDialog):
         sam3_layout.addRow("segment_persons.exe:", self._build_path_row(self.sam3_segmenter_edit, self.browse_sam3_segmenter))
 
         self.sam3_model_edit = QLineEdit()
-        self.sam3_model_edit.setPlaceholderText("Path to sam3-q4_0.ggml or compatible model")
+        self.sam3_model_edit.setPlaceholderText("Path to sam3-f16.ggml or compatible full SAM3 model")
         sam3_layout.addRow("SAM3 model:", self._build_path_row(self.sam3_model_edit, self.browse_sam3_model))
 
         self.sam3_gui_edit = QLineEdit()

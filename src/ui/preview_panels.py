@@ -19,6 +19,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QRect, QThread, QTimer
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QBrush, QFont
 
 from ..transforms import E2PTransform
+from ..utils.fisheye_mask import apply_circle_mask_to_image, clamp_radius_percent, overlay_fisheye_mask
 
 
 class CircularCompassWidget(QWidget):
@@ -909,6 +910,9 @@ class EquirectPreviewWidget(QWidget):
         self._preview_mode: str                          = 'panorama'
         self._preview_timestamp: float                   = 0.0
         self._fisheye_mode:      bool                     = False
+        self._fisheye_circle_mask_enabled: bool           = False
+        self._fisheye_circle_mask_radius_percent: int     = 94
+        self._fisheye_mask_regions: list[tuple[int, int, int, int]] = []
         self._rotation:          int                      = 0   # 0 | 90 | 180 | 270
         self._fisheye_labels:    list                     = []  # [(text, x_fraction), ...]
         self._sdk         = None
@@ -1108,6 +1112,7 @@ class EquirectPreviewWidget(QWidget):
                 self._status_lbl.setText("Failed to read image file")
                 return
             self._preview_mode = 'panorama'
+            self._fisheye_mask_regions = []
             self._set_preview_time_controls_enabled(False)
             self._store_orig(img)
             self._status_lbl.setText(f"{Path(path).name}  ({img.shape[1]}×{img.shape[0]})")
@@ -1238,6 +1243,14 @@ class EquirectPreviewWidget(QWidget):
             shift = int((self._yaw / 360.0) * source.shape[1])
             source = np.roll(source, shift, axis=1)
 
+        if self._fisheye_mode and self._fisheye_circle_mask_enabled:
+            source = apply_circle_mask_to_image(
+                source,
+                self._fisheye_circle_mask_radius_percent,
+                regions=self._fisheye_mask_regions or None,
+                force_alpha=True,
+            )
+
         if self._rotation == 90:
             source = cv2.rotate(source, cv2.ROTATE_90_CLOCKWISE)
         elif self._rotation == 180:
@@ -1246,6 +1259,12 @@ class EquirectPreviewWidget(QWidget):
             source = cv2.rotate(source, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         return source
+
+    def set_fisheye_circle_mask(self, enabled: bool, radius_percent: int | float):
+        self._fisheye_circle_mask_enabled = bool(enabled)
+        self._fisheye_circle_mask_radius_percent = clamp_radius_percent(radius_percent)
+        if self._orig_bgr is not None:
+            self._trigger_render()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1292,6 +1311,13 @@ class EquirectPreviewWidget(QWidget):
         self._preview_time_spin.setEnabled(enabled)
 
     def _on_render_done(self, rendered_bgr: np.ndarray):
+        if self._fisheye_mode and self._fisheye_circle_mask_enabled:
+            rendered_bgr = overlay_fisheye_mask(
+                rendered_bgr,
+                self._fisheye_circle_mask_radius_percent,
+                regions=self._fisheye_mask_regions or None,
+            )
+
         # Apply rotation to the image
         if self._rotation == 90:
             rendered_bgr = cv2.rotate(rendered_bgr, cv2.ROTATE_90_CLOCKWISE)
@@ -1399,6 +1425,7 @@ class EquirectPreviewWidget(QWidget):
         self._preview_mode = 'standard_video'
         self._fisheye_mode = False
         self._fisheye_labels = []
+        self._fisheye_mask_regions = []
 
         video_stream_count = 1
         primary_stream_index = 0
@@ -1445,6 +1472,7 @@ class EquirectPreviewWidget(QWidget):
 
         self._fisheye_mode = False
         self._fisheye_labels = []
+        self._fisheye_mask_regions = []
         self._preview_mode = 'standard_video'
         self._status_lbl.setText(
             f"Video preview frame @ {self._preview_timestamp:.2f}s: {Path(path).name}  ({frame.shape[1]}×{frame.shape[0]})"
@@ -1524,6 +1552,7 @@ class EquirectPreviewWidget(QWidget):
         self._preview_mode = 'panorama'
         self._fisheye_mode = False   # equirectangular: yaw rolling enabled
         self._fisheye_labels = []     # no labels for equirectangular
+        self._fisheye_mask_regions = []
         self._store_orig(img)
 
     def _on_lens_frames_ready(self, frames: dict):
@@ -1550,6 +1579,11 @@ class EquirectPreviewWidget(QWidget):
             l2 = _resize(imgs['lens_2'])
             composite = np.hstack([l1, l2])
             self._fisheye_labels = [("Lens 1 (Front)", 0.0), ("Lens 2 (Back)", 0.5)]
+            half_width = composite.shape[1] // 2
+            self._fisheye_mask_regions = [
+                (0, 0, half_width, composite.shape[0]),
+                (composite.shape[1] - half_width, 0, half_width, composite.shape[0]),
+            ]
             status = "Dual fisheye — Lens 1 (front) | Lens 2 (back)"
         else:
             name, raw = next(iter(imgs.items()))
@@ -1560,6 +1594,11 @@ class EquirectPreviewWidget(QWidget):
             composite = np.hstack([r, pad]) if name == 'lens_1' else np.hstack([pad, r])
             x_frac = 0.0 if name == 'lens_1' else 0.5
             self._fisheye_labels = [(label, x_frac)]
+            half_width = composite.shape[1] // 2
+            if name == 'lens_1':
+                self._fisheye_mask_regions = [(0, 0, half_width, composite.shape[0])]
+            else:
+                self._fisheye_mask_regions = [(composite.shape[1] - half_width, 0, half_width, composite.shape[0])]
             status = f"Fisheye — {label}"
 
         fn = Path(self._video_path).name if self._video_path else ""

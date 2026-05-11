@@ -18,6 +18,7 @@ from typing import Optional, Tuple, List, Dict
 import sys
 
 from ..utils.runtime_backends import is_usable_torch_module
+from ..utils.mask_output import build_related_output_path
 
 # Defer torch/ultralytics imports to avoid PyInstaller analysis issues
 # These will be imported at runtime when actually needed
@@ -68,6 +69,7 @@ from ..config.defaults import (
     MASKING_CATEGORIES, MASK_VALUE_REMOVE, MASK_VALUE_KEEP,
     DEFAULT_USE_GPU, DEFAULT_BATCH_SIZE
 )
+from ..utils.fisheye_mask import build_fisheye_keep_mask, clamp_radius_percent, combine_with_keep_mask
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,8 @@ class MultiCategoryMasker:
         self.batch_size = batch_size
         self.model = None
         self.cancelled = False  # Cancellation flag for batch processing
+        self.fisheye_circle_mask_enabled = False
+        self.fisheye_circle_mask_radius_percent = 94
         
         # Initialize enabled categories (all enabled by default)
         self.enabled_categories = {
@@ -114,6 +118,16 @@ class MultiCategoryMasker:
         
         # Initialize model
         self._initialize_model()
+
+    def set_fisheye_circle_mask(self, enabled: bool, radius_percent: int | float = 94):
+        self.fisheye_circle_mask_enabled = bool(enabled)
+        self.fisheye_circle_mask_radius_percent = clamp_radius_percent(radius_percent)
+
+    def _apply_fisheye_circle_mask(self, mask: np.ndarray, image_shape: Tuple[int, int]) -> np.ndarray:
+        if not self.fisheye_circle_mask_enabled:
+            return mask
+        keep_mask = build_fisheye_keep_mask(image_shape, self.fisheye_circle_mask_radius_percent)
+        return combine_with_keep_mask(mask, keep_mask)
         
     def _select_device(self, use_gpu: bool) -> str:
         """Select compute device (CUDA or CPU) with comprehensive compatibility checking"""
@@ -379,7 +393,8 @@ class MultiCategoryMasker:
             if not target_classes:
                 # No categories enabled - return all white (keep everything)
                 logger.warning("No masking categories enabled")
-                return np.full((h, w), MASK_VALUE_KEEP, dtype=np.uint8)
+                base_mask = np.full((h, w), MASK_VALUE_KEEP, dtype=np.uint8)
+                return self._apply_fisheye_circle_mask(base_mask, (h, w))
             
             # Run YOLOv8 inference with safe fallback
             results = self._safe_predict(
@@ -393,10 +408,12 @@ class MultiCategoryMasker:
             if len(results) == 0 or results[0].masks is None:
                 # No objects detected - return all white (keep everything)
                 logger.debug("No objects detected in image")
-                return np.full((h, w), MASK_VALUE_KEEP, dtype=np.uint8)
+                base_mask = np.full((h, w), MASK_VALUE_KEEP, dtype=np.uint8)
+                return self._apply_fisheye_circle_mask(base_mask, (h, w))
             
             # Combine all detected object masks
             combined_mask = self._combine_masks(results[0], (h, w))
+                        combined_mask = self._apply_fisheye_circle_mask(combined_mask, (h, w))
             
             num_detections = len(results[0].masks.data)
             logger.debug(f"Generated mask with {num_detections} object(s) masked")
@@ -529,8 +546,8 @@ class MultiCategoryMasker:
                     progress_callback(idx + 1, total, f"Processing {img_path.name}")
                 
                 # Check if mask already exists
-                mask_filename = f"{img_path.stem}_mask.png"
-                mask_path = output_path / mask_filename
+                mask_path = build_related_output_path(img_path, input_path, output_path, '_mask.png')
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
                 
                 if mask_path.exists():
                     skipped += 1
@@ -546,7 +563,7 @@ class MultiCategoryMasker:
                 
                 has_objects = self.has_objects(image)
                 
-                if not has_objects:
+                if not has_objects and not self.fisheye_circle_mask_enabled:
                     # No target objects detected - skip mask creation
                     skipped += 1
                     logger.debug(f"No detections in {img_path.name} - skipped mask creation")
@@ -562,7 +579,8 @@ class MultiCategoryMasker:
                     
                     # Optionally save visualization
                     if save_visualization:
-                        vis_path = output_path / f"{img_path.stem}_masked_vis.jpg"
+                        vis_path = build_related_output_path(img_path, input_path, output_path, '_masked_vis.jpg')
+                        vis_path.parent.mkdir(parents=True, exist_ok=True)
                         self._save_visualization(str(img_path), mask, str(vis_path))
                     
                     successful += 1

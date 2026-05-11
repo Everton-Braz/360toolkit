@@ -51,6 +51,7 @@ from src.ui.widgets import (
 )
 from src.ui.preview_panels import EquirectPreviewWidget
 from src.utils.runtime_backends import has_bundled_onnx_runtime, has_usable_torch_runtime, is_usable_torch_module
+from src.utils.sam3_backend import inspect_sam3_executable_backend
 from src.pipeline.stage2_naming import perspective_output_sort_key
 from src.utils.dependency_provisioning import resolve_masking_model_path
 
@@ -237,6 +238,36 @@ class _CheckableComboBox(QComboBox):
 
 class MainWindow(QMainWindow):
     """Main application window - Full Screen UI/UX"""
+
+    def _on_circle_mask_toggled(self, checked):
+        show_controls = bool(checked)
+        self.circle_mask_radius_label.setVisible(show_controls)
+        self.circle_mask_radius_slider.setVisible(show_controls)
+        self.circle_mask_radius_spin.setVisible(show_controls)
+        self.circle_mask_help_label.setVisible(show_controls)
+        self._sync_stage1_circle_mask_preview(trigger_extract=show_controls)
+
+    def _on_circle_mask_radius_changed(self, value):
+        self.circle_mask_radius_spin.blockSignals(True)
+        self.circle_mask_radius_spin.setValue(int(value))
+        self.circle_mask_radius_spin.blockSignals(False)
+        self._sync_stage1_circle_mask_preview(trigger_extract=False)
+
+    def _sync_stage1_circle_mask_preview(self, *, trigger_extract: bool):
+        if hasattr(self, 'stage1_eq_preview'):
+            enabled, radius = self.get_circle_mask_settings()
+            self.stage1_eq_preview.set_fisheye_circle_mask(enabled, radius)
+            if trigger_extract and self.input_file_edit.text().strip():
+                self.stage1_eq_preview.set_video_path(self.input_file_edit.text().strip())
+        if hasattr(self, 'sam3_preview_widget'):
+            self.sam3_preview_widget.refresh_state()
+            self.sam3_preview_widget.mark_stale()
+
+    def get_circle_mask_settings(self):
+        """Return (enabled, radius_percent) for the fisheye circle mask."""
+        enabled = bool(getattr(self, 'circle_mask_checkbox', None) and self.circle_mask_checkbox.isChecked())
+        radius = self.circle_mask_radius_slider.value() if hasattr(self, 'circle_mask_radius_slider') else 94
+        return enabled, radius
     
     def __init__(self):
         super().__init__()
@@ -948,6 +979,7 @@ class MainWindow(QMainWindow):
         self.start_time_spin.valueChanged.connect(
             self._sync_preview_timestamp_from_stage1_range
         )
+        self._sync_stage1_circle_mask_preview(trigger_extract=False)
 
         return splitter
     
@@ -1273,6 +1305,39 @@ class MainWindow(QMainWindow):
         auto_note.setProperty("role", "secondary")
         auto_note.setWordWrap(True)
         card_model.addWidget(auto_note)
+
+        self.circle_mask_checkbox = QCheckBox("Apply Circular Mask to Fisheye Edges")
+        self.circle_mask_checkbox.setChecked(False)
+        self.circle_mask_checkbox.toggled.connect(self._on_circle_mask_toggled)
+        card_model.addWidget(self.circle_mask_checkbox)
+
+        circle_mask_row = QWidget()
+        circle_mask_layout = QHBoxLayout(circle_mask_row)
+        circle_mask_layout.setContentsMargins(0, 0, 0, 0)
+        circle_mask_layout.setSpacing(8)
+        self.circle_mask_radius_label = QLabel("Mask Radius:")
+        circle_mask_layout.addWidget(self.circle_mask_radius_label)
+        self.circle_mask_radius_slider = QSlider(Qt.Orientation.Horizontal)
+        self.circle_mask_radius_slider.setRange(40, 100)
+        self.circle_mask_radius_slider.setSingleStep(1)
+        self.circle_mask_radius_slider.setValue(94)
+        self.circle_mask_radius_slider.setToolTip("Percent of each fisheye lens radius kept inside the circular mask")
+        self.circle_mask_radius_slider.valueChanged.connect(self._on_circle_mask_radius_changed)
+        circle_mask_layout.addWidget(self.circle_mask_radius_slider, 1)
+        self.circle_mask_radius_spin = QSpinBox()
+        self.circle_mask_radius_spin.setRange(40, 100)
+        self.circle_mask_radius_spin.setSuffix(" %")
+        self.circle_mask_radius_spin.setValue(94)
+        self.circle_mask_radius_spin.valueChanged.connect(self.circle_mask_radius_slider.setValue)
+        self.circle_mask_radius_slider.valueChanged.connect(self.circle_mask_radius_spin.setValue)
+        circle_mask_layout.addWidget(self.circle_mask_radius_spin)
+        card_model.addWidget(circle_mask_row)
+
+        self.circle_mask_help_label = QLabel("Applies one circle per fisheye lens in preview, extracted PNGs, and final fisheye mask outputs.")
+        self.circle_mask_help_label.setWordWrap(True)
+        self.circle_mask_help_label.setProperty("role", "muted")
+        card_model.addWidget(self.circle_mask_help_label)
+        self._on_circle_mask_toggled(False)
         
         # Model size
         self.model_size_container = QWidget()
@@ -1344,6 +1409,26 @@ class MainWindow(QMainWindow):
         sam3_paths_hint.setProperty("role", "secondary")
         sam3_layout.addWidget(sam3_paths_hint)
 
+        sam3_backend_widget = QWidget()
+        sam3_backend_layout = QHBoxLayout(sam3_backend_widget)
+        sam3_backend_layout.setContentsMargins(0, 0, 0, 0)
+        sam3_backend_layout.setSpacing(8)
+        self.sam3_backend_mode_combo = QComboBox()
+        self.sam3_backend_mode_combo.addItem("Auto (prefer best available)", "auto")
+        self.sam3_backend_mode_combo.addItem("CUDA", "cuda")
+        self.sam3_backend_mode_combo.addItem("Vulkan", "vulkan")
+        self.sam3_backend_mode_combo.addItem("CPU", "cpu")
+        self.sam3_backend_mode_combo.currentIndexChanged.connect(self._on_sam3_backend_mode_changed)
+        sam3_backend_layout.addWidget(self.sam3_backend_mode_combo)
+        sam3_backend_layout.addStretch()
+        sam3_layout.addWidget(FormRow("Backend:", sam3_backend_widget, "Auto prefers the best configured backend and manual modes stay strict."))
+
+        self.sam3_backend_active_label = QLabel("Requested: Auto | Executable: detecting... | Model: detecting...")
+        self.sam3_backend_active_label.setWordWrap(True)
+        self.sam3_backend_active_label.setProperty("role", "muted")
+        sam3_layout.addWidget(self.sam3_backend_active_label)
+        self._sync_sam3_backend_selector_from_settings()
+
         sam3_feather_row = QWidget()
         sam3_feather_layout = QHBoxLayout(sam3_feather_row)
         sam3_feather_layout.setContentsMargins(0, 0, 0, 0)
@@ -1404,7 +1489,7 @@ class MainWindow(QMainWindow):
         self.sam3_prompt_checks: dict = {}
         for key, label, row, col in _sam3_cats:
             cb = QCheckBox(label)
-            cb.setChecked(True)
+            cb.setChecked(key == 'persons')
             cb.toggled.connect(self._on_sam3_config_changed)
             sam3_prompts_grid.addWidget(cb, row, col)
             self.sam3_prompt_checks[key] = cb
@@ -1457,11 +1542,11 @@ class MainWindow(QMainWindow):
         sam3_maxw_layout.setContentsMargins(0, 0, 0, 0)
         sam3_maxw_layout.setSpacing(8)
         self.sam3_maxw_combo = QComboBox()
-        self.sam3_maxw_combo.addItem("Original (no downscale)", 0)
-        self.sam3_maxw_combo.addItem("3840px  (recommended — 4× faster encode)", 3840)
+        self.sam3_maxw_combo.addItem("Original (no downscale, best quality)", 0)
+        self.sam3_maxw_combo.addItem("3840px  (faster, lower quality)", 3840)
         self.sam3_maxw_combo.addItem("1920px  (fast preview)", 1920)
         self.sam3_maxw_combo.addItem("1024px  (ultra-fast)", 1024)
-        self.sam3_maxw_combo.setCurrentIndex(1)
+        self.sam3_maxw_combo.setCurrentIndex(0)
         self.sam3_maxw_combo.currentIndexChanged.connect(self._on_sam3_config_changed)
         sam3_maxw_layout.addWidget(self.sam3_maxw_combo)
         sam3_maxw_layout.addStretch()
@@ -1469,19 +1554,6 @@ class MainWindow(QMainWindow):
 
         card_model.addWidget(self.sam3_options_container)
 
-        # GPU inline in same card
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine); sep.setProperty("role", "divider")
-        card_model.addWidget(sep)
-        gpu_row = QHBoxLayout()
-        self.use_gpu_check = QCheckBox("Enable GPU Acceleration (CUDA)")
-        self.use_gpu_check.setChecked(True)
-        self.use_gpu_check.toggled.connect(self._on_cuda_toggled)
-        gpu_row.addWidget(self.use_gpu_check)
-        self.gpu_hint_label = QLabel("3-4x faster with NVIDIA GPU. Auto-fallback to CPU.")
-        self.gpu_hint_label.setProperty("role", "accent")
-        gpu_row.addWidget(self.gpu_hint_label)
-        gpu_row.addStretch()
-        card_model.addLayout(gpu_row)
         layout.addWidget(card_model)
 
         # ── Detection Categories — compact dropdown card ────────────────────
@@ -2061,6 +2133,8 @@ class MainWindow(QMainWindow):
             'sdk_resolution': self.sdk_resolution_combo.currentData(),
             'output_format': _normalize_image_format(self.output_format_combo.currentData(), 'jpg'),
             'dual_lens_output_layout': self.dual_lens_layout_combo.currentData() if hasattr(self, 'dual_lens_layout_combo') else 'flat',
+            'fisheye_circle_mask_enabled': self.get_circle_mask_settings()[0],
+            'fisheye_circle_mask_radius_percent': self.get_circle_mask_settings()[1],
             'stage2_enabled': self.stage2_enable.isChecked(),
             'transform_type': self.stage2_method_combo.currentData(),
             'stage2_format': stage2_format,
@@ -2082,7 +2156,8 @@ class MainWindow(QMainWindow):
             'yolo_model_path': self.yolo_model_path_edit.text().strip() if hasattr(self, 'yolo_model_path_edit') else '',
             'model_size': self.model_size_combo.currentData(),
             'confidence_threshold': self.confidence_spin.value(),
-            'use_gpu': self.use_gpu_check.isChecked(),
+            'use_gpu': self._get_masking_use_gpu(),
+            'sam3_backend_mode': self._get_sam3_backend_mode(),
             'sam3_segmenter_path': self._get_sam3_segmenter_text(),
             'sam3_model_path': self._get_sam3_model_text(),
             'sam3_image_exe_path': self._get_sam3_gui_text(),
@@ -2248,13 +2323,41 @@ class MainWindow(QMainWindow):
         gui = self.settings.get_sam3_image_exe_path()
         return str(gui) if gui else ''
 
+    def _get_sam3_backend_mode(self) -> str:
+        return self.settings.get_sam3_backend_mode()
+
+    def _get_masking_use_gpu(self) -> bool:
+        if hasattr(self, 'masking_engine_combo'):
+            engine = self._normalize_masking_engine(self.masking_engine_combo.currentData())
+            if engine != 'sam3_cpp':
+                return True
+        return self._get_sam3_backend_mode() != 'cpu'
+
+    def _sync_sam3_backend_selector_from_settings(self):
+        if not hasattr(self, 'sam3_backend_mode_combo'):
+            return
+        mode = self._get_sam3_backend_mode()
+        index = self.sam3_backend_mode_combo.findData(mode)
+        if index < 0:
+            index = self.sam3_backend_mode_combo.findData('auto')
+        if index < 0:
+            return
+        self.sam3_backend_mode_combo.blockSignals(True)
+        self.sam3_backend_mode_combo.setCurrentIndex(index)
+        self.sam3_backend_mode_combo.blockSignals(False)
+
     def _set_sam3_paths_from_config(self, config: dict):
+        if 'sam3_backend_mode' in config:
+            self.settings.set_sam3_backend_mode(config['sam3_backend_mode'])
+        elif 'use_gpu' in config:
+            self.settings.set_sam3_backend_mode('auto' if config['use_gpu'] else 'cpu')
         if 'sam3_segmenter_path' in config:
             self.settings.set_sam3_segmenter_path(config['sam3_segmenter_path'])
         if 'sam3_model_path' in config:
             self.settings.set_sam3_model_path(config['sam3_model_path'])
         if 'sam3_image_exe_path' in config:
             self.settings.set_sam3_image_exe_path(config['sam3_image_exe_path'])
+        self._sync_sam3_backend_selector_from_settings()
 
     def _mirror_combo_selection(self, source: QComboBox, target: QComboBox):
         if target is None or source is None:
@@ -2337,7 +2440,10 @@ class MainWindow(QMainWindow):
             'segment_persons_exe': self._get_sam3_segmenter_text(),
             'model_path': self._get_sam3_model_text(),
             'sam3_image_exe': self._get_sam3_gui_text(),
-            'use_gpu': self.use_gpu_check.isChecked() if hasattr(self, 'use_gpu_check') else True,
+            'sam3_backend_mode': self._get_sam3_backend_mode(),
+            'fisheye_circle_mask_enabled': self.get_circle_mask_settings()[0],
+            'fisheye_circle_mask_radius_percent': self.get_circle_mask_settings()[1],
+            'use_gpu': self._get_masking_use_gpu(),
             'feather_radius': self.sam3_feather_spin.value() if hasattr(self, 'sam3_feather_spin') else 8,
             'morph_radius': self.sam3_morph_spin.value() if hasattr(self, 'sam3_morph_spin') else (self.sam3_morph_slider.value() if hasattr(self, 'sam3_morph_slider') else 0),
             'enable_refinement': getattr(self, 'sam3_enable_refinement', True),
@@ -2345,7 +2451,10 @@ class MainWindow(QMainWindow):
             'seam_aware_refinement': getattr(self, 'sam3_seam_aware_refinement', True),
             'edge_sharpen_strength': self.sam3_edge_sharpen_spin.value() if hasattr(self, 'sam3_edge_sharpen_spin') else 0.75,
             'alpha_export': (self.sam3_output_mode_combo.currentData() in ('alpha_only', 'both')) if hasattr(self, 'sam3_output_mode_combo') else False,
-            'max_input_width': self.sam3_maxw_combo.currentData() if hasattr(self, 'sam3_maxw_combo') else 3840,
+            'max_input_width': self.sam3_maxw_combo.currentData() if hasattr(self, 'sam3_maxw_combo') else 0,
+            'sam3_score_threshold': self.sam3_score_spin.value() if hasattr(self, 'sam3_score_spin') else 0.04,
+            'sam3_nms_threshold': self.sam3_nms_spin.value() if hasattr(self, 'sam3_nms_spin') else 0.1,
+            'sam3_mask_logit_threshold': 0.75,
             'sam3_prompts': prompts,
             'sam3_custom_prompts': self.sam3_custom_prompts_edit.text().strip() if hasattr(self, 'sam3_custom_prompts_edit') else '',
         }
@@ -2517,6 +2626,12 @@ class MainWindow(QMainWindow):
                 idx = self.dual_lens_layout_combo.findData(config['dual_lens_output_layout'])
                 if idx >= 0:
                     self.dual_lens_layout_combo.setCurrentIndex(idx)
+            if 'fisheye_circle_mask_enabled' in config and hasattr(self, 'circle_mask_checkbox'):
+                self.circle_mask_checkbox.setChecked(bool(config['fisheye_circle_mask_enabled']))
+            if 'fisheye_circle_mask_radius_percent' in config and hasattr(self, 'circle_mask_radius_slider'):
+                value = max(40, min(100, int(config['fisheye_circle_mask_radius_percent'])))
+                self.circle_mask_radius_slider.setValue(value)
+                self.circle_mask_radius_spin.setValue(value)
             if 'stage2_enabled' in config:
                 self.stage2_enable.setChecked(config['stage2_enabled'])
             if 'transform_type' in config:
@@ -2573,8 +2688,6 @@ class MainWindow(QMainWindow):
                     self.model_size_combo.setCurrentIndex(models.index(config['model_size']))
             if 'confidence_threshold' in config:
                 self.confidence_spin.setValue(config['confidence_threshold'])
-            if 'use_gpu' in config:
-                self.use_gpu_check.setChecked(config['use_gpu'])
             self._set_sam3_paths_from_config(config)
             if 'sam3_feather_radius' in config and hasattr(self, 'sam3_feather_spin'):
                 self.sam3_feather_spin.setValue(int(config['sam3_feather_radius']))
@@ -2652,6 +2765,7 @@ class MainWindow(QMainWindow):
         # Update preview to reflect the newly selected extraction mode
         if hasattr(self, 'stage1_eq_preview'):
             self.stage1_eq_preview.set_extraction_method(method)
+        self._sync_stage1_circle_mask_preview(trigger_extract=is_dual_lens and self.get_circle_mask_settings()[0])
 
     def _on_input_file_changed(self, path: str):
         normalized_path = (path or '').strip()
@@ -2713,42 +2827,21 @@ class MainWindow(QMainWindow):
                 self.engine_description_label.setText(f"Secondary masking engine | ONNX YOLO segmentation | bundled sizes: {pretty_sizes} | default PNG flow masks equirect before split")
             else:
                 self.engine_description_label.setText("Secondary masking engine | ONNX YOLO segmentation | no bundled model detected in this build")
+        self._sync_sam3_backend_selector_from_settings()
         if hasattr(self, 'sam3_preview_widget'):
             self.sam3_preview_widget.refresh_state()
         self._update_masking_runtime_status()
 
-    def _on_cuda_toggled(self, enabled: bool):
-        """Enable or disable CUDA for masking operations at runtime.
-
-        Sets CUDA_VISIBLE_DEVICES so PyTorch workers spawned *after* this
-        call respect the choice.  Already-running workers are unaffected.
-        """
-        if enabled:
-            # Restore GPU — remove any suppression we set
-            os.environ.pop('CUDA_VISIBLE_DEVICES', None)
-            # Try to detect what GPU is actually available
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    name = torch.cuda.get_device_name(0)
-                    self.gpu_hint_label.setText(f"GPU active: {name}")
-                    self.gpu_hint_label.setProperty("role", "accent")
-                else:
-                    self.gpu_hint_label.setText("CUDA not available on this machine — will use CPU")
-                    self.gpu_hint_label.setProperty("role", "muted")
-                    self.use_gpu_check.setChecked(False)
-                    return
-            except Exception:
-                self.gpu_hint_label.setText("3-4x faster with NVIDIA GPU. Auto-fallback to CPU.")
-                self.gpu_hint_label.setProperty("role", "accent")
-            self.log_message("[GPU] CUDA enabled — GPU acceleration active for masking.")
-        else:
-            # Hide all CUDA devices from PyTorch processes
-            os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-            self.gpu_hint_label.setText("CPU mode (CUDA disabled by user)")
-            self.gpu_hint_label.setProperty("role", "muted")
-            self.log_message("[GPU] CUDA disabled — masking will run on CPU.")
-        self._refresh_widget_style(self.gpu_hint_label)
+    def _on_sam3_backend_mode_changed(self, index: int):
+        if not hasattr(self, 'sam3_backend_mode_combo'):
+            return
+        mode = str(self.sam3_backend_mode_combo.currentData() or 'auto')
+        self.settings.set_sam3_backend_mode(mode)
+        if hasattr(self, 'sam3_preview_widget'):
+            self.sam3_preview_widget.refresh_state()
+            self.sam3_preview_widget.mark_stale()
+        self._update_masking_runtime_status()
+        self.log_message(f"[SAM3] Backend mode set to {mode.upper()}.")
     
     def _on_recon_tool_changed(self, index: int):
         self.recon_params_stack.setCurrentIndex(index)
@@ -2804,10 +2897,29 @@ class MainWindow(QMainWindow):
         model_text = self._get_sam3_model_text()
         segmenter = Path(segmenter_text) if segmenter_text else None
         model = Path(model_text) if model_text else None
-        if segmenter and model and segmenter.exists() and model.exists():
-            details.append('SAM 3: ready')
+        requested_mode = self._get_sam3_backend_mode()
+        requested_label = requested_mode.replace('-', ' ').title()
+        segmenter_ready = bool(segmenter and segmenter.exists())
+        model_ready = bool(model and model.exists())
+        backend_info = inspect_sam3_executable_backend(segmenter) if segmenter_ready else None
+        backend_label = backend_info.backend.replace('-', ' ').title() if backend_info else 'Missing'
+
+        if hasattr(self, 'sam3_backend_active_label'):
+            active_parts = [f'Requested: {requested_label}']
+            active_parts.append(f'Executable: {backend_label}')
+            active_parts.append('Model: ready' if model_ready else 'Model: missing')
+            self.sam3_backend_active_label.setText(' | '.join(active_parts))
+            self.sam3_backend_active_label.setToolTip(backend_info.detail if backend_info else 'Configure segment_persons.exe to inspect the SAM 3 backend.')
+
+        if segmenter_ready and model_ready and backend_info is not None:
+            details.append(f'SAM 3: {requested_label} requested, executable {backend_label}')
         else:
-            details.append('SAM 3: external exe/model not configured')
+            missing_parts = []
+            if not segmenter_ready:
+                missing_parts.append('segmenter')
+            if not model_ready:
+                missing_parts.append('model')
+            details.append('SAM 3: missing ' + '/'.join(missing_parts) if missing_parts else 'SAM 3: external exe/model not configured')
         self.masking_runtime_label.setText(' | '.join(details))
 
     def _update_reconstruction_backend_status(self):
@@ -3329,12 +3441,15 @@ class MainWindow(QMainWindow):
             'export_include_masks': self.export_include_masks_check.isChecked() if hasattr(self, 'export_include_masks_check') else True,
             'fps': self.fps_spin.value(),
             'extraction_method': self.extraction_method_combo.currentData(),
+            'frame_rotation': getattr(self.stage1_eq_preview, '_rotation', 0) if hasattr(self, 'stage1_eq_preview') else 0,
             'start_time': 0.0 if self.full_video_check.isChecked() else self.start_time_spin.value(),
             'end_time': None if self.full_video_check.isChecked() else self.end_time_spin.value(),
             'sdk_quality': self.sdk_quality_combo.currentData(),
             'sdk_resolution': self.sdk_resolution_combo.currentData(),
             'output_format': _normalize_image_format(self.output_format_combo.currentData(), 'jpg'),
             'dual_lens_output_layout': self.dual_lens_layout_combo.currentData() if hasattr(self, 'dual_lens_layout_combo') else 'flat',
+            'fisheye_circle_mask_enabled': self.get_circle_mask_settings()[0],
+            'fisheye_circle_mask_radius_percent': self.get_circle_mask_settings()[1],
             'transform_type': stage2_method,
             'stage2_numbering_mode': self.stage2_numbering_combo.currentData() if hasattr(self, 'stage2_numbering_combo') else DEFAULT_STAGE2_NUMBERING_MODE,
             'stage2_perspective_layout': self.stage2_layout_combo.currentData() if hasattr(self, 'stage2_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
@@ -3407,7 +3522,8 @@ class MainWindow(QMainWindow):
                 'yolo_model_path': self.yolo_model_path_edit.text().strip() if hasattr(self, 'yolo_model_path_edit') else '',
                 'model_size': self.model_size_combo.currentData(),
                 'confidence_threshold': self.confidence_spin.value(),
-                'use_gpu': self.use_gpu_check.isChecked(),
+                'use_gpu': self._get_masking_use_gpu(),
+                'sam3_backend_mode': self._get_sam3_backend_mode(),
                 'sam3_segmenter_path': self._get_sam3_segmenter_text(),
                 'sam3_model_path': self._get_sam3_model_text(),
                 'sam3_image_exe_path': self._get_sam3_gui_text(),
@@ -3420,9 +3536,10 @@ class MainWindow(QMainWindow):
                 'sam3_output_mode': self._get_mask_output_mode(),
                 'sam3_alpha_export': self._get_mask_output_mode() in ('alpha_only', 'both'),
                 'sam3_alpha_only': self._get_mask_output_mode() == 'alpha_only',
-                'sam3_max_input_width': self.sam3_maxw_combo.currentData() if hasattr(self, 'sam3_maxw_combo') else 3840,
-                'sam3_score_threshold': self.sam3_score_spin.value() if hasattr(self, 'sam3_score_spin') else 0.5,
+                'sam3_max_input_width': self.sam3_maxw_combo.currentData() if hasattr(self, 'sam3_maxw_combo') else 0,
+                'sam3_score_threshold': self.sam3_score_spin.value() if hasattr(self, 'sam3_score_spin') else 0.04,
                 'sam3_nms_threshold': self.sam3_nms_spin.value() if hasattr(self, 'sam3_nms_spin') else 0.1,
+                'sam3_mask_logit_threshold': 0.75,
                 'sam3_prompts': {k: cb.isChecked() for k, cb in self.sam3_prompt_checks.items()} if hasattr(self, 'sam3_prompt_checks') else {},
                 'sam3_custom_prompts': self.sam3_custom_prompts_edit.text().strip() if hasattr(self, 'sam3_custom_prompts_edit') else '',
                 'masking_categories': {

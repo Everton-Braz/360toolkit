@@ -101,6 +101,8 @@ from ..config.defaults import (
     DEFAULT_CONFIDENCE_THRESHOLD, MASKING_CATEGORIES,
     MASK_VALUE_REMOVE, MASK_VALUE_KEEP, DEFAULT_USE_GPU
 )
+from ..utils.mask_output import build_related_output_path
+from ..utils.fisheye_mask import build_fisheye_keep_mask, clamp_radius_percent, combine_with_keep_mask
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +162,8 @@ class ONNXMasker:
         self.net = None
         self._cv2dnn_uses_gpu = False
         self._cv2dnn_fallback_to_cpu = False
+        self.fisheye_circle_mask_enabled = False
+        self.fisheye_circle_mask_radius_percent = 94
 
         logger.info(f"[ONNX] Mask dilation: {mask_dilation_pixels}px (expands boundaries to include attached objects)")
 
@@ -210,6 +214,16 @@ class ONNXMasker:
                 f"[cv2.dnn] Model loaded: {self.model_path.name}, "
                 f"input: {self.input_width}×{self.input_height}"
             )
+
+    def set_fisheye_circle_mask(self, enabled: bool, radius_percent: int | float = 94):
+        self.fisheye_circle_mask_enabled = bool(enabled)
+        self.fisheye_circle_mask_radius_percent = clamp_radius_percent(radius_percent)
+
+    def _apply_fisheye_circle_mask(self, mask: np.ndarray, image_shape: tuple[int, int]) -> np.ndarray:
+        if not self.fisheye_circle_mask_enabled:
+            return mask
+        keep_mask = build_fisheye_keep_mask(image_shape, self.fisheye_circle_mask_radius_percent)
+        return combine_with_keep_mask(mask, keep_mask)
     
     def _select_providers(self, use_gpu: bool) -> List[str]:
         """Select ONNX Runtime execution providers (GPU or CPU)"""
@@ -662,14 +676,79 @@ class ONNXMasker:
             if mask is None:
                 # No detections - return all white (keep everything)
                 logger.debug("No objects detected in image")
-                return np.full(original_shape, MASK_VALUE_KEEP, dtype=np.uint8)
+                base_mask = np.full(original_shape, MASK_VALUE_KEEP, dtype=np.uint8)
+                return self._apply_fisheye_circle_mask(base_mask, original_shape)
             
-            return mask
+            return self._apply_fisheye_circle_mask(mask, original_shape)
             
         except Exception as e:
             logger.error(f"Error generating mask from array: {e}")
             return None
     
+    def detect_boxes(self, image: np.ndarray) -> list:
+        """Return bounding boxes for detected objects as pixel-coordinate tuples.
+
+        Args:
+            image: Input image in BGR format (HxWxC).
+
+        Returns:
+            List of (x0, y0, x1, y1) integer tuples in input-image pixel coordinates.
+            Empty list if no detections.
+        """
+        try:
+            h_orig, w_orig = image.shape[:2]
+            input_tensor = self._preprocess(image)
+            outputs = self._run_inference(input_tensor)
+
+            detections_raw = outputs[0][0]
+            target_classes = self.get_target_classes()
+
+            is_yolo26 = (
+                len(detections_raw.shape) == 2
+                and detections_raw.shape[0] <= 300
+                and detections_raw.shape[1] < 100
+            )
+            if not is_yolo26 and detections_raw.shape[0] < detections_raw.shape[1]:
+                detections_raw = detections_raw.T
+
+            boxes = []
+            for detection in detections_raw:
+                if is_yolo26:
+                    if len(detection) < 6:
+                        continue
+                    x1_px, y1_px, x2_px, y2_px = detection[0:4]
+                    confidence = float(detection[4])
+                    class_id = int(detection[5])
+                    x1 = int(x1_px * w_orig / self.input_width)
+                    y1 = int(y1_px * h_orig / self.input_height)
+                    x2 = int(x2_px * w_orig / self.input_width)
+                    y2 = int(y2_px * h_orig / self.input_height)
+                else:
+                    class_scores = detection[4:84]
+                    confidence = float(np.max(class_scores))
+                    class_id = int(np.argmax(class_scores))
+                    xc, yc, bw, bh = detection[:4]
+                    x1 = int((xc - bw / 2) * w_orig / self.input_width)
+                    y1 = int((yc - bh / 2) * h_orig / self.input_height)
+                    x2 = int((xc + bw / 2) * w_orig / self.input_width)
+                    y2 = int((yc + bh / 2) * h_orig / self.input_height)
+
+                if confidence < self.confidence_threshold:
+                    continue
+                if class_id not in target_classes:
+                    continue
+
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w_orig, x2), min(h_orig, y2)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                boxes.append((x1, y1, x2, y2))
+
+            return boxes
+        except Exception as exc:
+            logger.error("detect_boxes failed: %s", exc)
+            return []
+
     def has_objects(self, image: np.ndarray) -> bool:
         """
         Check if image contains any target objects (fast detection without generating full mask).
@@ -773,8 +852,8 @@ class ONNXMasker:
                         progress_callback(idx + 1, total, f"Processing {img_path.name}")
                     
                     # Check if mask already exists
-                    mask_filename = f"{img_path.stem}_mask.png"
-                    mask_path = output_path / mask_filename
+                    mask_path = build_related_output_path(img_path, input_path, output_path, '_mask.png')
+                    mask_path.parent.mkdir(parents=True, exist_ok=True)
                     
                     if mask_path.exists():
                         skipped += 1
@@ -790,7 +869,7 @@ class ONNXMasker:
                     
                     has_objects = self.has_objects(image)
                     
-                    if not has_objects:
+                    if not has_objects and not self.fisheye_circle_mask_enabled:
                         # No detections - skip mask creation
                         skipped += 1
                         logger.debug(f"No detections in {img_path.name} - skipped")
@@ -803,7 +882,8 @@ class ONNXMasker:
                         cv2.imwrite(str(mask_path), mask)
                         
                         if save_visualization:
-                            vis_path = output_path / f"{img_path.stem}_masked_vis.jpg"
+                            vis_path = build_related_output_path(img_path, input_path, output_path, '_masked_vis.jpg')
+                            vis_path.parent.mkdir(parents=True, exist_ok=True)
                             self._save_visualization(str(img_path), mask, str(vis_path))
                         
                         successful += 1

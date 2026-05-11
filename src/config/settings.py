@@ -4,6 +4,7 @@ Handles user preferences, path detection, and configuration persistence.
 """
 
 import json
+import importlib
 import logging
 import shutil
 import sys
@@ -17,10 +18,40 @@ def preferred_colmap_candidates(*args, **kwargs): return []
 from src.utils.dependency_provisioning import get_downloaded_colmap_candidates, get_downloaded_spheresfm_candidates
 from src.utils.app_paths import get_settings_file_path
 from src.utils.resource_path import get_base_path
+from src.utils.sam3_backend import (
+    SAM3_BACKEND_AUTO,
+    SAM3_BACKEND_CPU,
+    SAM3_BACKEND_CUDA,
+    SAM3_BACKEND_VULKAN,
+    inspect_sam3_executable_backend,
+    normalize_sam3_backend_mode,
+)
 
 logger = logging.getLogger(__name__)
 
 _APP_ROOT = Path(__file__).resolve().parents[2]
+
+_LEGACY_SAM3_MAX_INPUT_WIDTH = 3840
+_DEFAULT_SAM3_MAX_INPUT_WIDTH = 0
+_DEFAULT_SAM3_BACKEND_MODE = SAM3_BACKEND_AUTO
+
+
+def _sam3_host_prefers_cuda() -> bool:
+    try:
+        torch = importlib.import_module('torch')
+    except Exception:
+        return False
+
+    try:
+        if not bool(torch.cuda.is_available()):
+            return False
+        count = int(torch.cuda.device_count())
+        if count <= 0:
+            return False
+        name = str(torch.cuda.get_device_name(0) or '').lower()
+        return 'nvidia' in name or 'geforce' in name or 'rtx' in name or 'quadro' in name
+    except Exception:
+        return False
 
 
 def _sam3_root_candidates() -> List[Path]:
@@ -40,17 +71,100 @@ def _sam3_root_candidates() -> List[Path]:
     return unique
 
 
+def _sam3_build_output_relative_candidates(filename: str) -> List[Path]:
+    return [
+        Path('bvv') / 'examples' / filename,
+        Path('bvv') / 'examples' / 'Release' / filename,
+        Path('build-cuda') / 'examples' / filename,
+        Path('build-cuda') / 'examples' / 'Release' / filename,
+        Path('build-vulkan-verified') / 'examples' / filename,
+        Path('build-vulkan-verified') / 'examples' / 'Release' / filename,
+        Path('build-vulkan') / 'examples' / filename,
+        Path('build-vulkan') / 'examples' / 'Release' / filename,
+        Path('build-vulkan-vs') / 'examples' / filename,
+        Path('build-vulkan-vs') / 'examples' / 'Release' / filename,
+        Path('build') / 'examples' / filename,
+        Path('build') / 'examples' / 'Release' / filename,
+    ]
+
+
+def _sam3_model_relative_candidates() -> List[Path]:
+    return [
+        Path('models') / 'sam3-f16.ggml',
+        Path('models') / 'sam3-q8_0.ggml',
+        Path('models') / 'sam3-q4_1.ggml',
+        Path('models') / 'sam3-q4_0.ggml',
+    ]
+
+
 def _resolve_default_sam3_path(relative_path: str) -> Path:
+    relative = Path(relative_path)
+    if relative.parts and relative.parts[0] == 'build':
+        filename = relative.name
+        for root in _sam3_root_candidates():
+            for build_relative in _sam3_build_output_relative_candidates(filename):
+                candidate = root / build_relative
+                if candidate.exists():
+                    return candidate
     for root in _sam3_root_candidates():
-        candidate = root / relative_path
+        candidate = root / relative
         if candidate.exists():
             return candidate
-    return _sam3_root_candidates()[0] / relative_path
+    return _sam3_root_candidates()[0] / relative
+
+
+def _sam3_backend_priority(backend: str, preferred_backend: str) -> int:
+    mode = normalize_sam3_backend_mode(preferred_backend)
+    if mode == SAM3_BACKEND_AUTO and _sam3_host_prefers_cuda():
+        ranking = {SAM3_BACKEND_CUDA: 0, SAM3_BACKEND_VULKAN: 1, 'unverified-vulkan': 2, SAM3_BACKEND_CPU: 3}
+        return ranking.get(backend, 99)
+    if mode == SAM3_BACKEND_CUDA:
+        ranking = {SAM3_BACKEND_CUDA: 0, SAM3_BACKEND_VULKAN: 1, 'unverified-vulkan': 2, SAM3_BACKEND_CPU: 3}
+    elif mode == SAM3_BACKEND_VULKAN:
+        ranking = {SAM3_BACKEND_VULKAN: 0, 'unverified-vulkan': 1, SAM3_BACKEND_CUDA: 2, SAM3_BACKEND_CPU: 3}
+    elif mode == SAM3_BACKEND_CPU:
+        ranking = {SAM3_BACKEND_CPU: 0, SAM3_BACKEND_VULKAN: 1, 'unverified-vulkan': 2, SAM3_BACKEND_CUDA: 3}
+    else:
+        ranking = {SAM3_BACKEND_VULKAN: 0, 'unverified-vulkan': 1, SAM3_BACKEND_CUDA: 2, SAM3_BACKEND_CPU: 3}
+    return ranking.get(backend, 99)
+
+
+def _sam3_missing_backend_fallback(filename: str, preferred_backend: str) -> Path:
+    mode = normalize_sam3_backend_mode(preferred_backend)
+    root = _sam3_root_candidates()[0]
+    if mode == SAM3_BACKEND_VULKAN:
+        return root / 'build-vulkan' / 'examples' / filename
+    if mode == SAM3_BACKEND_CUDA:
+        return root / 'build-cuda' / 'examples' / filename
+    if mode == SAM3_BACKEND_CPU:
+        return root / 'build' / 'examples' / filename
+    return root / 'build' / 'examples' / 'Release' / filename
+
+
+def _resolve_preferred_sam3_executable(filename: str, preferred_backend: str = _DEFAULT_SAM3_BACKEND_MODE) -> Path:
+    fallback: Optional[Path] = None
+    fallback_rank = 99
+    mode = normalize_sam3_backend_mode(preferred_backend)
+    for root in _sam3_root_candidates():
+        for build_relative in _sam3_build_output_relative_candidates(filename):
+            candidate = root / build_relative
+            if not candidate.exists():
+                continue
+            info = inspect_sam3_executable_backend(candidate)
+            if _sam3_backend_priority(info.backend, preferred_backend) == 0:
+                return candidate
+            rank = _sam3_backend_priority(info.backend, preferred_backend)
+            if fallback is None or rank < fallback_rank:
+                fallback = candidate
+                fallback_rank = rank
+    if mode != SAM3_BACKEND_AUTO:
+        return _sam3_missing_backend_fallback(filename, mode)
+    return fallback or _sam3_missing_backend_fallback(filename, mode)
 
 
 _DEFAULT_SAM3_ROOT = _resolve_default_sam3_path('.')
-_DEFAULT_SAM3_SEGMENTER = _resolve_default_sam3_path('build/examples/Release/segment_persons.exe')
-_DEFAULT_SAM3_GUI = _resolve_default_sam3_path('build/examples/Release/sam3_image.exe')
+_DEFAULT_SAM3_SEGMENTER = _resolve_preferred_sam3_executable('segment_persons.exe', _DEFAULT_SAM3_BACKEND_MODE)
+_DEFAULT_SAM3_GUI = _resolve_preferred_sam3_executable('sam3_image.exe', _DEFAULT_SAM3_BACKEND_MODE)
 _DEFAULT_SAM3_MODEL = _resolve_default_sam3_path('models/sam3-q4_0.ggml')
 
 
@@ -141,6 +255,12 @@ class SettingsManager:
             'sam3_segmenter_path': str(_DEFAULT_SAM3_SEGMENTER),
             'sam3_model_path': str(_DEFAULT_SAM3_MODEL),
             'sam3_image_exe_path': str(_DEFAULT_SAM3_GUI),
+            'sam3_backend_mode': _DEFAULT_SAM3_BACKEND_MODE,
+            'sam3_backend_detected': inspect_sam3_executable_backend(_DEFAULT_SAM3_SEGMENTER).backend,
+            'sam3_max_input_width': _DEFAULT_SAM3_MAX_INPUT_WIDTH,
+            'sam3_score_threshold': 0.04,
+            'sam3_nms_threshold': 0.1,
+            'sam3_mask_logit_threshold': 0.75,
         }
         try:
             if self.settings_file.exists():
@@ -148,6 +268,8 @@ class SettingsManager:
                     loaded = json.load(f)
                     if isinstance(loaded, dict):
                         defaults.update(loaded)
+                    if defaults.get('sam3_max_input_width') == _LEGACY_SAM3_MAX_INPUT_WIDTH:
+                        defaults['sam3_max_input_width'] = _DEFAULT_SAM3_MAX_INPUT_WIDTH
                     return defaults
         except Exception as e:
             logger.warning(f"Failed to load settings: {e}")
@@ -205,13 +327,25 @@ class SettingsManager:
         return None
 
     def _bundled_sam3_segmenter_candidates(self) -> List[Path]:
-        return [root / 'build' / 'examples' / 'Release' / 'segment_persons.exe' for root in _sam3_root_candidates()]
+        return [
+            root / relative
+            for root in _sam3_root_candidates()
+            for relative in _sam3_build_output_relative_candidates('segment_persons.exe')
+        ]
 
     def _bundled_sam3_model_candidates(self) -> List[Path]:
-        return [root / 'models' / 'sam3-q4_0.ggml' for root in _sam3_root_candidates()]
+        return [
+            root / relative
+            for root in _sam3_root_candidates()
+            for relative in _sam3_model_relative_candidates()
+        ]
 
     def _bundled_sam3_gui_candidates(self) -> List[Path]:
-        return [root / 'build' / 'examples' / 'Release' / 'sam3_image.exe' for root in _sam3_root_candidates()]
+        return [
+            root / relative
+            for root in _sam3_root_candidates()
+            for relative in _sam3_build_output_relative_candidates('sam3_image.exe')
+        ]
 
     def _detect_bundled_file(self, candidates: List[Path], label: str) -> Optional[Path]:
         for candidate in candidates:
@@ -220,12 +354,58 @@ class SettingsManager:
                 return candidate
         return None
 
+    def _detect_best_bundled_sam3_segmenter(self, preferred_backend: str) -> Tuple[Optional[Path], str]:
+        fallback: Optional[Path] = None
+        fallback_backend = 'missing'
+        fallback_rank = 99
+        mode = normalize_sam3_backend_mode(preferred_backend)
+        for candidate in self._bundled_sam3_segmenter_candidates():
+            if not candidate.exists():
+                continue
+            info = inspect_sam3_executable_backend(candidate)
+            logger.info("[OK] SAM3 segmenter candidate: %s (%s)", candidate, info.backend)
+            rank = _sam3_backend_priority(info.backend, preferred_backend)
+            if rank == 0:
+                return candidate, info.backend
+            if fallback is None or rank < fallback_rank:
+                fallback = candidate
+                fallback_backend = info.backend
+                fallback_rank = rank
+        if mode != SAM3_BACKEND_AUTO:
+            return None, 'missing'
+        return fallback, fallback_backend
+
+    def _detect_best_bundled_sam3_gui(self, preferred_backend: str) -> Optional[Path]:
+        fallback: Optional[Path] = None
+        fallback_rank = 99
+        mode = normalize_sam3_backend_mode(preferred_backend)
+        for candidate in self._bundled_sam3_gui_candidates():
+            if not candidate.exists():
+                continue
+            info = inspect_sam3_executable_backend(candidate)
+            rank = _sam3_backend_priority(info.backend, preferred_backend)
+            if rank == 0:
+                return candidate
+            if fallback is None or rank < fallback_rank:
+                fallback = candidate
+                fallback_rank = rank
+        if mode != SAM3_BACKEND_AUTO:
+            return None
+        return fallback
+
     def _refresh_bundled_sam3_paths(self) -> None:
         changed = False
+        preferred_backend = normalize_sam3_backend_mode(
+            self.settings.get('sam3_backend_mode'),
+            use_gpu=True,
+        )
 
-        bundled_segmenter = self._detect_bundled_file(self._bundled_sam3_segmenter_candidates(), 'SAM3 segmenter')
+        bundled_segmenter, segmenter_backend = self._detect_best_bundled_sam3_segmenter(preferred_backend)
         if bundled_segmenter and self.settings.get('sam3_segmenter_path') != str(bundled_segmenter):
             self.settings['sam3_segmenter_path'] = str(bundled_segmenter)
+            changed = True
+        if self.settings.get('sam3_backend_detected') != segmenter_backend:
+            self.settings['sam3_backend_detected'] = segmenter_backend
             changed = True
 
         bundled_model = self._detect_bundled_file(self._bundled_sam3_model_candidates(), 'SAM3 model')
@@ -233,7 +413,7 @@ class SettingsManager:
             self.settings['sam3_model_path'] = str(bundled_model)
             changed = True
 
-        bundled_gui = self._detect_bundled_file(self._bundled_sam3_gui_candidates(), 'SAM3 GUI')
+        bundled_gui = self._detect_best_bundled_sam3_gui(preferred_backend)
         if bundled_gui and self.settings.get('sam3_image_exe_path') != str(bundled_gui):
             self.settings['sam3_image_exe_path'] = str(bundled_gui)
             changed = True
@@ -817,6 +997,18 @@ class SettingsManager:
 
     def set_sam3_segmenter_path(self, path: Optional[Path | str]):
         self.settings['sam3_segmenter_path'] = str(path) if path else ''
+        resolved = Path(path) if path else None
+        if resolved and resolved.exists():
+            self.settings['sam3_backend_detected'] = inspect_sam3_executable_backend(resolved).backend
+        self.save_settings()
+
+    def get_sam3_backend_mode(self) -> str:
+        return normalize_sam3_backend_mode(self.settings.get('sam3_backend_mode'), use_gpu=True)
+
+    def set_sam3_backend_mode(self, mode: str):
+        normalized = normalize_sam3_backend_mode(mode, use_gpu=True)
+        self.settings['sam3_backend_mode'] = normalized
+        self._refresh_bundled_sam3_paths()
         self.save_settings()
 
     def get_sam3_model_path(self) -> Optional[Path]:
@@ -1065,6 +1257,8 @@ class SettingsManager:
             'sam3_segmenter_path': str(_DEFAULT_SAM3_SEGMENTER),
             'sam3_model_path': str(_DEFAULT_SAM3_MODEL),
             'sam3_image_exe_path': str(_DEFAULT_SAM3_GUI),
+            'sam3_backend_mode': _DEFAULT_SAM3_BACKEND_MODE,
+            'sam3_backend_detected': inspect_sam3_executable_backend(_DEFAULT_SAM3_SEGMENTER).backend,
         }
         self.save_settings()
         logger.info("Settings reset to defaults")

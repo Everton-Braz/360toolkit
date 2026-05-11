@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import hashlib
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QPoint, QThread, pyqtSignal
@@ -77,10 +79,14 @@ class _SAM3PreviewWorker(QThread):
                 model_path=self._config['model_path'],
                 sam3_image_exe=self._config.get('sam3_image_exe') or None,
                 use_gpu=self._config.get('use_gpu', True),
+                backend_mode=self._config.get('sam3_backend_mode', 'auto'),
                 feather_radius=self._config.get('feather_radius', 8),
                 morph_radius=self._config.get('morph_radius', 0),
                 alpha_export=self._config.get('alpha_export', False),
-                max_input_width=self._config.get('max_input_width', 3840),
+                max_input_width=self._config.get('max_input_width', 0),
+                score_threshold=self._config.get('sam3_score_threshold', 0.04),
+                nms_threshold=self._config.get('sam3_nms_threshold', 0.1),
+                mask_logit_threshold=self._config.get('sam3_mask_logit_threshold', 0.75),
                 enable_refinement=self._config.get('enable_refinement', True),
                 refine_sky_only=self._config.get('refine_sky_only', True),
                 seam_aware_refinement=self._config.get('seam_aware_refinement', True),
@@ -88,6 +94,11 @@ class _SAM3PreviewWorker(QThread):
             )
             masker.set_enabled_categories(self._config.get('sam3_prompts', self._config.get('categories', {})))
             masker.set_custom_prompts(self._config.get('sam3_custom_prompts', ''))
+            if hasattr(masker, 'set_fisheye_circle_mask'):
+                masker.set_fisheye_circle_mask(
+                    self._config.get('fisheye_circle_mask_enabled', False),
+                    self._config.get('fisheye_circle_mask_radius_percent', 94),
+                )
             result = masker.generate_preview_assets(Path(self._image_path))
             self.completed.emit(result)
         except Exception as exc:
@@ -112,6 +123,8 @@ class SAM3PreviewWidget(QWidget):
         self._pan_x: int = 0   # crop offset from center in zoomed px (shared by both panels)
         self._pan_y: int = 0
         self._orig_pixmaps: dict[int, QPixmap] = {}   # keyed by id(label)
+        self._last_preview_key: str | None = None
+        self._last_preview_result: dict | None = None
         self._build_ui()
 
     def _build_ui(self):
@@ -135,10 +148,12 @@ class SAM3PreviewWidget(QWidget):
 
         button_row = QHBoxLayout()
         self.preview_button = QPushButton('Run SAM3 Preview')
+        self.preview_button.setToolTip('Runs the selected image through the SAM3 masking path directly, without switching to YOLO-backed preview routing.')
         self.preview_button.clicked.connect(self.run_preview)
         button_row.addWidget(self.preview_button)
 
-        self.launch_gui_button = QPushButton('Launch Interactive GUI')
+        self.launch_gui_button = QPushButton('Open SAM3 Interactive GUI')
+        self.launch_gui_button.setToolTip('Launches sam3_image.exe for direct interactive SAM3 testing on the selected image.')
         self.launch_gui_button.clicked.connect(self.launch_interactive_gui)
         button_row.addWidget(self.launch_gui_button)
 
@@ -175,7 +190,7 @@ class SAM3PreviewWidget(QWidget):
         hint.setProperty('role', 'mutedSmall')
         layout.addWidget(hint)
 
-        self.status_label = QLabel('SAM3 resolves a preview from the Stage 3 input folder, current images, output folders, or the Extraction preview when available.')
+        self.status_label = QLabel('Run SAM3 Preview uses the SAM3 masking path directly. Open SAM3 Interactive GUI launches sam3_image.exe for manual interactive testing on the selected image.')
         self.status_label.setWordWrap(True)
         self.status_label.setProperty('role', 'mutedSmall')
         layout.addWidget(self.status_label)
@@ -333,6 +348,32 @@ class SAM3PreviewWidget(QWidget):
             return self._config_provider() or {}
         return {}
 
+    def _build_preview_cache_key(self, config: dict, image_path: str) -> str:
+        payload = {
+            'image_path': image_path,
+            'segment_persons_exe': config.get('segment_persons_exe', ''),
+            'model_path': config.get('model_path', ''),
+            'sam3_backend_mode': config.get('sam3_backend_mode', 'auto'),
+            'use_gpu': bool(config.get('use_gpu', True)),
+            'fisheye_circle_mask_enabled': bool(config.get('fisheye_circle_mask_enabled', False)),
+            'fisheye_circle_mask_radius_percent': int(config.get('fisheye_circle_mask_radius_percent', 94)),
+            'feather_radius': int(config.get('feather_radius', 8)),
+            'morph_radius': int(config.get('morph_radius', 0)),
+            'enable_refinement': bool(config.get('enable_refinement', True)),
+            'refine_sky_only': bool(config.get('refine_sky_only', True)),
+            'seam_aware_refinement': bool(config.get('seam_aware_refinement', True)),
+            'edge_sharpen_strength': float(config.get('edge_sharpen_strength', 0.75)),
+            'alpha_export': bool(config.get('alpha_export', False)),
+            'max_input_width': int(config.get('max_input_width', 0)),
+            'sam3_score_threshold': float(config.get('sam3_score_threshold', 0.04)),
+            'sam3_nms_threshold': float(config.get('sam3_nms_threshold', 0.1)),
+            'sam3_mask_logit_threshold': float(config.get('sam3_mask_logit_threshold', 0.75)),
+            'sam3_prompts': config.get('sam3_prompts', {}),
+            'sam3_custom_prompts': config.get('sam3_custom_prompts', ''),
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        return hashlib.sha1(serialized.encode('utf-8')).hexdigest()
+
     def _browse_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -399,11 +440,21 @@ class SAM3PreviewWidget(QWidget):
             self._set_status('SAM3.cpp executable and model must be configured first.', error=True)
             return
 
+        preview_key = self._build_preview_cache_key(config, image_path)
+        if self._last_preview_key == preview_key and self._last_preview_result:
+            overlay_path = Path(self._last_preview_result.get('overlay_path', '')) if self._last_preview_result.get('overlay_path') else None
+            if overlay_path and overlay_path.exists():
+                self._set_image(self.original_label, Path(image_path))
+                self._on_preview_completed(dict(self._last_preview_result))
+                self._set_status(f'SAM3 preview reused cached result for {Path(image_path).name}')
+                return
+
         self.preview_button.setEnabled(False)
         self._set_image(self.original_label, Path(image_path))
-        self._set_status('Running SAM3.cpp preview...')
+        self._set_status('Running SAM3 preview...')
 
         self._worker = _SAM3PreviewWorker(config, image_path)
+        self._worker._preview_cache_key = preview_key
         self._worker.completed.connect(self._on_preview_completed)
         self._worker.failed.connect(self._on_preview_failed)
         self._worker.finished.connect(self._on_preview_finished)
@@ -411,6 +462,8 @@ class SAM3PreviewWidget(QWidget):
 
     def mark_stale(self) -> None:
         """Notify the user that settings changed and preview needs re-run."""
+        self._last_preview_key = None
+        self._last_preview_result = None
         if self._preview_has_run:
             self._set_status('Settings changed — click Run SAM3 Preview to update.')
 
@@ -418,10 +471,22 @@ class SAM3PreviewWidget(QWidget):
         overlay_path = Path(result.get('overlay_path', '')) if result.get('overlay_path') else None
         if overlay_path and overlay_path.exists():
             self._set_image(self.overlay_label, overlay_path)
+        cache_key = getattr(self._worker, '_preview_cache_key', None) if self._worker is not None else self._last_preview_key
+        if cache_key:
+            self._last_preview_key = cache_key
+            self._last_preview_result = dict(result)
         self._preview_has_run = True
-        self._set_status(f"SAM3.cpp preview ready for {Path(result['image_path']).name}")
+        has_detections = str(result.get('has_detections', '')).strip().lower() == 'true'
+        mask_source = str(result.get('mask_source', 'sam3')).strip().lower()
+        if has_detections:
+            self._set_status(f"SAM3 preview ready for {Path(result['image_path']).name}")
+        else:
+            self._set_status(
+                f"SAM3 preview ready for {Path(result['image_path']).name} — no detections for the selected prompts; mask is all keep.")
 
     def _on_preview_failed(self, error: str) -> None:
+        self._last_preview_key = None
+        self._last_preview_result = None
         self._set_status(error, error=True)
 
     def _on_preview_finished(self) -> None:
@@ -446,13 +511,16 @@ class SAM3PreviewWidget(QWidget):
                 sam3_image_exe=config['sam3_image_exe'],
                 use_gpu=config.get('use_gpu', True),
                 feather_radius=config.get('feather_radius', 8),
+                score_threshold=config.get('sam3_score_threshold', 0.04),
+                nms_threshold=config.get('sam3_nms_threshold', 0.1),
+                mask_logit_threshold=config.get('sam3_mask_logit_threshold', 0.75),
                 enable_refinement=config.get('enable_refinement', True),
                 refine_sky_only=config.get('refine_sky_only', True),
                 seam_aware_refinement=config.get('seam_aware_refinement', True),
                 edge_sharpen_strength=config.get('edge_sharpen_strength', 0.75),
             )
             masker.launch_interactive_gui(Path(image_path))
-            self._set_status(f'Launched SAM3 interactive GUI for {Path(image_path).name}')
+            self._set_status(f'Opened SAM3 interactive GUI for {Path(image_path).name}')
         except Exception as exc:
             logger.error('Failed to launch SAM3 interactive GUI: %s', exc, exc_info=True)
             QMessageBox.critical(self, 'SAM3 Launch Failed', str(exc))

@@ -261,7 +261,7 @@ MASKING_ENGINES = {
         'name': 'SAM 3',
         'description': 'Windows-native external SAM3.cpp executable integration',
         'requires': ['segment_persons.exe', 'sam3 model'],
-        'default_model': 'sam3-q4_0.ggml'
+        'default_model': 'sam3-f16.ggml'
     }
 }
 
