@@ -66,6 +66,57 @@ def _build_dir_from_executable(executable_path: Path) -> Path | None:
     return None
 
 
+def _runtime_search_dirs(executable_path: Path, build_dir: Path | None) -> list[Path]:
+    exe_path = Path(executable_path)
+    exe_dir = exe_path.parent
+    candidates: list[Path] = [exe_dir]
+
+    if build_dir is not None:
+        candidates.extend([
+            build_dir / 'bin',
+            build_dir / 'bin' / 'Release',
+            build_dir / 'bin' / 'Debug',
+        ])
+
+    if exe_dir.name.lower() in _BUILD_CONFIG_DIRS and exe_dir.parent.name.lower() == 'examples':
+        root = exe_dir.parent.parent
+        candidates.extend([
+            root / 'bin',
+            root / 'bin' / exe_dir.name,
+        ])
+    elif exe_dir.name.lower() == 'examples':
+        root = exe_dir.parent
+        candidates.extend([
+            root / 'bin',
+            root / 'bin' / 'Release',
+            root / 'bin' / 'Debug',
+        ])
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _runtime_has_file(search_dirs: list[Path], filename: str) -> bool:
+    target = filename.lower()
+    for directory in search_dirs:
+        try:
+            if not directory.exists():
+                continue
+            for child in directory.iterdir():
+                if child.is_file() and child.name.lower() == target:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def _cache_value(cache_text: str, key: str) -> str:
     match = re.search(rf'^{re.escape(key)}:[^=]*=(.*)$', cache_text, re.MULTILINE)
     return match.group(1).strip() if match else ''
@@ -94,11 +145,19 @@ def inspect_sam3_executable_backend(executable_path: str | Path) -> SAM3BackendI
 
     build_dir = _build_dir_from_executable(exe_path)
     if build_dir is None:
+        runtime_dirs = _runtime_search_dirs(exe_path, None)
+        if _runtime_has_file(runtime_dirs, 'ggml-vulkan.dll'):
+            return SAM3BackendInfo('vulkan', f'Runtime Vulkan backend inferred for {exe_path.name}', None)
+        if _runtime_has_file(runtime_dirs, 'ggml-cuda.dll'):
+            return SAM3BackendInfo('cuda', f'Runtime CUDA backend inferred for {exe_path.name}', None)
+        if _runtime_has_file(runtime_dirs, 'ggml-cpu.dll'):
+            return SAM3BackendInfo('cpu', f'Runtime CPU backend inferred for {exe_path.name}', None)
         return SAM3BackendInfo('unknown', f'Could not infer build directory for {exe_path}', None)
 
     cache_text = _read_text(build_dir / 'CMakeCache.txt')
     ninja_text = _read_text(build_dir / 'build.ninja')
     link_snippet = _target_link_snippet(ninja_text, exe_path.name)
+    runtime_dirs = _runtime_search_dirs(exe_path, build_dir)
 
     ggml_vulkan = _cache_bool(cache_text, 'GGML_VULKAN')
     sam3_vulkan = _cache_bool(cache_text, 'SAM3_VULKAN')
@@ -116,6 +175,9 @@ def inspect_sam3_executable_backend(executable_path: str | Path) -> SAM3BackendI
         for token in ('ggml-cuda', 'cudart.lib', 'cuda.lib', 'cublas.lib', 'cublaslt.lib')
     )
     link_has_cpu = 'ggml-cpu.lib' in link_snippet.lower()
+    runtime_has_vulkan = _runtime_has_file(runtime_dirs, 'ggml-vulkan.dll')
+    runtime_has_cuda = _runtime_has_file(runtime_dirs, 'ggml-cuda.dll')
+    runtime_has_cpu = _runtime_has_file(runtime_dirs, 'ggml-cpu.dll')
 
     if (ggml_vulkan or sam3_vulkan) and sdk_resolved and link_has_vulkan:
         return SAM3BackendInfo('vulkan', f'Verified Vulkan backend for {exe_path.name}', build_dir)
@@ -123,7 +185,13 @@ def inspect_sam3_executable_backend(executable_path: str | Path) -> SAM3BackendI
     if (ggml_cuda or sam3_cuda) and link_has_cuda:
         return SAM3BackendInfo('cuda', f'CUDA backend for {exe_path.name}', build_dir)
 
-    if not (ggml_vulkan or sam3_vulkan) and link_has_cpu and not link_has_vulkan:
+    if runtime_has_vulkan and not runtime_has_cuda:
+        return SAM3BackendInfo('vulkan', f'Runtime Vulkan backend inferred for {exe_path.name}', build_dir)
+
+    if runtime_has_cuda and not runtime_has_vulkan:
+        return SAM3BackendInfo('cuda', f'Runtime CUDA backend inferred for {exe_path.name}', build_dir)
+
+    if not (ggml_vulkan or sam3_vulkan) and (link_has_cpu or runtime_has_cpu) and not (link_has_vulkan or runtime_has_vulkan):
         return SAM3BackendInfo('cpu', f'CPU-only backend for {exe_path.name}', build_dir)
 
     if ggml_vulkan or sam3_vulkan or 'build-vulkan' in str(build_dir).lower():
