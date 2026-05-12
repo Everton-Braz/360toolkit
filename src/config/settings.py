@@ -992,7 +992,13 @@ class SettingsManager:
         if value:
             candidate = Path(value)
             if candidate.exists():
-                return candidate
+                info = inspect_sam3_executable_backend(candidate)
+                if info.backend == SAM3_BACKEND_CUDA:
+                    return candidate
+                logger.warning("Ignoring non-CUDA SAM3 segmenter path in CUDA-only build: %s (%s)", candidate, info.backend)
+        preferred = _resolve_preferred_sam3_executable('segment_persons.exe', SAM3_BACKEND_CUDA)
+        if preferred.exists():
+            return preferred
         return self._detect_bundled_file(self._bundled_sam3_segmenter_candidates(), 'SAM3 segmenter')
 
     def set_sam3_segmenter_path(self, path: Optional[Path | str]):
@@ -1007,6 +1013,10 @@ class SettingsManager:
 
     def set_sam3_backend_mode(self, mode: str):
         self.settings['sam3_backend_mode'] = SAM3_BACKEND_CUDA
+        segmenter = _resolve_preferred_sam3_executable('segment_persons.exe', SAM3_BACKEND_CUDA)
+        gui = _resolve_preferred_sam3_executable('sam3_image.exe', SAM3_BACKEND_CUDA)
+        self.settings['sam3_segmenter_path'] = str(segmenter)
+        self.settings['sam3_image_exe_path'] = str(gui)
         self._refresh_bundled_sam3_paths()
         self.save_settings()
 
@@ -1027,7 +1037,9 @@ class SettingsManager:
         if value:
             candidate = Path(value)
             if candidate.exists():
-                return candidate
+                info = inspect_sam3_executable_backend(candidate)
+                if info.backend == SAM3_BACKEND_CUDA:
+                    return candidate
         return self._detect_bundled_file(self._bundled_sam3_gui_candidates(), 'SAM3 GUI')
 
     def set_sam3_image_exe_path(self, path: Optional[Path | str]):
