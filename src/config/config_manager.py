@@ -300,7 +300,7 @@ class ConfigManager:
             'model_size': 'small',
             'confidence_threshold': DEFAULT_CONFIDENCE_THRESHOLD,
             'use_gpu': DEFAULT_USE_GPU,
-            'sam3_backend_mode': 'auto',
+            'sam3_backend_mode': 'cuda',
             'sam3_segmenter_path': str(_DEFAULT_SAM3_SEGMENTER),
             'sam3_model_path': str(_DEFAULT_SAM3_MODEL),
             'sam3_image_exe_path': str(_DEFAULT_SAM3_GUI),

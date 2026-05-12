@@ -33,7 +33,7 @@ _APP_ROOT = Path(__file__).resolve().parents[2]
 
 _LEGACY_SAM3_MAX_INPUT_WIDTH = 3840
 _DEFAULT_SAM3_MAX_INPUT_WIDTH = 0
-_DEFAULT_SAM3_BACKEND_MODE = SAM3_BACKEND_AUTO
+_DEFAULT_SAM3_BACKEND_MODE = SAM3_BACKEND_CUDA
 
 
 def _sam3_host_prefers_cuda() -> bool:
@@ -1003,11 +1003,10 @@ class SettingsManager:
         self.save_settings()
 
     def get_sam3_backend_mode(self) -> str:
-        return normalize_sam3_backend_mode(self.settings.get('sam3_backend_mode'), use_gpu=True)
+        return SAM3_BACKEND_CUDA
 
     def set_sam3_backend_mode(self, mode: str):
-        normalized = normalize_sam3_backend_mode(mode, use_gpu=True)
-        self.settings['sam3_backend_mode'] = normalized
+        self.settings['sam3_backend_mode'] = SAM3_BACKEND_CUDA
         self._refresh_bundled_sam3_paths()
         self.save_settings()
 

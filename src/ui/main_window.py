@@ -1409,21 +1409,11 @@ class MainWindow(QMainWindow):
         sam3_paths_hint.setProperty("role", "secondary")
         sam3_layout.addWidget(sam3_paths_hint)
 
-        sam3_backend_widget = QWidget()
-        sam3_backend_layout = QHBoxLayout(sam3_backend_widget)
-        sam3_backend_layout.setContentsMargins(0, 0, 0, 0)
-        sam3_backend_layout.setSpacing(8)
-        self.sam3_backend_mode_combo = QComboBox()
-        self.sam3_backend_mode_combo.addItem("Auto (prefer best available)", "auto")
-        self.sam3_backend_mode_combo.addItem("CUDA", "cuda")
-        self.sam3_backend_mode_combo.addItem("Vulkan", "vulkan")
-        self.sam3_backend_mode_combo.addItem("CPU", "cpu")
-        self.sam3_backend_mode_combo.currentIndexChanged.connect(self._on_sam3_backend_mode_changed)
-        sam3_backend_layout.addWidget(self.sam3_backend_mode_combo)
-        sam3_backend_layout.addStretch()
-        sam3_layout.addWidget(FormRow("Backend:", sam3_backend_widget, "Auto prefers the best configured backend and manual modes stay strict."))
+        sam3_backend_hint = QLabel("CUDA (fixed)")
+        sam3_backend_hint.setProperty("role", "secondary")
+        sam3_layout.addWidget(FormRow("Backend:", sam3_backend_hint, "This build is CUDA-only for Stage 3 masking."))
 
-        self.sam3_backend_active_label = QLabel("Requested: Auto | Executable: detecting... | Model: detecting...")
+        self.sam3_backend_active_label = QLabel("Requested: CUDA | Executable: detecting... | Model: detecting...")
         self.sam3_backend_active_label.setWordWrap(True)
         self.sam3_backend_active_label.setProperty("role", "muted")
         sam3_layout.addWidget(self.sam3_backend_active_label)
@@ -2324,33 +2314,22 @@ class MainWindow(QMainWindow):
         return str(gui) if gui else ''
 
     def _get_sam3_backend_mode(self) -> str:
-        return self.settings.get_sam3_backend_mode()
+        # CUDA-only shipping build: keep backend fixed regardless of legacy config values.
+        return 'cuda'
 
     def _get_masking_use_gpu(self) -> bool:
         if hasattr(self, 'masking_engine_combo'):
             engine = self._normalize_masking_engine(self.masking_engine_combo.currentData())
             if engine != 'sam3_cpp':
                 return True
-        return self._get_sam3_backend_mode() != 'cpu'
+        return True
 
     def _sync_sam3_backend_selector_from_settings(self):
-        if not hasattr(self, 'sam3_backend_mode_combo'):
-            return
-        mode = self._get_sam3_backend_mode()
-        index = self.sam3_backend_mode_combo.findData(mode)
-        if index < 0:
-            index = self.sam3_backend_mode_combo.findData('auto')
-        if index < 0:
-            return
-        self.sam3_backend_mode_combo.blockSignals(True)
-        self.sam3_backend_mode_combo.setCurrentIndex(index)
-        self.sam3_backend_mode_combo.blockSignals(False)
+        # Preserve settings normalization for old config files and force CUDA-only mode.
+        self.settings.set_sam3_backend_mode('cuda')
 
     def _set_sam3_paths_from_config(self, config: dict):
-        if 'sam3_backend_mode' in config:
-            self.settings.set_sam3_backend_mode(config['sam3_backend_mode'])
-        elif 'use_gpu' in config:
-            self.settings.set_sam3_backend_mode('auto' if config['use_gpu'] else 'cpu')
+        self.settings.set_sam3_backend_mode('cuda')
         if 'sam3_segmenter_path' in config:
             self.settings.set_sam3_segmenter_path(config['sam3_segmenter_path'])
         if 'sam3_model_path' in config:
@@ -2833,15 +2812,12 @@ class MainWindow(QMainWindow):
         self._update_masking_runtime_status()
 
     def _on_sam3_backend_mode_changed(self, index: int):
-        if not hasattr(self, 'sam3_backend_mode_combo'):
-            return
-        mode = str(self.sam3_backend_mode_combo.currentData() or 'auto')
-        self.settings.set_sam3_backend_mode(mode)
+        self.settings.set_sam3_backend_mode('cuda')
         if hasattr(self, 'sam3_preview_widget'):
             self.sam3_preview_widget.refresh_state()
             self.sam3_preview_widget.mark_stale()
         self._update_masking_runtime_status()
-        self.log_message(f"[SAM3] Backend mode set to {mode.upper()}.")
+        self.log_message("[SAM3] Backend mode fixed to CUDA in this build.")
     
     def _on_recon_tool_changed(self, index: int):
         self.recon_params_stack.setCurrentIndex(index)
