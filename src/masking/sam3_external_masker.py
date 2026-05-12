@@ -193,7 +193,14 @@ class SAM3ExternalMasker:
         self._segmenter_backend_info = inspect_sam3_executable_backend(self.segment_persons_exe)
         self.effective_use_gpu = self.use_gpu and sam3_backend_supports_gpu(self._segmenter_backend_info.backend)
 
-        self.enabled_categories: Dict[str, bool] = {k: True for k in _PROMPT_MAP}
+        self.enabled_categories: Dict[str, bool] = {
+            'persons': True,
+            'bags': False,
+            'phones': False,
+            'hats': False,
+            'helmets': False,
+            'sky': False,
+        }
         self.custom_prompts: List[str] = []
 
         self._validate_runtime()
@@ -391,8 +398,35 @@ class SAM3ExternalMasker:
         if search:
             existing = env.get('PATH', '')
             env['PATH'] = os.pathsep.join(search + ([existing] if existing else []))
-        env['SAM3_PCS_MASK_LOGIT_THRESHOLD'] = str(self.mask_logit_threshold)
+        effective_logit_threshold = self._effective_mask_logit_threshold()
+        env['SAM3_PCS_MASK_LOGIT_THRESHOLD'] = str(effective_logit_threshold)
+        if self._segmenter_backend_info.backend in {SAM3_BACKEND_VULKAN, 'unverified-vulkan'}:
+            env['SAM3_STRICT_COMPONENT_CLEANUP'] = '1'
+        else:
+            env['SAM3_STRICT_COMPONENT_CLEANUP'] = '0'
+        logger.info(
+            '[SAM3] Effective logit threshold %.3f (base=%.3f, backend=%s, sky=%s)',
+            effective_logit_threshold,
+            self.mask_logit_threshold,
+            self._segmenter_backend_info.backend,
+            bool(self.enabled_categories.get('sky', False)),
+        )
         return env
+
+    def _effective_mask_logit_threshold(self) -> float:
+        """Apply the same threshold policy for CUDA and Vulkan backends."""
+        threshold = float(self.mask_logit_threshold)
+        backend = self._segmenter_backend_info.backend
+        detail_prompts_enabled = any(
+            bool(self.enabled_categories.get(key, False))
+            for key in ('bags', 'phones', 'hats', 'helmets')
+        )
+
+        # Keep CUDA and Vulkan on identical effective values when detail prompts are enabled.
+        if backend in {SAM3_BACKEND_CUDA, SAM3_BACKEND_VULKAN, 'unverified-vulkan'} and detail_prompts_enabled:
+            threshold = max(0.55, threshold - 0.08)
+
+        return threshold
 
     def _ensure_gpu_backend(self, executable_path: Path, label: str) -> None:
         if not self.effective_use_gpu:
