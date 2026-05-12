@@ -73,6 +73,8 @@ def _sam3_root_candidates() -> List[Path]:
 
 def _sam3_build_output_relative_candidates(filename: str) -> List[Path]:
     return [
+        Path('build-cuda-shipping') / 'examples' / filename,
+        Path('build-cuda-shipping') / 'examples' / 'Release' / filename,
         Path('bvv') / 'examples' / filename,
         Path('bvv') / 'examples' / 'Release' / filename,
         Path('build-cuda') / 'examples' / filename,
@@ -135,7 +137,7 @@ def _sam3_missing_backend_fallback(filename: str, preferred_backend: str) -> Pat
     if mode == SAM3_BACKEND_VULKAN:
         return root / 'build-vulkan' / 'examples' / filename
     if mode == SAM3_BACKEND_CUDA:
-        return root / 'build-cuda' / 'examples' / filename
+        return root / 'build-cuda-shipping' / 'examples' / filename
     if mode == SAM3_BACKEND_CPU:
         return root / 'build' / 'examples' / filename
     return root / 'build' / 'examples' / 'Release' / filename

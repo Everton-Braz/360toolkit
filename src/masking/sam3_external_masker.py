@@ -56,6 +56,8 @@ logger = logging.getLogger(__name__)
 
 def _sam3_build_output_relative_candidates(filename: str) -> List[Path]:
     return [
+        Path('build-cuda-shipping') / 'examples' / filename,
+        Path('build-cuda-shipping') / 'examples' / 'Release' / filename,
         Path('bvv') / 'examples' / filename,
         Path('bvv') / 'examples' / 'Release' / filename,
         Path('build-cuda') / 'examples' / filename,
