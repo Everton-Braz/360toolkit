@@ -2090,6 +2090,8 @@ class PipelineWorker(QThread):
                             score_threshold=self.config.get('sam3_score_threshold', 0.04),
                             nms_threshold=self.config.get('sam3_nms_threshold', 0.1),
                             mask_logit_threshold=self.config.get('sam3_mask_logit_threshold', 0.75),
+                            enable_sequence_mode=self.config.get('sam3_enable_sequence_mode', True),
+                            sequence_mode_min_frames=self.config.get('sam3_sequence_mode_min_frames', 12),
                             enable_refinement=self.config.get('sam3_enable_refinement', True),
                             refine_sky_only=self.config.get('sam3_refine_sky_only', True),
                             seam_aware_refinement=self.config.get('sam3_seam_aware_refinement', True),

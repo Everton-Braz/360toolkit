@@ -263,6 +263,8 @@ class SettingsManager:
             'sam3_score_threshold': 0.04,
             'sam3_nms_threshold': 0.1,
             'sam3_mask_logit_threshold': 0.75,
+            'sam3_enable_sequence_mode': True,
+            'sam3_sequence_mode_min_frames': 12,
         }
         try:
             if self.settings_file.exists():

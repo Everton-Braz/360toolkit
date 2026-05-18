@@ -44,13 +44,17 @@
 
 - Current GUI workflow uses external `SAM3.cpp` person masking
 - Configure `segment_persons.exe`, a SAM3 model such as `sam3-q4_0.ggml`, and optionally `sam3_image.exe` in `Settings > Paths & Detection`
-- The packaged Windows build now bundles the SAM3.cpp runtime in `_internal/sam3cpp` when `downloads/sam3cpp` is present at build time, including the required CUDA BLAS DLLs for the shipping CUDA build when that backend is packaged
+- The Stage 3 panel now exposes a `Video mode` checkbox for SAM3 sequence tracking on extracted frame folders; disable it to force normal per-frame masking
+- The packaged Windows build now bundles the SAM3.cpp runtime in `_internal/sam3cpp` when `downloads/sam3cpp` is present at build time, including `segment_persons_track.exe` and the required CUDA BLAS DLLs for the shipping CUDA build when that backend is packaged
 - Stage 3 supports:
   - Auto source selection between perspective views and extracted equirectangular frames
+  - Selectable sequence mode for extracted frame sets (video-like tracking path when `segment_persons_track.exe` is available)
   - Mask-only runs from an explicit Stage 3 input folder
   - Preview generation through the SAM3 preview widget
   - Alpha-export and alpha-only modes
   - Custom prompt text and refinement controls
+
+The current CUDA shipping tracker build includes the native flash-attention fix required for SAM3 video mode on the packaged Windows app, and the packaged EXE was validated with CUDA sequence tracking after rebuild.
 - Output folders:
   - `masks_perspective/`
   - `masks_equirect/`

@@ -1368,7 +1368,7 @@ class MainWindow(QMainWindow):
             lambda: self._browse_for_file(self.yolo_model_path_edit, "Select YOLO ONNX Model", "ONNX Models (*.onnx)")
         )
         yolo_model_layout.addWidget(self.yolo_model_browse_btn)
-        card_model.addWidget(FormRow("Custom ONNX:", self.yolo_model_path_container, "Optional: choose a specific YOLO ONNX file instead of the bundled size map"))
+        # Custom ONNX override is intentionally hidden in the CUDA-only SAM3-focused build.
 
         self.mask_output_mode_container = QWidget()
         mask_output_layout = QHBoxLayout(self.mask_output_mode_container)
@@ -1404,19 +1404,6 @@ class MainWindow(QMainWindow):
         sam3_layout.setContentsMargins(0, 0, 0, 0)
         sam3_layout.setSpacing(8)
 
-        sam3_paths_hint = QLabel("Configure segment_persons.exe, the SAM3 model, and sam3_image.exe in Settings > Paths & Detection.")
-        sam3_paths_hint.setWordWrap(True)
-        sam3_paths_hint.setProperty("role", "secondary")
-        sam3_layout.addWidget(sam3_paths_hint)
-
-        sam3_backend_hint = QLabel("CUDA (fixed)")
-        sam3_backend_hint.setProperty("role", "secondary")
-        sam3_layout.addWidget(FormRow("Backend:", sam3_backend_hint, "This build is CUDA-only for Stage 3 masking."))
-
-        self.sam3_backend_active_label = QLabel("Requested: CUDA | Executable: detecting... | Model: detecting...")
-        self.sam3_backend_active_label.setWordWrap(True)
-        self.sam3_backend_active_label.setProperty("role", "muted")
-        sam3_layout.addWidget(self.sam3_backend_active_label)
         self._sync_sam3_backend_selector_from_settings()
 
         sam3_feather_row = QWidget()
@@ -1451,6 +1438,19 @@ class MainWindow(QMainWindow):
         sam3_sharpen_layout.addWidget(QLabel("Higher values push mask edges harder toward image boundaries."))
         sam3_sharpen_layout.addStretch()
         sam3_layout.addWidget(FormRow("Edge Sharpen:", sam3_sharpen_widget))
+
+        sam3_sequence_row = QWidget()
+        sam3_sequence_layout = QHBoxLayout(sam3_sequence_row)
+        sam3_sequence_layout.setContentsMargins(0, 0, 0, 0)
+        sam3_sequence_layout.setSpacing(8)
+        self.sam3_sequence_mode_check = QCheckBox("Video mode")
+        self.sam3_sequence_mode_check.setChecked(True)
+        self.sam3_sequence_mode_check.setToolTip("Use tracker-based sequence masking for extracted frame folders. Disable to force normal per-frame masking.")
+        self.sam3_sequence_mode_check.toggled.connect(self._on_sam3_config_changed)
+        sam3_sequence_layout.addWidget(self.sam3_sequence_mode_check)
+        sam3_sequence_layout.addWidget(QLabel("Uses the SAM3 tracker on frame sequences and stays on CUDA."))
+        sam3_sequence_layout.addStretch()
+        sam3_layout.addWidget(FormRow("Processing mode:", sam3_sequence_row))
 
         # ── Prompt Categories ────────────────────────────────────────────────
         sam3_cats_sep = QFrame()
@@ -2156,6 +2156,7 @@ class MainWindow(QMainWindow):
             'sam3_refine_sky_only': getattr(self, 'sam3_refine_sky_only', True),
             'sam3_seam_aware_refinement': getattr(self, 'sam3_seam_aware_refinement', True),
             'sam3_edge_sharpen_strength': self.sam3_edge_sharpen_spin.value() if hasattr(self, 'sam3_edge_sharpen_spin') else 0.75,
+            'sam3_enable_sequence_mode': self._get_sam3_sequence_mode_enabled(),
             'sam3_prompts': {k: cb.isChecked() for k, cb in self.sam3_prompt_checks.items()} if hasattr(self, 'sam3_prompt_checks') else {},
             'sam3_custom_prompts': self.sam3_custom_prompts_edit.text().strip() if hasattr(self, 'sam3_custom_prompts_edit') else '',
             'sam3_morph_radius': self.sam3_morph_spin.value() if hasattr(self, 'sam3_morph_spin') else (self.sam3_morph_slider.value() if hasattr(self, 'sam3_morph_slider') else 0),
@@ -2366,6 +2367,11 @@ class MainWindow(QMainWindow):
                 return mode
         return 'masks_only'
 
+    def _get_sam3_sequence_mode_enabled(self) -> bool:
+        if hasattr(self, 'sam3_sequence_mode_check'):
+            return bool(self.sam3_sequence_mode_check.isChecked())
+        return True
+
     def _get_available_yolo_model_sizes(self) -> dict[str, Path]:
         model_candidates = {
             'nano': ('yolo26n-seg.onnx', 'yolov8n-seg.onnx'),
@@ -2434,6 +2440,7 @@ class MainWindow(QMainWindow):
             'sam3_score_threshold': self.sam3_score_spin.value() if hasattr(self, 'sam3_score_spin') else 0.04,
             'sam3_nms_threshold': self.sam3_nms_spin.value() if hasattr(self, 'sam3_nms_spin') else 0.1,
             'sam3_mask_logit_threshold': 0.75,
+            'sam3_enable_sequence_mode': self._get_sam3_sequence_mode_enabled(),
             'sam3_prompts': prompts,
             'sam3_custom_prompts': self.sam3_custom_prompts_edit.text().strip() if hasattr(self, 'sam3_custom_prompts_edit') else '',
         }
@@ -2678,6 +2685,8 @@ class MainWindow(QMainWindow):
                 self.sam3_seam_aware_refinement = bool(config['sam3_seam_aware_refinement'])
             if 'sam3_edge_sharpen_strength' in config and hasattr(self, 'sam3_edge_sharpen_spin'):
                 self.sam3_edge_sharpen_spin.setValue(float(config['sam3_edge_sharpen_strength']))
+            if 'sam3_enable_sequence_mode' in config and hasattr(self, 'sam3_sequence_mode_check'):
+                self.sam3_sequence_mode_check.setChecked(bool(config['sam3_enable_sequence_mode']))
             if 'sam3_prompts' in config and hasattr(self, 'sam3_prompt_checks'):
                 for k, cb in self.sam3_prompt_checks.items():
                     cb.setChecked(config['sam3_prompts'].get(k, True))
@@ -3508,6 +3517,7 @@ class MainWindow(QMainWindow):
                 'sam3_refine_sky_only': getattr(self, 'sam3_refine_sky_only', True),
                 'sam3_seam_aware_refinement': getattr(self, 'sam3_seam_aware_refinement', True),
                 'sam3_edge_sharpen_strength': self.sam3_edge_sharpen_spin.value() if hasattr(self, 'sam3_edge_sharpen_spin') else 0.75,
+                'sam3_enable_sequence_mode': self._get_sam3_sequence_mode_enabled(),
                 'sam3_morph_radius': self.sam3_morph_spin.value() if hasattr(self, 'sam3_morph_spin') else (self.sam3_morph_slider.value() if hasattr(self, 'sam3_morph_slider') else 0),
                 'sam3_output_mode': self._get_mask_output_mode(),
                 'sam3_alpha_export': self._get_mask_output_mode() in ('alpha_only', 'both'),

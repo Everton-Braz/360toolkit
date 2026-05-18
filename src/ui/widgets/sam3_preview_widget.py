@@ -87,6 +87,8 @@ class _SAM3PreviewWorker(QThread):
                 score_threshold=self._config.get('sam3_score_threshold', 0.04),
                 nms_threshold=self._config.get('sam3_nms_threshold', 0.1),
                 mask_logit_threshold=self._config.get('sam3_mask_logit_threshold', 0.75),
+                enable_sequence_mode=self._config.get('sam3_enable_sequence_mode', True),
+                sequence_mode_min_frames=self._config.get('sam3_sequence_mode_min_frames', 12),
                 enable_refinement=self._config.get('enable_refinement', True),
                 refine_sky_only=self._config.get('refine_sky_only', True),
                 seam_aware_refinement=self._config.get('seam_aware_refinement', True),
@@ -155,7 +157,7 @@ class SAM3PreviewWidget(QWidget):
         self.launch_gui_button = QPushButton('Open SAM3 Interactive GUI')
         self.launch_gui_button.setToolTip('Launches sam3_image.exe for direct interactive SAM3 testing on the selected image.')
         self.launch_gui_button.clicked.connect(self.launch_interactive_gui)
-        button_row.addWidget(self.launch_gui_button)
+        self.launch_gui_button.setVisible(False)
 
         button_row.addSpacing(16)
 
@@ -190,7 +192,7 @@ class SAM3PreviewWidget(QWidget):
         hint.setProperty('role', 'mutedSmall')
         layout.addWidget(hint)
 
-        self.status_label = QLabel('Run SAM3 Preview uses the SAM3 masking path directly. Open SAM3 Interactive GUI launches sam3_image.exe for manual interactive testing on the selected image.')
+        self.status_label = QLabel('Run SAM3 Preview uses the same SAM3 masking path as Stage 3.')
         self.status_label.setWordWrap(True)
         self.status_label.setProperty('role', 'mutedSmall')
         layout.addWidget(self.status_label)
@@ -368,6 +370,8 @@ class SAM3PreviewWidget(QWidget):
             'sam3_score_threshold': float(config.get('sam3_score_threshold', 0.04)),
             'sam3_nms_threshold': float(config.get('sam3_nms_threshold', 0.1)),
             'sam3_mask_logit_threshold': float(config.get('sam3_mask_logit_threshold', 0.75)),
+            'sam3_enable_sequence_mode': bool(config.get('sam3_enable_sequence_mode', True)),
+            'sam3_sequence_mode_min_frames': int(config.get('sam3_sequence_mode_min_frames', 12)),
             'sam3_prompts': config.get('sam3_prompts', {}),
             'sam3_custom_prompts': config.get('sam3_custom_prompts', ''),
         }
@@ -514,6 +518,8 @@ class SAM3PreviewWidget(QWidget):
                 score_threshold=config.get('sam3_score_threshold', 0.04),
                 nms_threshold=config.get('sam3_nms_threshold', 0.1),
                 mask_logit_threshold=config.get('sam3_mask_logit_threshold', 0.75),
+                enable_sequence_mode=config.get('sam3_enable_sequence_mode', True),
+                sequence_mode_min_frames=config.get('sam3_sequence_mode_min_frames', 12),
                 enable_refinement=config.get('enable_refinement', True),
                 refine_sky_only=config.get('refine_sky_only', True),
                 seam_aware_refinement=config.get('seam_aware_refinement', True),

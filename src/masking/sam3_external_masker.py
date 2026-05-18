@@ -30,6 +30,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+import re
 
 import threading as _threading
 
@@ -170,6 +171,8 @@ class SAM3ExternalMasker:
         refine_sky_only: bool = True,
         seam_aware_refinement: bool = True,
         edge_sharpen_strength: float = 0.75,
+        enable_sequence_mode: bool = True,
+        sequence_mode_min_frames: int = 12,
     ):
         self.segment_persons_exe = self._resolve_segmenter_path(Path(segment_persons_exe).expanduser())
         self.model_path = self._resolve_model_path(Path(model_path).expanduser())
@@ -188,6 +191,9 @@ class SAM3ExternalMasker:
         self.refine_sky_only = bool(refine_sky_only)
         self.seam_aware_refinement = bool(seam_aware_refinement)
         self.edge_sharpen_strength = float(edge_sharpen_strength)
+        self.enable_sequence_mode = bool(enable_sequence_mode)
+        self.sequence_mode_min_frames = max(2, int(sequence_mode_min_frames))
+        self._sequence_mode_unavailable = False
         self.cancelled = False
         self.fisheye_circle_mask_enabled = False
         self.fisheye_circle_mask_radius_percent = 94
@@ -240,6 +246,41 @@ class SAM3ExternalMasker:
                 seen.add(key)
                 candidates.append(candidate)
         return candidates
+
+    @staticmethod
+    def _natural_sort_key(path: Path) -> tuple:
+        """Sort filenames naturally so frame_2 comes before frame_10."""
+        parts = re.split(r'(\d+)', path.name.lower())
+        key: List[object] = []
+        for part in parts:
+            if part.isdigit():
+                key.append(int(part))
+            else:
+                key.append(part)
+        return tuple(key)
+
+    @staticmethod
+    def _looks_like_frame_sequence(image_paths: List[Path]) -> bool:
+        if len(image_paths) < 2:
+            return False
+        numeric = 0
+        for p in image_paths:
+            match = re.search(r'(\d+)(?!.*\d)', p.stem)
+            if match:
+                numeric += 1
+        return numeric >= max(2, int(len(image_paths) * 0.7))
+
+    def _resolve_tracker_segmenter_path(self) -> Optional[Path]:
+        """Find optional sequence tracker executable for video-like frame processing."""
+        pcs_dir = self.segment_persons_exe.parent
+        tracker_candidate = pcs_dir / 'segment_persons_track.exe'
+        if tracker_candidate.is_file():
+            return tracker_candidate
+
+        for path in self._sam3_executable_candidates('segment_persons_track.exe'):
+            if path.is_file():
+                return path
+        return None
 
     def _set_active_segmenter(self, executable_path: Path) -> None:
         self.segment_persons_exe = executable_path.resolve()
@@ -945,6 +986,142 @@ class SAM3ExternalMasker:
                 if not self._maybe_switch_auto_fallback(exc, attempted, 'segment_persons.exe'):
                     raise
 
+    def _run_tracker_sequence_exe_once(
+        self,
+        executable_path: Path,
+        image_paths: List[Path],
+        raw_mask_dir: Path,
+        progress_callback: Optional[Callable] = None,
+        cancellation_check: Optional[Callable] = None,
+    ) -> Dict[str, bool]:
+        """Run optional tracker-based sequence executable for frame folders.
+
+        This mode is intended for extracted frame sequences where temporal
+        coherence can improve throughput compared to per-frame detection.
+        """
+        prompts = self._build_prompts()
+        processed: Dict[str, bool] = {}
+
+        list_fd, list_path = tempfile.mkstemp(suffix='.txt', prefix='sam3_sequence_list_')
+        try:
+            safe_encoding = 'utf-8' if os.name != 'nt' else 'cp1252'
+            with os.fdopen(list_fd, 'w', encoding=safe_encoding) as f:
+                for p in image_paths:
+                    f.write(str(p) + '\n')
+
+            cmd = [
+                str(executable_path),
+                '--model', str(self.model_path),
+                '--image-list', list_path,
+                '--output-dir', str(raw_mask_dir),
+                '--prompts', ','.join(prompts),
+                '--score', str(self.score_threshold),
+                '--nms', str(self.nms_threshold),
+            ]
+
+            if self.effective_use_gpu:
+                self._ensure_gpu_backend(executable_path, 'segment_persons_track.exe')
+                cmd.append('--gpu')
+            else:
+                cmd.append('--no-gpu')
+
+            env = self._build_runtime_env(executable_path)
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(raw_mask_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                **_subprocess_no_window_kwargs(),
+            )
+
+            total = len(image_paths)
+            stderr_lines: List[str] = []
+
+            def _drain_stderr():
+                for ln in proc.stderr:
+                    stderr_lines.append(ln.rstrip())
+
+            stderr_thread = _threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line.startswith('PROCESSED '):
+                    parts = line.split()
+                    stem = parts[1] if len(parts) > 1 else '?'
+                    processed[stem] = True
+                    if progress_callback:
+                        progress_callback(len(processed), total, f"SAM3-SEQ: {stem}")
+                elif line:
+                    logger.debug("[SAM3-SEQ] OUTPUT: %s", line)
+
+                if cancellation_check and cancellation_check():
+                    proc.terminate()
+                    self.cancelled = True
+                    break
+
+            proc.wait()
+            stderr_thread.join(timeout=5)
+            self._ensure_runtime_backend(stderr_lines, executable_path, 'segment_persons_track.exe')
+            stderr_tail = '\n'.join(stderr_lines[-20:]) if stderr_lines else ''
+            if proc.returncode not in (0, 5):
+                raise RuntimeError(
+                    f"segment_persons_track.exe exited {proc.returncode}.\n{stderr_tail}"
+                )
+        finally:
+            try:
+                os.unlink(list_path)
+            except OSError:
+                pass
+
+        return processed
+
+    def _run_tracker_sequence_exe(
+        self,
+        image_paths: List[Path],
+        raw_mask_dir: Path,
+        progress_callback: Optional[Callable] = None,
+        cancellation_check: Optional[Callable] = None,
+    ) -> Dict[str, bool]:
+        attempted = {str(self.segment_persons_exe.resolve())}
+        while True:
+            tracker_exe = self._resolve_tracker_segmenter_path()
+            if tracker_exe is None or not tracker_exe.is_file():
+                self._sequence_mode_unavailable = True
+                logger.warning(
+                    '[SAM3] Sequence mode unavailable; segment_persons_track.exe not found. '
+                    'Falling back to standard batch masking.'
+                )
+                return self._run_batch_exe(
+                    image_paths,
+                    raw_mask_dir,
+                    progress_callback=progress_callback,
+                    cancellation_check=cancellation_check,
+                )
+            try:
+                return self._run_tracker_sequence_exe_once(
+                    tracker_exe,
+                    image_paths,
+                    raw_mask_dir,
+                    progress_callback=progress_callback,
+                    cancellation_check=cancellation_check,
+                )
+            except Exception as exc:
+                if not self._maybe_switch_auto_fallback(exc, attempted, 'segment_persons_track.exe'):
+                    self._sequence_mode_unavailable = True
+                    logger.warning(
+                        '[SAM3] Sequence mode failed (%s). Falling back to standard batch masking.',
+                        exc,
+                    )
+                    return self._run_batch_exe(
+                        image_paths,
+                        raw_mask_dir,
+                        progress_callback=progress_callback,
+                        cancellation_check=cancellation_check,
+                    )
+
     # ------------------------------------------------------------------
     # PVS helpers: equirectangular 360° images (YOLO boxes → SAM3 PVS)
     # ------------------------------------------------------------------
@@ -1302,7 +1479,7 @@ class SAM3ExternalMasker:
                 and '_mask' not in p.stem
                 and '_alpha' not in p.stem
             ],
-            key=lambda p: p.name.lower(),
+            key=self._natural_sort_key,
         )
 
         total = len(image_files)
@@ -1394,14 +1571,30 @@ class SAM3ExternalMasker:
         successful = 0
         failed = 0
 
-        runner_name = '_run_batch_exe'
+        sequence_mode = (
+            self.enable_sequence_mode
+            and not self._sequence_mode_unavailable
+            and len(proc_paths) >= self.sequence_mode_min_frames
+            and self._looks_like_frame_sequence(proc_paths)
+            and self._resolve_tracker_segmenter_path() is not None
+        )
+
+        runner_name = '_run_tracker_sequence_exe' if sequence_mode else '_run_batch_exe'
         logger.info("[SAM3] [START] Calling %s() with %d images...", runner_name, len(proc_paths))
         try:
-            result = self._run_batch_exe(
-                proc_paths, raw_dir,
-                progress_callback=progress_callback,
-                cancellation_check=cancellation_check,
-            )
+            if sequence_mode:
+                logger.info("[SAM3] Sequence mode enabled (video-style tracking over frame list)")
+                result = self._run_tracker_sequence_exe(
+                    proc_paths, raw_dir,
+                    progress_callback=progress_callback,
+                    cancellation_check=cancellation_check,
+                )
+            else:
+                result = self._run_batch_exe(
+                    proc_paths, raw_dir,
+                    progress_callback=progress_callback,
+                    cancellation_check=cancellation_check,
+                )
             logger.info("[SAM3] [OK] %s() completed: %d images processed", runner_name, len(result))
         except Exception as exc:
             logger.error("[SAM3] ❌ Batch exe FAILED with exception: %s", exc, exc_info=True)
