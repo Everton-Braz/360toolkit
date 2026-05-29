@@ -129,6 +129,10 @@ update_pytorch_for_rtx50.bat
 run_full_pipeline.py
 
 # Root-level one-off test scripts (SphereSfM / diagnostics)
+/test_*.py
+/test_*.txt
+/test_sam3_*.txt
+/video_demo/
 test_spheresfm_lenient.py
 test_spheresfm_sequential.py
 test_spheresfm_mandarabyyoo.py

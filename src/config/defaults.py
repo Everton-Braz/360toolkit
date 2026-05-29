@@ -73,7 +73,7 @@ TRANSFORM_TYPES = {
     'cubemap_6face': 'Cubemap (6-face)',
     'cubemap_8tile': 'Cubemap (8-tile)'
 }
-DEFAULT_TRANSFORM_TYPE = 'cubemap_8tile'  # CHANGED: Default is now 8-tile cubemap
+DEFAULT_TRANSFORM_TYPE = 'perspective'  # Default transform for Stage 2 output
 
 # Output dimensions (SQUARE for photogrammetry)
 DEFAULT_OUTPUT_WIDTH = 1920  # CHANGED: 1920x1920 for Perspective Split

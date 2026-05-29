@@ -8,7 +8,15 @@
 
 - Open-source repository: develop and run the pipeline from Python in this repository.
 - Commercial Windows bundle: distributed separately as a paid binary release.
+
 Download the binary: https://evertonbraz.gumroad.com/l/360toolkit
+
+## Demo Video
+
+[![360toolkit demo video](resources/media/360toolkit_video_demo_poster.jpg)](resources/media/360toolkit_video_demo.mp4)
+
+- Watch the local demo video: [resources/media/360toolkit_video_demo.mp4](resources/media/360toolkit_video_demo.mp4)
+- The demo shows the extract -> split -> mask workflow in the current desktop application
 
 ## Current Pipeline
 
@@ -42,6 +50,7 @@ These controls are available in the Extraction UI panel and are persisted into e
 - Transform modes:
   - Perspective split (E2P)
   - Cubemap 6-face
+  - Cubemap 8-tile
 - Current default transform is `perspective`
 - Stage 2 supports:
   - Preserve-source or sequential frame numbering
@@ -78,7 +87,7 @@ The current CUDA shipping tracker build includes the native flash-attention fix 
 The pipeline order changes based on the Stage 2 image format.
 
 - PNG split output: when Stage 2 and Stage 3 are both enabled, masking runs first on `extracted_frames/`, writes `alpha_cutouts/`, and Stage 2 splits those alpha images afterward.
-- JPEG or split output: Stage 2 runs first, then Stage 3 masks the generated split images.
+- JPEG output: Stage 2 runs first, then Stage 3 masks the generated split images.
 
 That branch exists so PNG workflows can preserve transparency through the split stage.
 
