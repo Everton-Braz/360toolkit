@@ -49,6 +49,10 @@ tqdm>=4.66.0
 # - FFmpeg: Download from https://ffmpeg.org/download.html
 # - Insta360 MediaSDK 3.0.5: Windows only, bundled in portable release
 #   or download from https://www.insta360.com/sdk/home
+# - SAM3.cpp: external executable + GGML model for Stage 3 SAM masking
+#   repo: https://github.com/peters/sam3.cpp (use the cuda-backend branch used by this project)
+#   quick setup: powershell -ExecutionPolicy Bypass -File .\scripts\setup_sam3cpp.ps1
+#   default local install path expected by the app: downloads/sam3cpp/
 
 # ============================================================================
 # DEVELOPMENT (Optional)

@@ -115,7 +115,9 @@ Not every folder is created on every run. The exact set depends on which stages 
 - Python 3.10+
 - FFmpeg available on `PATH` for FFmpeg extraction modes
 - Insta360 MediaSDK for SDK stitching
-- External SAM3.cpp binaries and model files for Stage 3
+- External SAM3.cpp binaries and GGML model files for Stage 3
+- SAM3.cpp source: https://github.com/peters/sam3.cpp
+- This repo provides a helper bootstrap script: `scripts/setup_sam3cpp.ps1`
 
 ### Install
 
@@ -126,8 +128,26 @@ cd 360toolkit
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+
+# Optional, but required if you want to use the SAM3.cpp masking backend
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_sam3cpp.ps1
+
 python run_app.py
 ```
+
+The app looks for SAM3.cpp under `downloads/sam3cpp/` by default and expects the built executables plus a GGML model in that tree.
+
+## Credits
+
+This project integrates and builds on several third-party tools and libraries. Please review and follow each upstream project's license and usage terms.
+
+- `FFmpeg` for video decoding and frame extraction: https://ffmpeg.org/
+- `Insta360 MediaSDK` for SDK-based stitching and camera processing: https://www.insta360.com/sdk/home
+- `SAM3.cpp` by `peters` for external Stage 3 masking executables and GGML models: https://github.com/peters/sam3.cpp
+- `COLMAP` for reconstruction tooling used in related workflows and optional integrations: https://github.com/colmap/colmap
+- `SphereSfM` for spherical SfM workflows used by the optional reconstruction toolchain: https://github.com/json87/SphereSfM
+- `Ultralytics` for YOLO-based masking/runtime support: https://github.com/ultralytics/ultralytics
+- `PyTorch`, `ONNX Runtime`, `OpenCV`, and `PyQt6` for the core ML, imaging, and desktop application stack
 
 ## CLI Mode
 
