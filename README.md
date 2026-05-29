@@ -144,8 +144,6 @@ This project integrates and builds on several third-party tools and libraries. P
 - `FFmpeg` for video decoding and frame extraction: https://ffmpeg.org/
 - `Insta360 MediaSDK` for SDK-based stitching and camera processing: https://www.insta360.com/sdk/home
 - `SAM3.cpp` by `peters` for external Stage 3 masking executables and GGML models: https://github.com/peters/sam3.cpp
-- `COLMAP` for reconstruction tooling used in related workflows and optional integrations: https://github.com/colmap/colmap
-- `SphereSfM` for spherical SfM workflows used by the optional reconstruction toolchain: https://github.com/json87/SphereSfM
 - `Ultralytics` for YOLO-based masking/runtime support: https://github.com/ultralytics/ultralytics
 - `PyTorch`, `ONNX Runtime`, `OpenCV`, and `PyQt6` for the core ML, imaging, and desktop application stack
 
