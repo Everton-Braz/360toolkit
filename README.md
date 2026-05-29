@@ -16,7 +16,7 @@ Download the binary: https://evertonbraz.gumroad.com/l/360toolkit
 [![360toolkit demo video](resources/media/360toolkit_video_demo_poster.jpg)](resources/media/360toolkit_video_demo.mp4)
 
 - Watch the local demo video: [resources/media/360toolkit_video_demo.mp4](resources/media/360toolkit_video_demo.mp4)
-- The demo shows the extract -> split -> mask workflow in the current desktop application
+
 
 ## Current Pipeline
 
@@ -50,7 +50,6 @@ These controls are available in the Extraction UI panel and are persisted into e
 - Transform modes:
   - Perspective split (E2P)
   - Cubemap 6-face
-  - Cubemap 8-tile
 - Current default transform is `perspective`
 - Stage 2 supports:
   - Preserve-source or sequential frame numbering

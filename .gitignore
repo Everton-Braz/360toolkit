@@ -1,6 +1,10 @@
 ﻿# Build artifacts
 dist/
 build/
+dist_fix/
+build_fix/
+dist-slim/
+build-slim/
 releases/
 *.egg-info/
 __pycache__/
@@ -62,6 +66,14 @@ tmp_*.ps1
 # Generated test / sandbox outputs
 sandbox-test-output/
 test_export/
+/test-exports/
+tests/
+docs/
+
+# Keep curated docs/ and tests/ tracked; ignore only generated/internal artifacts within them
+/docs/Fisheye-to_Cubemap-RavenExamplePoster.webp
+/docs/SAM3_STAGE3_CHALLENGES_REPORT.md
+/docs/sam3_vulkan_solution.md
 
 # Original projects (reference only)
 Original_Projects/
@@ -84,6 +96,7 @@ bin/
 *.onnx
 *.pt
 *.pth
+*.ggml
 sam_vit_b_01ec64.pth
 
 # Temporary COLMAP databases
