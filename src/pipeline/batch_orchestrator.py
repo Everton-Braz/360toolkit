@@ -129,7 +129,6 @@ from src.pipeline.metadata_handler import MetadataHandler
 from src.utils.dependency_provisioning import resolve_masking_model_path
 from src.utils.resource_path import get_resource_path
 from src.utils.color_correction import apply_color_corrections
-from src.utils.fisheye_mask import apply_circle_mask_to_image, clamp_radius_percent, is_dual_fisheye_method
 from src.utils.mask_output import build_related_output_path
 from src.config.defaults import (
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
@@ -1089,16 +1088,6 @@ class PipelineWorker(QThread):
                                   if p.is_file() and p.suffix.lower() in _img_exts]
                 self._apply_frame_rotation(_all_files, _frame_rotation)
 
-            if result.get('success') and self.config.get('fisheye_circle_mask_enabled', False) and is_dual_fisheye_method(self.config.get('extraction_method')):
-                _all_files = result.get('output_files', result.get('frames', []))
-                if not _all_files:
-                    _img_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
-                    _all_files = [str(p) for p in output_dir.rglob('*') if p.is_file() and p.suffix.lower() in _img_exts]
-                self._apply_fisheye_circle_mask_to_outputs(
-                    _all_files,
-                    self.config.get('fisheye_circle_mask_radius_percent', 94),
-                )
-
             return result
         
         except Exception as e:
@@ -1173,27 +1162,6 @@ class PipelineWorker(QThread):
                 logger.warning(f"[Rotation] Could not rotate {fp}: {_e}")
 
         logger.info(f"[Rotation] Rotated {rotated}/{len(frame_paths)} frames by {rotation}° CW")
-
-    def _apply_fisheye_circle_mask_to_outputs(self, frame_paths: list, radius_percent: int | float) -> None:
-        if not frame_paths:
-            return
-
-        radius = clamp_radius_percent(radius_percent)
-        updated = 0
-        for fp in frame_paths:
-            try:
-                path = Path(fp)
-                image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-                if image is None:
-                    continue
-                force_alpha = path.suffix.lower() in {'.png', '.tif', '.tiff'}
-                masked = apply_circle_mask_to_image(image, radius, force_alpha=force_alpha)
-                if cv2.imwrite(str(path), masked):
-                    updated += 1
-            except Exception as exc:
-                logger.warning(f"[Fisheye Circle Mask] Could not update {fp}: {exc}")
-
-        logger.info(f"[Fisheye Circle Mask] Updated {updated}/{len(frame_paths)} extracted fisheye frame(s)")
 
     def _execute_stage2(self) -> Dict:
         """Execute Perspective Splitting"""

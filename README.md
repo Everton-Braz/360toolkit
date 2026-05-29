@@ -2,12 +2,13 @@
 
 ![360toolkit User Interface](resources/images/main_UI.png)
 
-360toolkit is a Windows-first PyQt6 application for photogrammetry preprocessing from 360 capture. It extracts stitched equirectangular frames, converts them into perspective or cubemap views, and generates masking assets for downstream tools such as RealityScan.
+360toolkit is an application for photogrammetry preprocessing from 360 capture. It extracts stitched equirectangular frames, converts them into perspective or cubemap views, and generates masking assets for downstream tools such as RealityScan.
 
 ## Use It Two Ways
 
-- Open-source source repo: develop and run the pipeline from Python in this repository.
-- Paid Windows bundle: get the prebuilt desktop release from Gumroad: <https://evertonbraz.gumroad.com/l/360toolkit>
+- Open-source repository: develop and run the pipeline from Python in this repository.
+- Commercial Windows bundle: distributed separately as a paid binary release.
+Download the binary: https://evertonbraz.gumroad.com/l/360toolkit
 
 ## Current Pipeline
 
@@ -18,10 +19,21 @@
 - Input: `.insv` and `.mp4`
 - Output folder: `extracted_frames/`
 - Primary method: Insta360 MediaSDK stitching
+- Includes INSV trailer/camtype handling for Antigravity A1 sources, including A1-style calibration recovery paths in SDK extraction
 - FFmpeg stitched mode is only for pre-stitched `.mp4` input
 - Raw `.insv` stitched export should use SDK stitching; FFmpeg raw modes are for dual-lens or lens-specific fisheye export only
 - Configurable FPS, start/end range, resolution, and output format
 - Current default FPS is `2.0`
+
+#### SDK Media Processing Controls (Stage 1)
+
+Stage 1 exposes MediaSDK-backed processing controls that are applied during extraction, including:
+
+- Stabilization: `FlowState` and `Direction Lock`
+- Color processing: `Color Plus`
+- Tone/color parameters: `Exposure`, `Highlights`, `Shadow`, `Contrast`, `Brightness`, `Black Point`, `Saturation`, `Vibrance`, `Temp`, `Tint`, `Definition`
+
+These controls are available in the Extraction UI panel and are persisted into extraction configuration.
 
 ### Stage 2: Split Views
 
@@ -30,8 +42,7 @@
 - Transform modes:
   - Perspective split (E2P)
   - Cubemap 6-face
-  - Cubemap 8-tile
-- Current default transform is `cubemap_8tile`
+- Current default transform is `perspective`
 - Stage 2 supports:
   - Preserve-source or sequential frame numbering
   - Flat or by-camera folder layout
@@ -42,14 +53,16 @@
 
 ### Stage 3: Mask Images
 
-- Current GUI workflow uses external `SAM3.cpp` person masking
+- Current GUI workflow uses `SAM3.cpp` person masking
 - Configure `segment_persons.exe`, a SAM3 model such as `sam3-q4_0.ggml`, and optionally `sam3_image.exe` in `Settings > Paths & Detection`
 - The Stage 3 panel now exposes a `Video mode` checkbox for SAM3 sequence tracking on extracted frame folders; disable it to force normal per-frame masking
+- Prompt-driven SAM3 masking is supported through selectable prompt categories plus free-form custom prompt text (comma-separated), enabling text-prompted masking targets
 - The packaged Windows build now bundles the SAM3.cpp runtime in `_internal/sam3cpp` when `downloads/sam3cpp` is present at build time, including `segment_persons_track.exe` and the required CUDA BLAS DLLs for the shipping CUDA build when that backend is packaged
 - Stage 3 supports:
   - Auto source selection between perspective views and extracted equirectangular frames
   - Selectable sequence mode for extracted frame sets (video-like tracking path when `segment_persons_track.exe` is available)
   - Mask-only runs from an explicit Stage 3 input folder
+  - Circular fisheye masking (per-lens circular keep mask) for fisheye workflows
   - Preview generation through the SAM3 preview widget
   - Alpha-export and alpha-only modes
   - Custom prompt text and refinement controls
@@ -60,14 +73,16 @@ The current CUDA shipping tracker build includes the native flash-attention fix 
   - `masks_equirect/`
   - `alpha_cutouts/` when alpha-only output is used
 
-## PNG vs JPEG/TIFF Behavior
+## PNG vs JPEG Behavior
 
 The pipeline order changes based on the Stage 2 image format.
 
 - PNG split output: when Stage 2 and Stage 3 are both enabled, masking runs first on `extracted_frames/`, writes `alpha_cutouts/`, and Stage 2 splits those alpha images afterward.
-- JPEG or TIFF split output: Stage 2 runs first, then Stage 3 masks the generated split images.
+- JPEG or split output: Stage 2 runs first, then Stage 3 masks the generated split images.
 
 That branch exists so PNG workflows can preserve transparency through the split stage.
+
+In practical terms, this pre-split masking path lets the pipeline reuse masks from the equirectangular domain before perspective/cubemap expansion. Example: mask `100` source frames first, then split once, instead of running masking on `~800` derived split images in an 8-view layout.
 
 ## Output Layout
 
@@ -142,10 +157,7 @@ Useful options include:
 └── README.md
 ```
 
-The maintained automated test suite lives under `tests/`. Root-level one-off diagnostics and commercial packaging files are intentionally excluded from the public repo.
-
 ## Notes
 
-- The repo is source-focused. If you want the packaged Windows application, use the Gumroad release.
-- Stage 1 SDK stitching and the current Stage 3 SAM3.cpp workflow are both Windows-oriented.
-- RealityScan-compatible masks follow the usual convention: `0 = remove`, `255 = keep`.
+- The repo is source-focused. The paid Windows binary is distributed outside this repository.
+

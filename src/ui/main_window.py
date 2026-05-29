@@ -1333,7 +1333,7 @@ class MainWindow(QMainWindow):
         circle_mask_layout.addWidget(self.circle_mask_radius_spin)
         card_model.addWidget(circle_mask_row)
 
-        self.circle_mask_help_label = QLabel("Applies one circle per fisheye lens in preview, extracted PNGs, and final fisheye mask outputs.")
+        self.circle_mask_help_label = QLabel("Shows the circular crop in preview and applies it only to the final fisheye mask output after SAM3/YOLO processing.")
         self.circle_mask_help_label.setWordWrap(True)
         self.circle_mask_help_label.setProperty("role", "muted")
         card_model.addWidget(self.circle_mask_help_label)
@@ -2446,6 +2446,17 @@ class MainWindow(QMainWindow):
         }
 
     def _resolve_stage3_preview_candidate(self) -> Path | None:
+        if hasattr(self, 'stage1_eq_preview') and self.stage1_eq_preview is not None:
+            try:
+                if self.stage1_eq_preview.has_preview_frame():
+                    preview_path = self.stage1_eq_preview.export_current_preview_frame(
+                        Path(tempfile.gettempdir()) / '360toolkit_sam3_preview' / 'stage1_preview_frame.png'
+                    )
+                    if preview_path and preview_path.exists():
+                        return preview_path
+            except Exception as exc:
+                logger.debug("Failed to export Stage 1 preview frame for SAM3: %s", exc)
+
         stage3_input_path = self._get_stage3_input_path()
         if stage3_input_path is not None:
             return self._find_first_image_in_directory(stage3_input_path)
@@ -2474,18 +2485,6 @@ class MainWindow(QMainWindow):
             preview_path = self._find_first_image_in_directory(stage2_input_path)
             if preview_path is not None:
                 return preview_path
-
-        if hasattr(self, 'stage1_eq_preview') and self.stage1_eq_preview is not None:
-            try:
-                if not self.stage1_eq_preview.has_preview_frame():
-                    return None
-                preview_path = self.stage1_eq_preview.export_current_preview_frame(
-                    Path(tempfile.gettempdir()) / '360toolkit_sam3_preview' / 'stage1_preview_frame.png'
-                )
-                if preview_path and preview_path.exists():
-                    return preview_path
-            except Exception as exc:
-                logger.debug("Failed to export Stage 1 preview frame for SAM3: %s", exc)
 
         return None
 
