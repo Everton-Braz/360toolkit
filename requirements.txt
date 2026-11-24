@@ -36,6 +36,13 @@ ultralytics>=8.0.200
 torch>=2.10.0
 torchvision>=0.25.0
 
+# DART (Detect Anything in Real Time) open-vocabulary masking dependencies
+einops>=0.8.0
+timm>=1.0.0
+ftfy>=6.2.0
+regex>=2024.0.0
+huggingface_hub>=0.28.0
+
 # ============================================================================
 # SFM & ALIGNMENT
 # ============================================================================

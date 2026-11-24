@@ -124,7 +124,15 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from src.extraction import FrameExtractor
 from src.extraction.sdk_extractor import SDKExtractor, IncompleteSDKExtractionError
-from src.transforms import E2PTransform, E2CTransform, OpenCLE2PTransform
+from src.gps import (
+    GPSExtractor,
+    SyncedFrameGps,
+    export_synced_gps_csv,
+    export_synced_gps_json,
+    export_synced_gps_xmp,
+    synchronize_frames_with_gps,
+)
+from src.transforms import E2PTransform, E2CTransform, FisheyeToCubemapTransform, OpenCLE2PTransform
 from src.pipeline.metadata_handler import MetadataHandler
 from src.utils.dependency_provisioning import resolve_masking_model_path
 from src.utils.resource_path import get_resource_path
@@ -132,14 +140,21 @@ from src.utils.color_correction import apply_color_corrections
 from src.utils.mask_output import build_related_output_path
 from src.config.defaults import (
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
-    DEFAULT_OUTPUT_WIDTH, DEFAULT_OUTPUT_HEIGHT
+    DEFAULT_OUTPUT_WIDTH, DEFAULT_OUTPUT_HEIGHT,
+    DEFAULT_FISHEYE_FACE_SIZE, DEFAULT_FISHEYE_LENS_FOV,
+    DEFAULT_FISHEYE_PROJECTION_MODEL,
 )
 from src.pipeline.stage2_naming import (
     build_stage2_frame_records,
+    extract_frame_id,
+    fisheye_source_tag,
     normalize_stage2_layout_mode,
     normalize_stage2_numbering_mode,
+    parse_cubemap_output,
+    parse_perspective_output,
     perspective_output_sort_key,
     resolve_cubemap_output_path,
+    resolve_fisheye_cubemap_output_path,
     resolve_perspective_output_path,
     sort_stage2_input_frames,
 )
@@ -252,6 +267,7 @@ class PipelineWorker(QThread):
         self.sdk_extractor = SDKExtractor()  # Insta360 SDK extractor
         self.e2p_transform = E2PTransform()
         self.e2c_transform = E2CTransform()
+        self.fisheye_cubemap_transform = FisheyeToCubemapTransform()
         self.metadata_handler = MetadataHandler()
         self.masker = None  # Initialize only if masking enabled
         
@@ -457,10 +473,24 @@ class PipelineWorker(QThread):
         elif masking_engine in {'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
             masking_engine = 'yolo'
 
-        if masking_engine not in {'sam3_cpp', 'yolo'}:
+        if masking_engine not in {'sam3_cpp', 'yolo', 'dart'}:
             return False
 
+        # The Stage 3 temporary-video checkbox is implemented today through the
+        # SAM3 sequence tracker over extracted frame folders. When enabled in a
+        # full pipeline run, mask before Stage 2 even if the selected Stage 2
+        # format is JPEG, because Stage 2 will preserve alpha by writing PNGs
+        # for masked inputs.
+        if (
+            masking_engine == 'sam3_cpp'
+            and bool(self.config.get('sam3_enable_sequence_mode', True))
+            and not self.config.get('stage3_input_dir')
+        ):
+            return True
+
         image_format = str(self.config.get('stage2_format', 'png') or 'png').strip().lower()
+        if self.config.get('transform_type') == 'fisheye_cubemap':
+            return image_format == 'png'
         return image_format == 'png'
 
     def _mask_output_mode(self) -> str:
@@ -502,8 +532,12 @@ class PipelineWorker(QThread):
         }
 
         self.config['stage3_input_dir'] = str(Path(self.config['output_dir']) / 'extracted_frames')
-        self.config['stage3_image_source'] = 'equirect'
-        self.config['mask_target'] = 'equirect'
+        if self.config.get('transform_type') == 'fisheye_cubemap':
+            self.config['stage3_image_source'] = 'fisheye'
+            self.config['mask_target'] = 'fisheye'
+        else:
+            self.config['stage3_image_source'] = 'equirect'
+            self.config['mask_target'] = 'equirect'
         masking_engine = str(self.config.get('masking_engine', 'yolo') or 'yolo').strip().lower()
         if masking_engine == 'sam_vitb':
             masking_engine = 'sam3_cpp'
@@ -513,6 +547,9 @@ class PipelineWorker(QThread):
         if masking_engine == 'sam3_cpp':
             self.config['sam3_alpha_export'] = True
             self.config['sam3_alpha_only'] = True
+        elif masking_engine == 'dart':
+            self.config['dart_alpha_export'] = True
+            self.config['dart_alpha_only'] = True
         return previous
 
     def _materialize_alpha_cutouts_from_masks(
@@ -663,7 +700,7 @@ class PipelineWorker(QThread):
                     self.finished.emit({'success': False, 'error': 'Cancelled by user'})
                     return
 
-                logger.info("=== Starting Mask Generation (Pre-Split PNG Pipeline) ===")
+                logger.info("=== Starting Mask Generation (Pre-Split Stage 3 Pipeline) ===")
                 previous_config = self._prepare_pre_split_masking_config()
                 try:
                     stage3_result = self._execute_stage3()
@@ -689,7 +726,7 @@ class PipelineWorker(QThread):
                     masking_engine = 'yolo'
 
                 alpha_dir = self._pre_split_alpha_dir()
-                if masking_engine == 'yolo':
+                if masking_engine in {'yolo', 'dart'}:
                     alpha_dir_text = stage3_result.get('alpha_dir')
                     if alpha_dir_text:
                         alpha_dir = Path(alpha_dir_text)
@@ -736,6 +773,7 @@ class PipelineWorker(QThread):
                 
                 logger.info("=== Starting Perspective Splitting ===")
                 stage2_result = self._execute_stage2()
+                stage2_result = self._append_stage2_gps_result(stage2_result, results.get('stage1'))
                 if mask_before_split:
                     if previous_stage2_input_dir is None:
                         self.config.pop('stage2_input_dir', None)
@@ -845,6 +883,12 @@ class PipelineWorker(QThread):
             # Get additional parameters
             start_time = self.config.get('start_time', 0.0)
             end_time = self.config.get('end_time', None)
+            requested_source_frame_indices = self._compute_requested_source_frame_indices(
+                input_file,
+                float(fps or DEFAULT_FPS),
+                float(start_time or 0.0),
+                float(end_time) if end_time is not None else None,
+            )
             
             def progress_callback(current, total, message):
                 self.progress.emit(current, total, f"Extraction: {message}")
@@ -989,12 +1033,13 @@ class PipelineWorker(QThread):
                         if _frame_rotation:
                             self._apply_frame_rotation(frame_paths, _frame_rotation)
 
-                        return {
+                        return self._append_stage1_gps_result({
                             'success': True,
                             'frames': frame_paths,
                             'method': 'sdk_stitching',
-                            'count': len(frame_paths)
-                        }
+                            'count': len(frame_paths),
+                            'source_frame_indices': self._align_source_frame_indices(frame_paths, requested_source_frame_indices),
+                        }, input_file)
                     
                     except IncompleteSDKExtractionError as incomplete_error:
                         logger.warning(f"[WARNING] SDK extraction incomplete: {incomplete_error}")
@@ -1077,6 +1122,10 @@ class PipelineWorker(QThread):
                 progress_callback=progress_callback
             )
 
+            if result.get('success'):
+                stage1_files = result.get('frames') or result.get('output_files') or []
+                result['source_frame_indices'] = self._align_source_frame_indices(stage1_files, requested_source_frame_indices)
+
             # Apply frame rotation (fisheye preview rotation → extracted files)
             _frame_rotation = self.config.get('frame_rotation', 0)
             if _frame_rotation and result.get('success'):
@@ -1088,11 +1137,327 @@ class PipelineWorker(QThread):
                                   if p.is_file() and p.suffix.lower() in _img_exts]
                 self._apply_frame_rotation(_all_files, _frame_rotation)
 
-            return result
+            return self._append_stage1_gps_result(result, input_file)
         
         except Exception as e:
             logger.error(f"Extraction error: {e}")
             return {'success': False, 'error': str(e)}
+
+    def _append_stage1_gps_result(self, result: Dict, input_file: str) -> Dict:
+        if not result.get('success'):
+            return result
+        if not bool(self.config.get('extract_gps_track', False)):
+            return result
+
+        input_path = Path(input_file)
+        if input_path.suffix.lower() != '.insv':
+            logger.info('[GPS] Skipping GPX extraction because the Stage 1 input is not an INSV file')
+            result['gps_track'] = {
+                'success': False,
+                'skipped': True,
+                'reason': 'not_insv',
+            }
+            return result
+
+        output_root = Path(self.config['output_dir'])
+        exiftool_path = self.config.get('exiftool_path') or None
+        gps_extractor = GPSExtractor(exiftool_path=exiftool_path)
+
+        from src.config.settings import get_settings
+        settings = get_settings()
+
+        gps_result, gps_samples = gps_extractor.extract_track(
+            str(input_path),
+            output_root / 'gps_track.gpx',
+            clean_path=settings.get_gps_clean_path(),
+            max_speed_m_s=settings.get_gps_max_speed_m_s(),
+            angle_min_deg=settings.get_gps_angle_min_deg(),
+            length_min_m=settings.get_gps_length_min_m(),
+            smooth_window=settings.get_gps_smooth_window(),
+            elevation_mode=settings.get_gps_elevation_mode(),
+            elevation_smooth_window=settings.get_gps_elevation_smooth_window(),
+        )
+        result['gps_track'] = gps_result
+        if gps_result.get('success'):
+            result['gps_track_path'] = gps_result.get('output_path', '')
+            frame_paths = result.get('frames') or result.get('output_files') or []
+            gps_sync_result = self._export_stage1_gps_sync(
+                frame_paths=frame_paths,
+                source_frame_indices=result.get('source_frame_indices') or [],
+                gps_samples=gps_samples,
+                output_root=output_root,
+                input_file=str(input_path),
+                stage1_method=str(result.get('method') or self.config.get('extraction_method', '') or ''),
+            )
+            result['gps_sync'] = gps_sync_result
+        else:
+            logger.warning('[GPS] GPX extraction did not complete: %s', gps_result.get('error', 'unknown error'))
+        return result
+
+    def _probe_source_video_fps(self, input_file: str) -> Optional[float]:
+        try:
+            video_info = self.sdk_extractor._get_video_info(Path(input_file))
+            fps_value = float(video_info.get('fps') or 0.0)
+            if fps_value > 0:
+                return fps_value
+        except Exception:
+            pass
+
+        try:
+            capture = cv2.VideoCapture(str(input_file))
+            try:
+                fps_value = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+                if fps_value > 0:
+                    return fps_value
+            finally:
+                capture.release()
+        except Exception:
+            pass
+        return None
+
+    def _probe_source_video_info(self, input_file: str) -> Dict[str, float]:
+        try:
+            video_info = self.sdk_extractor._get_video_info(Path(input_file))
+            fps_value = float(video_info.get('fps') or 0.0)
+            total_frames = int(video_info.get('total_frames') or 0)
+            duration = float(video_info.get('duration') or 0.0)
+            if fps_value > 0 and total_frames > 0:
+                return {
+                    'fps': fps_value,
+                    'total_frames': float(total_frames),
+                    'duration': duration if duration > 0 else (total_frames / fps_value),
+                }
+        except Exception:
+            pass
+
+        try:
+            capture = cv2.VideoCapture(str(input_file))
+            try:
+                fps_value = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+                total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                duration = (total_frames / fps_value) if fps_value > 0 and total_frames > 0 else 0.0
+                if fps_value > 0 and total_frames > 0:
+                    return {
+                        'fps': fps_value,
+                        'total_frames': float(total_frames),
+                        'duration': duration,
+                    }
+            finally:
+                capture.release()
+        except Exception:
+            pass
+
+        return {'fps': 0.0, 'total_frames': 0.0, 'duration': 0.0}
+
+    def _compute_requested_source_frame_indices(
+        self,
+        input_file: str,
+        fps: float,
+        start_time: float,
+        end_time: Optional[float],
+    ) -> List[int]:
+        video_info = self._probe_source_video_info(input_file)
+        video_fps = float(video_info.get('fps') or 0.0)
+        total_frames = int(video_info.get('total_frames') or 0)
+        duration = float(video_info.get('duration') or 0.0)
+        if video_fps <= 0 or total_frames <= 0:
+            return []
+
+        effective_end_time = duration if end_time is None else float(end_time)
+        start_frame = max(0, int(float(start_time) * video_fps))
+        end_frame = min(int(effective_end_time * video_fps), total_frames)
+        if end_frame <= start_frame:
+            return []
+
+        frame_interval = max(1, int(video_fps / float(fps))) if fps and fps > 0 else 1
+        return list(range(start_frame, end_frame, frame_interval))
+
+    @staticmethod
+    def _align_source_frame_indices(frame_paths: List[str], source_frame_indices: List[int]) -> List[int]:
+        if not frame_paths or not source_frame_indices:
+            return []
+        if len(source_frame_indices) == len(frame_paths):
+            return list(source_frame_indices)
+        return list(source_frame_indices[: len(frame_paths)])
+
+    def _get_gps_capture_fps_override(self) -> Optional[float]:
+        try:
+            value = float(self.config.get('gps_capture_fps_override', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def _export_stage1_gps_sync(
+        self,
+        *,
+        frame_paths: List[str],
+        source_frame_indices: Optional[List[int]],
+        gps_samples: List,
+        output_root: Path,
+        input_file: str,
+        stage1_method: str,
+    ) -> Dict:
+        if not frame_paths:
+            return {
+                'success': False,
+                'error': 'No extracted frames available for GPS synchronization',
+                'record_count': 0,
+            }
+
+        capture_timebase_fps = self._get_gps_capture_fps_override()
+        source_video_fps = self._probe_source_video_fps(input_file)
+        synced_records = synchronize_frames_with_gps(
+            frame_paths,
+            gps_samples,
+            stage1_method=stage1_method,
+            requested_fps=float(self.config.get('fps', DEFAULT_FPS) or DEFAULT_FPS),
+            start_time_seconds=float(self.config.get('start_time', 0.0) or 0.0),
+            sync_offset_seconds=float(self.config.get('gps_sync_offset_seconds', 0.0) or 0.0),
+            drift_scale=float(self.config.get('gps_sync_drift_scale', 1.0) or 1.0),
+            source_video_fps=source_video_fps,
+            capture_timebase_fps=capture_timebase_fps,
+            source_frame_indices=source_frame_indices,
+        )
+        if not synced_records:
+            return {
+                'success': False,
+                'error': 'No GPS frame sync records were generated',
+                'record_count': 0,
+            }
+
+        metadata = {
+            'input_file': input_file,
+            'stage1_method': stage1_method,
+            'requested_fps': float(self.config.get('fps', DEFAULT_FPS) or DEFAULT_FPS),
+            'start_time_seconds': float(self.config.get('start_time', 0.0) or 0.0),
+            'gps_sync_offset_seconds': float(self.config.get('gps_sync_offset_seconds', 0.0) or 0.0),
+            'gps_sync_drift_scale': float(self.config.get('gps_sync_drift_scale', 1.0) or 1.0),
+            'source_video_fps': source_video_fps,
+            'gps_capture_fps_override': capture_timebase_fps,
+            'source_frame_indices_provided': bool(source_frame_indices),
+        }
+        json_path = export_synced_gps_json(synced_records, output_root / 'gps_frame_sync.json', metadata)
+        csv_path = export_synced_gps_csv(synced_records, output_root / 'gps_trajectory.csv')
+        xmp_count = export_synced_gps_xmp(synced_records)
+        logger.info('[GPS] Frame sync exported: %d records, %d XMP sidecars', len(synced_records), xmp_count)
+        return {
+            'success': True,
+            'record_count': len(synced_records),
+            'json_path': str(json_path),
+            'trajectory_csv_path': str(csv_path),
+            'xmp_count': xmp_count,
+        }
+
+    def _load_synced_gps_records(self, json_path: str | Path) -> List[SyncedFrameGps]:
+        payload = json.loads(Path(json_path).read_text(encoding='utf-8'))
+        records: List[SyncedFrameGps] = []
+        for item in payload.get('frames', []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                records.append(SyncedFrameGps(**item))
+            except TypeError:
+                logger.warning('[GPS] Skipping malformed GPS sync record in %s', json_path)
+        return records
+
+    @staticmethod
+    def _resolve_stage2_output_frame_id(path_or_name: str | Path) -> Optional[int]:
+        parsed_perspective = parse_perspective_output(path_or_name)
+        if parsed_perspective is not None:
+            return parsed_perspective[0]
+
+        parsed_cubemap = parse_cubemap_output(path_or_name)
+        if parsed_cubemap is not None:
+            return parsed_cubemap[0]
+
+        return extract_frame_id(path_or_name)
+
+    def _append_stage2_gps_result(self, stage2_result: Dict, stage1_result: Optional[Dict]) -> Dict:
+        if not stage2_result.get('success') or stage2_result.get('skipped'):
+            return stage2_result
+
+        stage1_payload = stage1_result or {}
+        stage1_gps_sync = stage1_payload.get('gps_sync') or {}
+        stage1_sync_json = stage1_gps_sync.get('json_path')
+        output_files = stage2_result.get('output_files') or []
+        if not stage1_sync_json or not output_files:
+            return stage2_result
+
+        try:
+            stage1_records = self._load_synced_gps_records(stage1_sync_json)
+        except Exception as exc:
+            logger.warning('[GPS] Failed to load Stage 1 GPS sync for Stage 2 sidecars: %s', exc)
+            stage2_result['gps_sync'] = {
+                'success': False,
+                'error': f'Failed to load Stage 1 GPS sync: {exc}',
+                'record_count': 0,
+            }
+            return stage2_result
+
+        source_by_frame_id: Dict[int, SyncedFrameGps] = {}
+        for record in stage1_records:
+            frame_id = extract_frame_id(record.image_name)
+            if frame_id is not None and frame_id not in source_by_frame_id:
+                source_by_frame_id[frame_id] = record
+
+        stage2_records: List[SyncedFrameGps] = []
+        unmapped_outputs = 0
+        for index, output_file in enumerate(sorted(output_files, key=perspective_output_sort_key)):
+            frame_id = self._resolve_stage2_output_frame_id(output_file)
+            source_record = source_by_frame_id.get(frame_id) if frame_id is not None else None
+            if source_record is None:
+                unmapped_outputs += 1
+                continue
+
+            output_path = Path(output_file)
+            stage2_records.append(
+                SyncedFrameGps(
+                    frame_index=index,
+                    image_path=str(output_path),
+                    image_name=output_path.name,
+                    source_time_seconds=source_record.source_time_seconds,
+                    gps_query_time_seconds=source_record.gps_query_time_seconds,
+                    gps_time_iso=source_record.gps_time_iso,
+                    latitude=source_record.latitude,
+                    longitude=source_record.longitude,
+                    altitude=source_record.altitude,
+                    east_m=source_record.east_m,
+                    north_m=source_record.north_m,
+                    up_m=source_record.up_m,
+                    interpolation=source_record.interpolation,
+                )
+            )
+
+        if not stage2_records:
+            stage2_result['gps_sync'] = {
+                'success': False,
+                'error': 'No Stage 2 outputs could be matched back to Stage 1 GPS records',
+                'record_count': 0,
+                'unmapped_output_count': len(output_files),
+            }
+            return stage2_result
+
+        output_dir = Path(stage2_result.get('output_dir') or self.config.get('output_dir') or '.')
+        metadata = {
+            'stage': 'stage2',
+            'stage1_sync_json_path': str(stage1_sync_json),
+            'stage1_record_count': len(stage1_records),
+            'stage2_output_count': len(output_files),
+            'gps_capture_fps_override': self._get_gps_capture_fps_override(),
+        }
+        json_path = export_synced_gps_json(stage2_records, output_dir / 'gps_frame_sync.json', metadata)
+        csv_path = export_synced_gps_csv(stage2_records, output_dir / 'gps_trajectory.csv')
+        xmp_count = export_synced_gps_xmp(stage2_records, creator_tool='360toolkit Stage 2 GPS Sync')
+        logger.info('[GPS] Stage 2 sync exported: %d records, %d XMP sidecars', len(stage2_records), xmp_count)
+        stage2_result['gps_sync'] = {
+            'success': True,
+            'record_count': len(stage2_records),
+            'json_path': str(json_path),
+            'trajectory_csv_path': str(csv_path),
+            'xmp_count': xmp_count,
+            'unmapped_output_count': unmapped_outputs,
+        }
+        return stage2_result
 
     def _requires_sdk_for_stitched_extraction(self, input_file: str) -> bool:
         return Path(input_file).suffix.lower() == '.insv'
@@ -1192,7 +1557,7 @@ class PipelineWorker(QThread):
             
             # Get all input frames (support many extensions, case-insensitive)
             image_exts = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
-            input_frames = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in image_exts]
+            input_frames = [p for p in input_dir.rglob('*') if p.is_file() and p.suffix.lower() in image_exts]
             frame_records = build_stage2_frame_records(
                 input_frames,
                 normalize_stage2_numbering_mode(self.config.get('stage2_numbering_mode')),
@@ -1209,6 +1574,9 @@ class PipelineWorker(QThread):
             if transform_type == 'cubemap':
                 logger.info(f"Processing {total_frames} frames in CUBEMAP mode")
                 return self._execute_stage2_cubemap(frame_records, output_dir)
+            if transform_type == 'fisheye_cubemap':
+                logger.info(f"Processing {total_frames} frames in FISHEYE CUBEMAP mode")
+                return self._execute_stage2_fisheye_cubemap(frame_records, output_dir)
             else:
                 # Perspective mode - use cameras
                 camera_config = self.config.get('camera_config', {})
@@ -1219,6 +1587,118 @@ class PipelineWorker(QThread):
         
         except Exception as e:
             logger.error(f"Perspective Split failed: {e}", exc_info=True)
+            return {'success': False, 'error': str(e), 'output_files': []}
+
+    def _write_stage2_image(self, image: np.ndarray, output_path: Path, extension: str, frame_has_alpha: bool) -> bool:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        ext = str(extension or 'png').strip().lower()
+        if frame_has_alpha and ext != 'png':
+            ext = 'png'
+            output_path = output_path.with_suffix('.png')
+
+        success = False
+        if ext == 'png':
+            try:
+                if frame_has_alpha:
+                    converted = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+                    pil_img = Image.fromarray(converted, 'RGBA')
+                else:
+                    converted = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    pil_img = Image.fromarray(converted)
+                pil_img.save(str(output_path), 'PNG', compress_level=6)
+                pil_img.close()
+                success = True
+            except Exception:
+                success = cv2.imwrite(str(output_path), image, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+        elif ext in {'jpg', 'jpeg'}:
+            success = cv2.imwrite(str(output_path), image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        else:
+            success = cv2.imwrite(str(output_path), image)
+        return success
+
+    def _execute_stage2_fisheye_cubemap(self, frame_records, output_dir: Path) -> Dict:
+        """Execute raw-fisheye to five-face cubemap splitting."""
+        try:
+            input_dir = self._resolve_stage2_input_dir()
+            if input_dir is None or not self._path_has_fisheye_naming(input_dir):
+                return {
+                    'success': False,
+                    'error': 'Fisheye to Cubemap requires raw per-lens fisheye frames (lens folders or lens-suffixed filenames).',
+                    'output_files': [],
+                }
+
+            fisheye_params = self.config.get('fisheye_params', {})
+            face_size = int(fisheye_params.get('face_size', self.config.get('output_width', DEFAULT_FISHEYE_FACE_SIZE)))
+            lens_fov = float(fisheye_params.get('lens_fov', self.config.get('fisheye_lens_fov', DEFAULT_FISHEYE_LENS_FOV)))
+            projection_model = str(fisheye_params.get('projection_model', self.config.get('fisheye_projection_model', DEFAULT_FISHEYE_PROJECTION_MODEL)) or DEFAULT_FISHEYE_PROJECTION_MODEL).strip().lower()
+            image_format = self.config.get('stage2_format', 'png')
+            layout_mode = normalize_stage2_layout_mode(self.config.get('stage2_fisheye_layout'))
+
+            logger.info(
+                "Fisheye cubemap mode: face_size=%s, lens_fov=%s, projection=%s, layout=%s",
+                face_size,
+                lens_fov,
+                projection_model,
+                layout_mode,
+            )
+
+            output_files = []
+            total_frames = len(frame_records)
+
+            for frame_idx, (frame_path, _output_frame_id) in enumerate(frame_records, start=1):
+                if self.is_cancelled:
+                    return {'success': False, 'error': 'Cancelled by user', 'output_files': output_files}
+
+                fisheye_img = cv2.imread(str(frame_path), cv2.IMREAD_UNCHANGED)
+                if fisheye_img is None:
+                    logger.warning("Failed to load raw fisheye frame: %s", frame_path)
+                    continue
+
+                frame_has_alpha = fisheye_img.ndim == 3 and fisheye_img.shape[2] == 4
+                face_images = self.fisheye_cubemap_transform.fisheye_to_cubemap(
+                    fisheye_img,
+                    face_size=face_size,
+                    lens_fov=lens_fov,
+                    projection_model=projection_model,
+                )
+
+                source_tag = fisheye_source_tag(frame_path)
+                for face_name, face_img in face_images.items():
+                    extension = image_format if image_format in {'png', 'jpg', 'jpeg'} else 'png'
+                    output_path = resolve_fisheye_cubemap_output_path(
+                        output_dir,
+                        frame_path,
+                        face_name,
+                        extension,
+                        layout_mode,
+                    )
+                    if not self._write_stage2_image(face_img, output_path, extension, frame_has_alpha):
+                        logger.warning("Failed to save fisheye cubemap face: %s", output_path.name)
+                        continue
+                    try:
+                        yaw_pitch = {
+                            'dir_plusZ': (0, 0),
+                            'dir_plusX': (90, 0),
+                            'dir_minusX': (-90, 0),
+                            'dir_plusY': (0, 90),
+                            'dir_minusY': (0, -90),
+                        }[face_name]
+                        self.metadata_handler.embed_camera_orientation(str(output_path), yaw_pitch[0], yaw_pitch[1], 0, 90)
+                    except Exception:
+                        pass
+                    output_files.append(str(output_path))
+
+                self.progress.emit(frame_idx, total_frames, f"Split Fisheye: {source_tag}")
+
+            return {
+                'success': True,
+                'output_files': output_files,
+                'count': len(output_files),
+                'mode': 'fisheye_cubemap',
+            }
+
+        except Exception as e:
+            logger.error(f"Fisheye Cubemap split failed: {e}", exc_info=True)
             return {'success': False, 'error': str(e), 'output_files': []}
     
     def _execute_stage2_perspective(self, frame_records, cameras, output_dir, output_width, output_height) -> Dict:
@@ -2038,8 +2518,50 @@ class PipelineWorker(QThread):
                 confidence = self.config.get('confidence_threshold', 0.5)
                 use_gpu = self.config.get('use_gpu', True)
                 
+                # Handle DART
+                if masking_engine == 'dart':
+                    try:
+                        logger.info("Initializing DART open-vocabulary masker...")
+                        from ..masking.dart_masker import DARTMasker
+
+                        self.masker = DARTMasker(
+                            model_path=self.config.get('dart_model_path') or self.config.get('sam3_model_path', ''),
+                            confidence_threshold=self.config.get('dart_confidence_threshold', self.config.get('confidence_threshold', 0.35)),
+                            nms_threshold=self.config.get('dart_nms_threshold', 0.70),
+                            use_gpu=use_gpu,
+                            fast=self.config.get('dart_fast_mode', True),
+                            resolution=self.config.get('dart_resolution', 1008),
+                            feather_radius=self.config.get('dart_feather_radius', self.config.get('sam3_feather_radius', 8)),
+                            morph_radius=self.config.get('dart_morph_radius', self.config.get('sam3_morph_radius', 0)),
+                            alpha_export=self.config.get('dart_alpha_export', self.config.get('sam3_alpha_export', False)),
+                            alpha_only=self.config.get('dart_alpha_only', self.config.get('sam3_alpha_only', False)),
+                            enable_refinement=self.config.get('dart_enable_refinement', self.config.get('sam3_enable_refinement', True)),
+                            refine_sky_only=self.config.get('dart_refine_sky_only', self.config.get('sam3_refine_sky_only', True)),
+                            seam_aware_refinement=self.config.get('dart_seam_aware_refinement', self.config.get('sam3_seam_aware_refinement', True)),
+                            edge_sharpen_strength=self.config.get('dart_edge_sharpen_strength', self.config.get('sam3_edge_sharpen_strength', 0.75)),
+                            fisheye_circle_mask_enabled=self.config.get('fisheye_circle_mask_enabled', False),
+                            fisheye_circle_mask_radius_percent=self.config.get('fisheye_circle_mask_radius_percent', 94.0),
+                        )
+                        logger.info("DART masker initialized successfully")
+                        self.masker.set_enabled_categories(
+                            self.config.get('dart_prompts') or self.config.get('sam3_prompts', {})
+                        )
+                        self.masker.set_custom_prompts(
+                            self.config.get('dart_custom_prompts') or self.config.get('sam3_custom_prompts', '')
+                        )
+                        use_onnx = False
+                    except Exception as e:
+                        logger.error(f"Failed to initialize DART masker: {e}", exc_info=True)
+                        return {
+                            'success': False,
+                            'error': f'DART initialization failed: {e}',
+                            'masks_created': 0,
+                            'skipped': 0,
+                            'failed': 0
+                        }
+
                 # Handle SAM3 separately
-                if masking_engine == 'sam3_cpp':
+                elif masking_engine == 'sam3_cpp':
                     try:
                         logger.info("Initializing SAM3.cpp external masker...")
                         from ..masking.sam3_external_masker import SAM3ExternalMasker

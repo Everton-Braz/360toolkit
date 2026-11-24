@@ -71,7 +71,8 @@ DEFAULT_ROLL = 0  # -180 to 180 (typically 0°)
 TRANSFORM_TYPES = {
     'perspective': 'Perspective (E2P)',
     'cubemap_6face': 'Cubemap (6-face)',
-    'cubemap_8tile': 'Cubemap (8-tile)'
+    'cubemap_8tile': 'Cubemap (8-tile)',
+    'fisheye_cubemap': 'Fisheye to Cubemap'
 }
 DEFAULT_TRANSFORM_TYPE = 'perspective'  # Default transform for Stage 2 output
 
@@ -89,6 +90,7 @@ DEFAULT_STAGE2_NUMBERING_MODE = 'preserve_source'
 STAGE2_LAYOUT_MODES = {
     'flat': 'Flat folder',
     'by_camera': 'Separate by camera',
+    'by_frame': 'Grouped by frame (Station)',
 }
 DEFAULT_STAGE2_LAYOUT_MODE = 'flat'
 
@@ -98,6 +100,17 @@ DEFAULT_CUBEMAP_TILE_HEIGHT = 1920  # Default: 3/4 of input height (auto-calcula
 DEFAULT_CUBEMAP_FOV = 90  # Fixed 90° FOV for 4×2 grid (each tile covers 90° horizontally)
 DEFAULT_CUBEMAP_FACE_SIZE = 1024  # Face size for 6-face cubemap mode
 DEFAULT_CUBEMAP_OVERLAP = 10  # Overlap percent for cubemap tiles
+
+# Fisheye cubemap settings
+DEFAULT_FISHEYE_FACE_SIZE = 1024
+DEFAULT_FISHEYE_LENS_FOV = 190.0
+FISHEYE_LENS_FOV_MIN = 120.0
+FISHEYE_LENS_FOV_MAX = 220.0
+FISHEYE_PROJECTION_MODELS = {
+    'equidistant': 'Equidistant',
+    'equisolid': 'Equisolid',
+}
+DEFAULT_FISHEYE_PROJECTION_MODEL = 'equidistant'
 
 # Camera groups for dome-like coverage (photogrammetry)
 DEFAULT_CAMERA_GROUPS = [
@@ -262,6 +275,12 @@ MASKING_ENGINES = {
         'description': 'Windows-native external SAM3.cpp executable integration',
         'requires': ['segment_persons.exe', 'sam3 model'],
         'default_model': 'sam3-f16.ggml'
+    },
+    'dart': {
+        'name': 'DART (Fast SAM3 Open-Vocab)',
+        'description': 'Real-time multi-class open-vocabulary detection & instance segmentation',
+        'requires': ['torch', 'sam3.pt'],
+        'default_model': 'sam3.pt'
     }
 }
 
@@ -357,6 +376,22 @@ EXIF_CAMERA_ROLL_TAG = 'Software'  # Embed roll
 
 PROJECT_FILE_EXTENSION = '.360ft'
 PROJECT_FILE_VERSION = '1.0'
+
+# ============================================================================
+# GPS TRACK CLEANING DEFAULTS
+# ============================================================================
+DEFAULT_GPS_CLEAN_PATH = True
+DEFAULT_GPS_MAX_SPEED_M_S = 4.0
+DEFAULT_GPS_ANGLE_MIN_DEG = 20.0
+DEFAULT_GPS_LENGTH_MIN_M = 5.0
+DEFAULT_GPS_SMOOTH_WINDOW = 7
+DEFAULT_GPS_ELEVATION_MODE = 'flat'  # 'raw', 'flat', or 'smooth'
+DEFAULT_GPS_ELEVATION_SMOOTH_WINDOW = 31
+GPS_ELEVATION_MODES = {
+    'flat': 'Constant Median (Flat floor - Recommended)',
+    'smooth': 'Moving Average Smoothed',
+    'raw': 'Keep Raw Altitude',
+}
 
 # ============================================================================
 # VERSION INFO

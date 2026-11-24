@@ -5,9 +5,10 @@ Provides equirectangular to perspective and cubemap transformations.
 
 from .e2p_transform import E2PTransform, OpenCLE2PTransform
 from .e2c_transform import E2CTransform
+from .fisheye_to_cubemap_transform import FisheyeToCubemapTransform
 from .perspective_to_erp import PerspectiveToERPProjector
 
-__all__ = ['E2PTransform', 'OpenCLE2PTransform', 'E2CTransform', 'PerspectiveToERPProjector']
+__all__ = ['E2PTransform', 'OpenCLE2PTransform', 'E2CTransform', 'FisheyeToCubemapTransform', 'PerspectiveToERPProjector']
 
 # TorchE2PTransform is always importable but requires torch at runtime
 try:

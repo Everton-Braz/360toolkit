@@ -339,7 +339,13 @@ class MultiCategoryMasker:
         """
         try:
             # Read image
-            image = cv2.imread(image_path)
+            path_str = str(image_path)
+            image = cv2.imread(path_str)
+            if image is None:
+                # Try fromfile for Windows unicode paths
+                data = np.fromfile(path_str, dtype=np.uint8)
+                if data.size > 0:
+                    image = cv2.imdecode(data, cv2.IMREAD_COLOR)
             if image is None:
                 logger.error(f"Failed to load image: {image_path}")
                 return None
@@ -413,7 +419,7 @@ class MultiCategoryMasker:
             
             # Combine all detected object masks
             combined_mask = self._combine_masks(results[0], (h, w))
-                        combined_mask = self._apply_fisheye_circle_mask(combined_mask, (h, w))
+            combined_mask = self._apply_fisheye_circle_mask(combined_mask, (h, w))
             
             num_detections = len(results[0].masks.data)
             logger.debug(f"Generated mask with {num_detections} object(s) masked")

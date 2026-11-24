@@ -173,7 +173,7 @@ def run_cli_mode():
                         choices=["preserve_source", "sequential"],
                         help="Stage 2 numbering mode")
     parser.add_argument("--stage2-layout", default=DEFAULT_STAGE2_LAYOUT_MODE,
-                        choices=["flat", "by_camera"],
+                        choices=["flat", "by_camera", "by_frame"],
                         help="Stage 2 perspective output layout")
     parser.add_argument("--use-gpu", action="store_true", default=True, help="Enable GPU")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")

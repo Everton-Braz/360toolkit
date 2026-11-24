@@ -209,6 +209,17 @@ class SettingsManager:
                 self.settings['ffmpeg_path'] = str(detected_ffmpeg)
                 self.settings['ffmpeg_auto_detected'] = True
 
+        if not self.settings.get('exiftool_path') or not self.is_exiftool_valid(self.settings.get('exiftool_path')):
+            logger.info("ExifTool path not configured or invalid, running auto-detection...")
+            detected_exiftool = self.auto_detect_exiftool()
+            if detected_exiftool:
+                self.settings['exiftool_path'] = str(detected_exiftool)
+                self.settings['exiftool_auto_detected'] = True
+            elif self.settings.get('exiftool_path'):
+                logger.warning("Clearing invalid saved ExifTool path: %s", self.settings.get('exiftool_path'))
+                self.settings['exiftool_path'] = None
+                self.settings['exiftool_auto_detected'] = False
+
         self._refresh_bundled_sam3_paths()
 
     def _refresh_bundled_reconstruction_paths_REMOVED(self) -> None:  # removed in simple-version
@@ -243,6 +254,7 @@ class SettingsManager:
         defaults = {
             'sdk_path': None,
             'ffmpeg_path': None,
+            'exiftool_path': None,
             'spheresfm_path': None,
             'colmap_gpu_path': None,
             'colmap_path': None,
@@ -265,6 +277,13 @@ class SettingsManager:
             'sam3_mask_logit_threshold': 0.75,
             'sam3_enable_sequence_mode': True,
             'sam3_sequence_mode_min_frames': 12,
+            'gps_clean_path': True,
+            'gps_max_speed_m_s': 4.0,
+            'gps_angle_min_deg': 20.0,
+            'gps_length_min_m': 5.0,
+            'gps_smooth_window': 7,
+            'gps_elevation_mode': 'flat',
+            'gps_elevation_smooth_window': 31,
         }
         try:
             if self.settings_file.exists():
@@ -622,6 +641,148 @@ class SettingsManager:
         ffmpeg_str = self.settings.get('ffmpeg_path')
         if ffmpeg_str and self.is_ffmpeg_valid(ffmpeg_str):
             return Path(ffmpeg_str)
+        return None
+
+    # === EXIFTOOL PATH MANAGEMENT ===
+
+    @staticmethod
+    def _exiftool_filenames() -> Tuple[str, ...]:
+        # Windows ExifTool archives commonly ship as exiftool(-k).exe until renamed.
+        return ('exiftool.exe', 'exiftool(-k).exe')
+
+    def _normalize_exiftool_candidate(self, exiftool_path: Optional[Path]) -> Optional[Path]:
+        if exiftool_path is None:
+            return None
+
+        candidate = Path(exiftool_path)
+        if candidate.is_dir():
+            for filename in self._exiftool_filenames():
+                nested = candidate / filename
+                if nested.exists():
+                    return nested
+            return candidate / self._exiftool_filenames()[0]
+        return candidate
+
+    def _probe_exiftool_version(self, exiftool_path: Optional[Path]) -> Tuple[bool, str]:
+        candidate = self._normalize_exiftool_candidate(exiftool_path)
+        if candidate is None or not candidate.exists() or not candidate.is_file():
+            return False, 'Executable not found'
+
+        try:
+            import subprocess
+            result = subprocess.run(
+                [str(candidate), '-ver'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except OSError as exc:
+            return False, str(exc)
+        except Exception as exc:
+            return False, f'Probe failed: {exc}'
+
+        version = (result.stdout or '').strip()
+        if result.returncode != 0 or not version:
+            stderr = (result.stderr or '').strip()
+            return False, stderr or f'ExifTool exited {result.returncode}'
+        return True, version
+
+    def _bundled_exiftool_candidates(self) -> List[Path]:
+        app_dir = get_base_path()
+        candidates: List[Path] = []
+        for filename in self._exiftool_filenames():
+            candidates.extend([
+                app_dir / 'exiftool' / filename,
+                app_dir / filename,
+                app_dir.parent / 'exiftool' / filename,
+                _APP_ROOT / 'downloads' / 'exiftool' / filename,
+            ])
+        return candidates
+
+    def _detect_bundled_exiftool(self) -> Optional[Path]:
+        for candidate in self._bundled_exiftool_candidates():
+            if self.is_exiftool_valid(candidate):
+                logger.info(f"[OK] ExifTool found in bundled/local path: {candidate}")
+                return candidate
+        return None
+
+    def auto_detect_exiftool(self) -> Optional[Path]:
+        """Auto-detect ExifTool installation."""
+        logger.info("Searching for ExifTool...")
+
+        bundled_exiftool = self._detect_bundled_exiftool()
+        if bundled_exiftool:
+            return bundled_exiftool
+
+        for executable_name in ('exiftool', 'exiftool.exe', 'exiftool(-k).exe'):
+            exiftool_in_path = shutil.which(executable_name)
+            if exiftool_in_path:
+                exiftool_path = Path(exiftool_in_path)
+                if self.is_exiftool_valid(exiftool_path):
+                    logger.info(f"[OK] ExifTool found in PATH: {exiftool_path}")
+                    return self._normalize_exiftool_candidate(exiftool_path)
+
+        standard_paths = [
+            Path('C:/exiftool/exiftool.exe'),
+            Path('C:/exiftool/exiftool(-k).exe'),
+            Path('C:/Program Files/ExifTool/exiftool.exe'),
+            Path('C:/Program Files/ExifTool/exiftool(-k).exe'),
+            Path('C:/Program Files (x86)/ExifTool/exiftool.exe'),
+            Path('C:/Program Files (x86)/ExifTool/exiftool(-k).exe'),
+        ]
+        for path in standard_paths:
+            if self.is_exiftool_valid(path):
+                logger.info(f"[OK] ExifTool found at {path}")
+                return self._normalize_exiftool_candidate(path)
+
+        winget_base = Path.home() / 'AppData' / 'Local' / 'Microsoft' / 'WinGet' / 'Packages'
+        if winget_base.exists():
+            for pkg_dir in winget_base.glob('*ExifTool*'):
+                for filename in self._exiftool_filenames():
+                    for exiftool_exe in pkg_dir.rglob(filename):
+                        if self.is_exiftool_valid(exiftool_exe):
+                            logger.info(f"[OK] ExifTool found at {exiftool_exe}")
+                            return self._normalize_exiftool_candidate(exiftool_exe)
+
+        logger.warning('[X] ExifTool not found in any standard location')
+        return None
+
+    def is_exiftool_valid(self, exiftool_path: Optional[Path]) -> bool:
+        candidate = self._normalize_exiftool_candidate(exiftool_path)
+        if candidate is None or not candidate.exists() or not candidate.is_file():
+            return False
+
+        ok, _ = self._probe_exiftool_version(candidate)
+        return ok
+
+    def set_exiftool_path(self, path: Optional[Path], auto_detected: bool = False) -> bool:
+        if path is None:
+            self.settings['exiftool_path'] = None
+            self.settings['exiftool_auto_detected'] = False
+            self.save_settings()
+            logger.info('ExifTool path cleared')
+            return True
+
+        if not self.is_exiftool_valid(path):
+            logger.warning(f'Invalid ExifTool path: {path}')
+            return False
+
+        normalized = self._normalize_exiftool_candidate(path)
+        self.settings['exiftool_path'] = str(normalized)
+        self.settings['exiftool_auto_detected'] = auto_detected
+        self.save_settings()
+        logger.info(f'ExifTool path set to {normalized}')
+        return True
+
+    def get_exiftool_path(self) -> Optional[Path]:
+        bundled_exiftool = self._detect_bundled_exiftool()
+        if bundled_exiftool:
+            return bundled_exiftool
+
+        exiftool_str = self.settings.get('exiftool_path')
+        if exiftool_str and self.is_exiftool_valid(exiftool_str):
+            return self._normalize_exiftool_candidate(Path(exiftool_str))
         return None
 
     # === RECONSTRUCTION BINARY PATH MANAGEMENT ===
@@ -1173,6 +1334,55 @@ class SettingsManager:
         """Set last used output directory"""
         self.settings['last_output_directory'] = str(path)
         self.save_settings()
+
+    def get_gps_clean_path(self) -> bool:
+        return bool(self.settings.get('gps_clean_path', True))
+
+    def set_gps_clean_path(self, enabled: bool):
+        self.settings['gps_clean_path'] = bool(enabled)
+        self.save_settings()
+
+    def get_gps_max_speed_m_s(self) -> float:
+        return float(self.settings.get('gps_max_speed_m_s', 4.0))
+
+    def set_gps_max_speed_m_s(self, val: float):
+        self.settings['gps_max_speed_m_s'] = float(val)
+        self.save_settings()
+
+    def get_gps_angle_min_deg(self) -> float:
+        return float(self.settings.get('gps_angle_min_deg', 20.0))
+
+    def set_gps_angle_min_deg(self, val: float):
+        self.settings['gps_angle_min_deg'] = float(val)
+        self.save_settings()
+
+    def get_gps_length_min_m(self) -> float:
+        return float(self.settings.get('gps_length_min_m', 5.0))
+
+    def set_gps_length_min_m(self, val: float):
+        self.settings['gps_length_min_m'] = float(val)
+        self.save_settings()
+
+    def get_gps_smooth_window(self) -> int:
+        return int(self.settings.get('gps_smooth_window', 7))
+
+    def set_gps_smooth_window(self, val: int):
+        self.settings['gps_smooth_window'] = int(val)
+        self.save_settings()
+
+    def get_gps_elevation_mode(self) -> str:
+        return str(self.settings.get('gps_elevation_mode', 'flat'))
+
+    def set_gps_elevation_mode(self, mode: str):
+        self.settings['gps_elevation_mode'] = str(mode)
+        self.save_settings()
+
+    def get_gps_elevation_smooth_window(self) -> int:
+        return int(self.settings.get('gps_elevation_smooth_window', 31))
+
+    def set_gps_elevation_smooth_window(self, val: int):
+        self.settings['gps_elevation_smooth_window'] = int(val)
+        self.save_settings()
     
     def get_recent_files(self) -> List[str]:
         """Get list of recent files"""
@@ -1252,12 +1462,34 @@ class SettingsManager:
             info['version'] = f'Could not determine version: {e}'
         
         return info
+
+    def get_exiftool_info(self, exiftool_path: Optional[Path]) -> Dict:
+        if exiftool_path is None or not self.is_exiftool_valid(exiftool_path):
+            return {'valid': False, 'error': 'Invalid or missing ExifTool path'}
+
+        exiftool_path = self._normalize_exiftool_candidate(Path(exiftool_path))
+        info = {
+            'valid': True,
+            'path': str(exiftool_path),
+            'executable': exiftool_path.name,
+        }
+
+        ok, version_or_error = self._probe_exiftool_version(exiftool_path)
+        if ok:
+            info['version'] = version_or_error
+        else:
+            info['valid'] = False
+            info['error'] = version_or_error
+            info['version'] = 'Unknown'
+
+        return info
     
     def reset_to_defaults(self):
         """Reset all settings to defaults"""
         self.settings = {
             'sdk_path': None,
             'ffmpeg_path': None,
+            'exiftool_path': None,
             'spheresfm_path': None,
             'colmap_gpu_path': None,
             'colmap_path': None,

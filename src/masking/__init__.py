@@ -83,7 +83,11 @@ def __getattr__(name):
         from .sam3_external_masker import SAM3ExternalMasker
         return SAM3ExternalMasker
 
+    if name == 'DARTMasker':
+        from .dart_masker import DARTMasker
+        return DARTMasker
+
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ['MultiCategoryMasker', 'ONNXMasker', 'SAM3ExternalMasker', 'get_masker']
+__all__ = ['MultiCategoryMasker', 'ONNXMasker', 'SAM3ExternalMasker', 'DARTMasker', 'get_masker']

@@ -14,6 +14,7 @@ from src.config.defaults import (
 _LAST_INTEGER_RE = re.compile(r'(\d+)(?!.*\d)')
 _PERSPECTIVE_NAME_RE = re.compile(r'^frame_(\d+)_cam_(\d+)\.[^.]+$', re.IGNORECASE)
 _CUBEMAP_NAME_RE = re.compile(r'^frame_(\d+)_([^./\\]+)\.[^.]+$', re.IGNORECASE)
+_SANITIZE_TOKEN_RE = re.compile(r'[^A-Za-z0-9_-]+')
 
 
 def normalize_stage2_numbering_mode(value: str | None) -> str:
@@ -23,7 +24,7 @@ def normalize_stage2_numbering_mode(value: str | None) -> str:
 
 def normalize_stage2_layout_mode(value: str | None) -> str:
     normalized = str(value or DEFAULT_STAGE2_LAYOUT_MODE).strip().lower()
-    return normalized if normalized in {'flat', 'by_camera'} else DEFAULT_STAGE2_LAYOUT_MODE
+    return normalized if normalized in {'flat', 'by_camera', 'by_frame'} else DEFAULT_STAGE2_LAYOUT_MODE
 
 
 def extract_frame_id(path_or_name: str | Path) -> Optional[int]:
@@ -75,12 +76,30 @@ def cubemap_output_name(frame_id: int, tile_name: str, extension: str) -> str:
     return f'frame_{frame_id:05d}_{tile_name}.{ext}'
 
 
+def fisheye_cubemap_output_name(source_path: str | Path, face_name: str, extension: str) -> str:
+    ext = str(extension).lstrip('.')
+    return f'{fisheye_source_tag(source_path)}_{face_name}.{ext}'
+
+
 def resolve_cubemap_output_path(output_root: str | Path, frame_id: int, tile_name: str, extension: str, layout_mode: str | None) -> Path:
     root = Path(output_root)
     mode = normalize_stage2_layout_mode(layout_mode)
     if mode == 'by_camera':
         return root / str(tile_name) / cubemap_output_name(frame_id, tile_name, extension)
+    if mode == 'by_frame':
+        return root / f'frame_{frame_id:05d}' / cubemap_output_name(frame_id, tile_name, extension)
     return root / cubemap_output_name(frame_id, tile_name, extension)
+
+
+def resolve_fisheye_cubemap_output_path(output_root: str | Path, source_path: str | Path, face_name: str, extension: str, layout_mode: str | None) -> Path:
+    root = Path(output_root)
+    mode = normalize_stage2_layout_mode(layout_mode)
+    filename = fisheye_cubemap_output_name(source_path, face_name, extension)
+    if mode == 'by_camera':
+        return root / str(face_name) / filename
+    if mode == 'by_frame':
+        return root / fisheye_source_tag(source_path) / filename
+    return root / filename
 
 
 def resolve_perspective_output_path(output_root: str | Path, frame_id: int, cam_idx: int, extension: str, layout_mode: str | None) -> Path:
@@ -88,7 +107,20 @@ def resolve_perspective_output_path(output_root: str | Path, frame_id: int, cam_
     mode = normalize_stage2_layout_mode(layout_mode)
     if mode == 'by_camera':
         return root / f'cam_{cam_idx:02d}' / perspective_output_name(frame_id, cam_idx, extension)
+    if mode == 'by_frame':
+        return root / f'frame_{frame_id:05d}' / perspective_output_name(frame_id, cam_idx, extension)
     return root / perspective_output_name(frame_id, cam_idx, extension)
+
+
+def fisheye_source_tag(source_path: str | Path) -> str:
+    path = Path(source_path)
+    stem = path.stem
+    parent = path.parent.name.lower()
+    if parent in {'lens_1', 'lens1'} and '_lens1' not in stem.lower():
+        stem = f'{stem}_lens1'
+    elif parent in {'lens_2', 'lens2'} and '_lens2' not in stem.lower():
+        stem = f'{stem}_lens2'
+    return _SANITIZE_TOKEN_RE.sub('_', stem).strip('_') or 'fisheye'
 
 
 def parse_perspective_output(path_or_name: str | Path) -> Optional[tuple[int, int]]:

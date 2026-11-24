@@ -53,6 +53,7 @@ class SettingsDialog(QDialog):
         # Tabs for different settings categories
         tabs = QTabWidget()
         tabs.addTab(self.create_paths_tab(), "Paths & Detection")
+        tabs.addTab(self.create_gps_tab(), "GPS Cleaning")
         tabs.addTab(self.create_directories_tab(), "Directories")
         tabs.addTab(self.create_info_tab(), "System Info")
         
@@ -176,6 +177,38 @@ class SettingsDialog(QDialog):
         
         ffmpeg_group.setLayout(ffmpeg_layout)
         layout.addWidget(ffmpeg_group)
+
+        exiftool_group = QGroupBox("ExifTool Path")
+        exiftool_layout = QVBoxLayout()
+
+        exiftool_path_layout = QHBoxLayout()
+        self.exiftool_path_edit = QLineEdit()
+        self.exiftool_path_edit.setPlaceholderText("Path to exiftool.exe")
+        exiftool_path_layout.addWidget(self.exiftool_path_edit, stretch=1)
+
+        self.exiftool_browse_btn = QPushButton("Browse...")
+        self.exiftool_browse_btn.clicked.connect(self.browse_exiftool_path)
+        exiftool_path_layout.addWidget(self.exiftool_browse_btn)
+
+        self.exiftool_clear_btn = QPushButton("Clear")
+        self.exiftool_clear_btn.clicked.connect(lambda: self.exiftool_path_edit.clear())
+        exiftool_path_layout.addWidget(self.exiftool_clear_btn)
+
+        exiftool_layout.addLayout(exiftool_path_layout)
+
+        self.exiftool_status_label = QLabel()
+        self.exiftool_status_label.setWordWrap(True)
+        exiftool_layout.addWidget(self.exiftool_status_label)
+
+        test_exiftool_layout = QHBoxLayout()
+        test_exiftool_layout.addStretch()
+        self.test_exiftool_btn = QPushButton("Test ExifTool")
+        self.test_exiftool_btn.clicked.connect(self.test_exiftool)
+        test_exiftool_layout.addWidget(self.test_exiftool_btn)
+        exiftool_layout.addLayout(test_exiftool_layout)
+
+        exiftool_group.setLayout(exiftool_layout)
+        layout.addWidget(exiftool_group)
 
         sam3_group = QGroupBox("SAM3 External Tools")
         sam3_layout = QFormLayout()
@@ -317,6 +350,11 @@ class SettingsDialog(QDialog):
             self.ffmpeg_path_edit.setText(str(ffmpeg_path))
         self.update_ffmpeg_status()
 
+        exiftool_path = self.settings.get_exiftool_path()
+        if exiftool_path:
+            self.exiftool_path_edit.setText(str(exiftool_path))
+        self.update_exiftool_status()
+
         sam3_segmenter = self.settings.get_sam3_segmenter_path()
         self.sam3_segmenter_edit.setText(str(sam3_segmenter) if sam3_segmenter else "")
 
@@ -326,7 +364,20 @@ class SettingsDialog(QDialog):
         sam3_gui = self.settings.get_sam3_image_exe_path()
         self.sam3_gui_edit.setText(str(sam3_gui) if sam3_gui else "")
 
-        
+        # GPS track cleaning loading
+        self.gps_clean_checkbox.setChecked(self.settings.get_gps_clean_path())
+        self.gps_max_speed_spin.setValue(self.settings.get_gps_max_speed_m_s())
+        self.gps_angle_spin.setValue(self.settings.get_gps_angle_min_deg())
+        self.gps_length_spin.setValue(self.settings.get_gps_length_min_m())
+        self.gps_smooth_spin.setValue(self.settings.get_gps_smooth_window())
+
+        # Elevation settings
+        ele_mode = self.settings.get_gps_elevation_mode()
+        ele_idx = self.gps_elevation_combo.findData(ele_mode)
+        if ele_idx >= 0:
+            self.gps_elevation_combo.setCurrentIndex(ele_idx)
+        self.gps_elevation_smooth_spin.setValue(self.settings.get_gps_elevation_smooth_window())
+
         theme = self.settings.get_theme()
         theme_index = self.theme_combo.findData(theme)
         if theme_index >= 0:
@@ -396,6 +447,24 @@ class SettingsDialog(QDialog):
             self.ffmpeg_status_label.setText("❌ Invalid FFmpeg path")
             self.ffmpeg_status_label.setStyleSheet("color: red;")
 
+    def update_exiftool_status(self):
+        """Update ExifTool status label"""
+        exiftool_path_str = self.exiftool_path_edit.text().strip()
+        if not exiftool_path_str:
+            self.exiftool_status_label.setText("⚠️ No ExifTool path configured")
+            self.exiftool_status_label.setStyleSheet("color: orange;")
+            return
+
+        exiftool_path = Path(exiftool_path_str)
+        if self.settings.is_exiftool_valid(exiftool_path):
+            info = self.settings.get_exiftool_info(exiftool_path)
+            version = info.get('version', 'Unknown')
+            self.exiftool_status_label.setText(f"✅ Valid ExifTool found - Version {version}")
+            self.exiftool_status_label.setStyleSheet("color: green;")
+        else:
+            self.exiftool_status_label.setText("❌ Invalid ExifTool path")
+            self.exiftool_status_label.setStyleSheet("color: red;")
+
     def browse_sdk_path(self):
         """Open folder browser for SDK path"""
         current = self.sdk_path_edit.text().strip()
@@ -427,6 +496,21 @@ class SettingsDialog(QDialog):
         if file_path:
             self.ffmpeg_path_edit.setText(file_path)
             self.update_ffmpeg_status()
+
+    def browse_exiftool_path(self):
+        current = self.exiftool_path_edit.text().strip()
+        start_dir = str(Path(current).parent) if current and Path(current).exists() else ""
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select ExifTool Executable",
+            start_dir,
+            "Executables (*.exe);;All Files (*.*)"
+        )
+
+        if file_path:
+            self.exiftool_path_edit.setText(file_path)
+            self.update_exiftool_status()
 
     def browse_sam3_segmenter(self):
         self._browse_file_into(self.sam3_segmenter_edit, "Select segment_persons.exe", "Executables (*.exe);;All Files (*.*)")
@@ -461,22 +545,28 @@ class SettingsDialog(QDialog):
             self.ffmpeg_path_edit.setText(str(ffmpeg_path))
             self.update_ffmpeg_status()
 
+        exiftool_path = self.settings.auto_detect_exiftool()
+        if exiftool_path:
+            self.exiftool_path_edit.setText(str(exiftool_path))
+            self.update_exiftool_status()
+
         self.detect_now_btn.setEnabled(True)
         self.detect_now_btn.setText("Detect Now")
         
-        if sdk_path or ffmpeg_path:
+        if sdk_path or ffmpeg_path or exiftool_path:
             QMessageBox.information(
                 self,
                 "Detection Complete",
                 f"Found:\n" +
                 (f"✓ SDK: {sdk_path}\n" if sdk_path else "✗ SDK not found\n") +
-                (f"✓ FFmpeg: {ffmpeg_path}" if ffmpeg_path else "✗ FFmpeg not found")
+                (f"✓ FFmpeg: {ffmpeg_path}\n" if ffmpeg_path else "✗ FFmpeg not found\n") +
+                (f"✓ ExifTool: {exiftool_path}" if exiftool_path else "✗ ExifTool not found")
             )
         else:
             QMessageBox.warning(
                 self,
                 "Detection Failed",
-                "Could not auto-detect SDK/FFmpeg.\nPlease browse manually."
+                "Could not auto-detect SDK/FFmpeg/ExifTool.\nPlease browse manually."
             )
 
     def test_sdk(self):
@@ -529,6 +619,28 @@ class SettingsDialog(QDialog):
                 f"❌ FFmpeg validation failed:\n{info.get('error', 'Unknown error')}"
             )
 
+    def test_exiftool(self):
+        """Test ExifTool configuration"""
+        exiftool_path_str = self.exiftool_path_edit.text().strip()
+        if not exiftool_path_str:
+            QMessageBox.warning(self, "No Path", "Please enter ExifTool path first")
+            return
+
+        exiftool_path = Path(exiftool_path_str)
+        info = self.settings.get_exiftool_info(exiftool_path)
+
+        if info['valid']:
+            msg = f"✅ ExifTool is valid and ready to use!\n\n"
+            msg += f"Version: {info.get('version', 'Unknown')}\n"
+            msg += f"Path: {info['path']}"
+            QMessageBox.information(self, "ExifTool Test - Success", msg)
+        else:
+            QMessageBox.critical(
+                self,
+                "ExifTool Test - Failed",
+                f"❌ ExifTool validation failed:\n{info.get('error', 'Unknown error')}"
+            )
+
     def refresh_system_info(self):
         """Refresh system information display"""
         info_lines = []
@@ -544,6 +656,18 @@ class SettingsDialog(QDialog):
             info_lines.append(f"Executable: {sdk_info.get('executable', 'N/A')}")
             info_lines.append(f"Models: {len(sdk_info.get('models', []))}")
             info_lines.append(f"Auto-detected: {'Yes' if self.settings.settings.get('sdk_auto_detected') else 'No'}")
+        else:
+            info_lines.append("Status: Not configured")
+
+        info_lines.append("")
+        info_lines.append("=== EXIFTOOL ===")
+        exiftool_path = self.settings.get_exiftool_path()
+        if exiftool_path:
+            exiftool_info = self.settings.get_exiftool_info(exiftool_path)
+            info_lines.append(f"Status: {'✓ Valid' if exiftool_info['valid'] else '✗ Invalid'}")
+            info_lines.append(f"Version: {exiftool_info.get('version', 'Unknown')}")
+            info_lines.append(f"Path: {exiftool_info.get('path', 'N/A')}")
+            info_lines.append(f"Auto-detected: {'Yes' if self.settings.settings.get('exiftool_auto_detected') else 'No'}")
         else:
             info_lines.append("Status: Not configured")
 
@@ -634,12 +758,148 @@ class SettingsDialog(QDialog):
         else:
             self.settings.set_ffmpeg_path(None)
 
+        # Save ExifTool path
+        exiftool_path_str = self.exiftool_path_edit.text().strip()
+        if exiftool_path_str:
+            exiftool_path = Path(exiftool_path_str)
+            if not self.settings.set_exiftool_path(exiftool_path, auto_detected=False):
+                QMessageBox.warning(
+                    self,
+                    "Invalid ExifTool Path",
+                    "The ExifTool path is invalid. Please check the path and try again."
+                )
+                return
+        else:
+            self.settings.set_exiftool_path(None)
+
         self.settings.set_sam3_segmenter_path(self.sam3_segmenter_edit.text().strip())
         self.settings.set_sam3_model_path(self.sam3_model_edit.text().strip())
         self.settings.set_sam3_image_exe_path(self.sam3_gui_edit.text().strip())
 
-        
+        # Save GPS preferences
+        self.settings.set_gps_clean_path(self.gps_clean_checkbox.isChecked())
+        self.settings.set_gps_max_speed_m_s(self.gps_max_speed_spin.value())
+        self.settings.set_gps_angle_min_deg(self.gps_angle_spin.value())
+        self.settings.set_gps_length_min_m(self.gps_length_spin.value())
+        self.settings.set_gps_smooth_window(self.gps_smooth_spin.value())
+        self.settings.set_gps_elevation_mode(self.gps_elevation_combo.currentData())
+        self.settings.set_gps_elevation_smooth_window(self.gps_elevation_smooth_spin.value())
+
         # Emit signal and close
         self.settings_changed.emit()
         QMessageBox.information(self, "Settings Saved", "Settings have been saved successfully")
         self.accept()
+
+    def create_gps_tab(self) -> QWidget:
+        """Create the GPS Cleaning tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        gps_group = QGroupBox("GPS Outlier Filtering & Smoothing")
+        gps_layout = QFormLayout()
+
+        self.gps_clean_checkbox = QCheckBox("Enable GPS path cleaning and smoothing")
+        self.gps_clean_checkbox.setToolTip("Filter outliers and apply moving average smoothing to extracted tracks")
+        gps_layout.addRow("", self.gps_clean_checkbox)
+
+        from PyQt6.QtWidgets import QDoubleSpinBox, QSpinBox
+        self.gps_max_speed_spin = QDoubleSpinBox()
+        self.gps_max_speed_spin.setRange(0.1, 100.0)
+        self.gps_max_speed_spin.setSingleStep(0.5)
+        self.gps_max_speed_spin.setDecimals(1)
+        self.gps_max_speed_spin.setSuffix(" m/s")
+        self.gps_max_speed_spin.setToolTip("Maximum physically plausible speed between samples (e.g. 4.0 for walking, 12.0 for cycling, 45.0 for driving)")
+        gps_layout.addRow("Max Plausible Speed:", self.gps_max_speed_spin)
+
+        self.gps_angle_spin = QDoubleSpinBox()
+        self.gps_angle_spin.setRange(1.0, 180.0)
+        self.gps_angle_spin.setSingleStep(5.0)
+        self.gps_angle_spin.setDecimals(1)
+        self.gps_angle_spin.setSuffix(" deg")
+        self.gps_angle_spin.setToolTip("Minimum interior angle at a vertex below which it is flagged as a sharp V-turn spike")
+        gps_layout.addRow("Sharp V-turn Min Angle:", self.gps_angle_spin)
+
+        self.gps_length_spin = QDoubleSpinBox()
+        self.gps_length_spin.setRange(0.1, 1000.0)
+        self.gps_length_spin.setSingleStep(1.0)
+        self.gps_length_spin.setDecimals(1)
+        self.gps_length_spin.setSuffix(" m")
+        self.gps_length_spin.setToolTip("Minimum length of V-turn excursion to trigger angle-based spike rejection")
+        gps_layout.addRow("Sharp V-turn Min Excursion:", self.gps_length_spin)
+
+        self.gps_smooth_spin = QSpinBox()
+        self.gps_smooth_spin.setRange(1, 99)
+        self.gps_smooth_spin.setSingleStep(2)  # Odd numbers only
+        self.gps_smooth_spin.setSuffix(" samples")
+        self.gps_smooth_spin.setToolTip("Moving average window size (must be odd)")
+        gps_layout.addRow("Smoothing Window Size:", self.gps_smooth_spin)
+
+        gps_group.setLayout(gps_layout)
+        layout.addWidget(gps_group)
+
+        # Elevation handling group
+        ele_group = QGroupBox("Altitude / Elevation Handling")
+        ele_layout = QFormLayout()
+
+        from src.config.defaults import GPS_ELEVATION_MODES
+        self.gps_elevation_combo = QComboBox()
+        for mode_key, mode_label in GPS_ELEVATION_MODES.items():
+            self.gps_elevation_combo.addItem(mode_label, mode_key)
+        self.gps_elevation_combo.setToolTip(
+            "How to handle GPS altitude values:\n"
+            "• Constant Median: Sets all altitudes to the track median (best for flat floors).\n"
+            "• Smoothed: Applies a wide moving average to reduce altitude jitter.\n"
+            "• Raw: Keeps original ExifTool altitude values unchanged."
+        )
+        ele_layout.addRow("Elevation Mode:", self.gps_elevation_combo)
+
+        from PyQt6.QtWidgets import QSpinBox as _QSpinBox
+        self.gps_elevation_smooth_spin = _QSpinBox()
+        self.gps_elevation_smooth_spin.setRange(3, 99)
+        self.gps_elevation_smooth_spin.setSingleStep(2)
+        self.gps_elevation_smooth_spin.setSuffix(" samples")
+        self.gps_elevation_smooth_spin.setToolTip("Moving average window for altitude smoothing (only used in 'Smoothed' mode)")
+        ele_layout.addRow("Elevation Smooth Window:", self.gps_elevation_smooth_spin)
+
+        def _toggle_ele_smooth_spin(index):
+            mode = self.gps_elevation_combo.currentData()
+            self.gps_elevation_smooth_spin.setEnabled(mode == 'smooth')
+        self.gps_elevation_combo.currentIndexChanged.connect(_toggle_ele_smooth_spin)
+        _toggle_ele_smooth_spin(0)
+
+        ele_group.setLayout(ele_layout)
+        layout.addWidget(ele_group)
+
+        # Parameter presets section
+        preset_group = QGroupBox("Presets")
+        preset_layout = QHBoxLayout()
+
+        walk_btn = QPushButton("Walking (Default)")
+        walk_btn.clicked.connect(lambda: self.apply_gps_preset(4.0, 20.0, 5.0, 7))
+        preset_layout.addWidget(walk_btn)
+
+        cycle_btn = QPushButton("Bicycle")
+        cycle_btn.clicked.connect(lambda: self.apply_gps_preset(12.0, 15.0, 10.0, 9))
+        preset_layout.addWidget(cycle_btn)
+
+        vehicle_btn = QPushButton("Vehicle")
+        vehicle_btn.clicked.connect(lambda: self.apply_gps_preset(45.0, 10.0, 15.0, 11))
+        preset_layout.addWidget(vehicle_btn)
+
+        preset_group.setLayout(preset_layout)
+        layout.addWidget(preset_group)
+
+        layout.addStretch()
+        return widget
+
+    def apply_gps_preset(self, speed: float, angle: float, length: float, smooth: int):
+        self.gps_max_speed_spin.setValue(speed)
+        self.gps_angle_spin.setValue(angle)
+        self.gps_length_spin.setValue(length)
+        self.gps_smooth_spin.setValue(smooth)
+        # Presets always recommend flat elevation for indoor capture
+        idx = self.gps_elevation_combo.findData('flat')
+        if idx >= 0:
+            self.gps_elevation_combo.setCurrentIndex(idx)

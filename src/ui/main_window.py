@@ -31,6 +31,9 @@ from src.config.defaults import (
     APP_NAME, APP_VERSION,
     DEFAULT_FPS, DEFAULT_H_FOV, DEFAULT_SPLIT_COUNT,
     DEFAULT_STAGE2_LAYOUT_MODE, DEFAULT_STAGE2_NUMBERING_MODE,
+    DEFAULT_FISHEYE_FACE_SIZE, DEFAULT_FISHEYE_LENS_FOV,
+    DEFAULT_FISHEYE_PROJECTION_MODEL, FISHEYE_LENS_FOV_MAX,
+    FISHEYE_LENS_FOV_MIN, FISHEYE_PROJECTION_MODELS,
     EXTRACTION_METHODS, TRANSFORM_TYPES, YOLOV8_MODELS,
     STAGE2_LAYOUT_MODES, STAGE2_NUMBERING_MODES,
     DEFAULT_SDK_QUALITY
@@ -429,7 +432,8 @@ class MainWindow(QMainWindow):
         self.page_stack.addWidget(self._create_stage1_page())         # 1
         self.page_stack.addWidget(self._create_stage2_persp_page())   # 2
         self.page_stack.addWidget(self._create_stage2_cube_page())    # 3
-        self.page_stack.addWidget(self._create_stage3_page())         # 4
+        self.page_stack.addWidget(self._create_stage2_fisheye_page()) # 4
+        self.page_stack.addWidget(self._create_stage3_page())         # 5
         content_layout.addWidget(self.page_stack, stretch=1)
 
         body.addWidget(content_wrapper)
@@ -479,6 +483,7 @@ class MainWindow(QMainWindow):
             ("Frame Extraction",     "1"),
             ("Perspective Split",    "2"),
             ("Cubemap Split",        "2"),
+            ("Fisheye Cubemap",      "2"),
             ("AI Masking",           "3"),
         ]
         
@@ -728,20 +733,21 @@ class MainWindow(QMainWindow):
         # Split Views
         card2 = CardWidget("Split Views")
         stage2_header = QHBoxLayout()
-        self.stage2_enable = QCheckBox("Enable perspective/cubemap splitting")
+        self.stage2_enable = QCheckBox("Enable Stage 2 splitting")
         self.stage2_enable.setChecked(True)
         self.stage2_enable.toggled.connect(self._update_overview_stage_summary)
         stage2_header.addWidget(self.stage2_enable)
         self.stage2_method_combo = QComboBox()
         self.stage2_method_combo.addItem("Perspective (E2P)", "perspective")
         self.stage2_method_combo.addItem("Cubemap (E2C)", "cubemap")
-        self.stage2_method_combo.setFixedWidth(180)
+        self.stage2_method_combo.addItem("Fisheye to Cubemap", "fisheye_cubemap")
+        self.stage2_method_combo.setFixedWidth(220)
         self.stage2_method_combo.currentIndexChanged.connect(self.on_stage2_method_changed)
         stage2_header.addWidget(self.stage2_method_combo)
         card2.addLayout(stage2_header)
         self.run_stage2_btn = QPushButton("Configure Split")
         self.run_stage2_btn.setFixedHeight(36)
-        self.run_stage2_btn.clicked.connect(lambda: self._open_stage_page(2))
+        self.run_stage2_btn.clicked.connect(lambda: self.on_stage2_method_changed(self.stage2_method_combo.currentIndex()))
         self.run_stage2_btn.setObjectName("stageSecondaryButton")
         card2.addWidget(self.run_stage2_btn)
         grid.addWidget(card2, 0, 1)
@@ -754,7 +760,7 @@ class MainWindow(QMainWindow):
         card3.addWidget(self.stage3_enable)
         self.run_stage3_btn = QPushButton("Configure Masking")
         self.run_stage3_btn.setFixedHeight(36)
-        self.run_stage3_btn.clicked.connect(lambda: self._open_stage_page(4))
+        self.run_stage3_btn.clicked.connect(lambda: self._open_stage_page(5))
         self.run_stage3_btn.setObjectName("stageSecondaryButton")
         card3.addWidget(self.run_stage3_btn)
         grid.addWidget(card3, 1, 0)
@@ -926,6 +932,53 @@ class MainWindow(QMainWindow):
         self.dual_lens_layout_widget.setVisible(False)
         card_extract.addWidget(FormRow("Dual-Lens Folder Mode:", self.dual_lens_layout_widget))
 
+        self.extract_gps_track_check = QCheckBox("Extract GPS track from INSV")
+        self.extract_gps_track_check.setToolTip(
+            "Uses ExifTool to export gps_track.gpx from the source INSV after Stage 1 extraction completes. "
+            "This is skipped for non-INSV inputs."
+        )
+        card_extract.addWidget(self.extract_gps_track_check)
+
+        self.gps_capture_fps_spin = QDoubleSpinBox()
+        self.gps_capture_fps_spin.setDecimals(3)
+        self.gps_capture_fps_spin.setRange(0.0, 120.0)
+        self.gps_capture_fps_spin.setSingleStep(0.1)
+        self.gps_capture_fps_spin.setValue(0.0)
+        self.gps_capture_fps_spin.setSpecialValueText("Auto")
+        self.gps_capture_fps_spin.setToolTip(
+            "Optional GPS timing override for timelapse inputs. Use the real capture cadence, not the encoded video fps."
+        )
+        card_extract.addWidget(
+            FormRow(
+                "GPS Capture FPS:",
+                self.gps_capture_fps_spin,
+                "Optional override for timelapse sources. Example: 2.0 for a 2 fps capture encoded at 29.97 fps.",
+            )
+        )
+
+        gps_hint_widget = QWidget()
+        gps_hint_layout = QHBoxLayout(gps_hint_widget)
+        gps_hint_layout.setContentsMargins(0, 0, 0, 0)
+        gps_hint_layout.setSpacing(8)
+        gps_hint_label = QLabel(
+            "Requires ExifTool configured in Settings > Paths & Detection. "
+            "The GPX file is written to the output root as gps_track.gpx."
+        )
+        gps_hint_label.setWordWrap(True)
+        gps_hint_label.setProperty("role", "muted")
+        gps_hint_layout.addWidget(gps_hint_label, 1)
+        gps_settings_btn = QPushButton("Settings…")
+        gps_settings_btn.setFixedWidth(92)
+        gps_settings_btn.clicked.connect(self.open_settings)
+        gps_hint_layout.addWidget(gps_settings_btn)
+
+        gps_export_btn = QPushButton("Export GPS…")
+        gps_export_btn.setFixedWidth(100)
+        gps_export_btn.clicked.connect(self.export_gps_manually)
+        gps_hint_layout.addWidget(gps_export_btn)
+
+        card_extract.addWidget(gps_hint_widget)
+
         layout.addWidget(card_extract)
 
         # ── Media Processing card (SDK only) ─────────────────────────────────
@@ -1042,8 +1095,9 @@ class MainWindow(QMainWindow):
         self.stage2_numbering_combo.setMinimumWidth(220)
 
         self.stage2_layout_combo = QComboBox()
-        for mode, label in STAGE2_LAYOUT_MODES.items():
-            self.stage2_layout_combo.addItem(label, mode)
+        self.stage2_layout_combo.addItem("Flat Folder", "flat")
+        self.stage2_layout_combo.addItem("Grouped by Camera (Rig)", "by_camera")
+        self.stage2_layout_combo.addItem("Grouped by Frame (Station)", "by_frame")
         self.stage2_layout_combo.setCurrentIndex(
             max(0, self.stage2_layout_combo.findData(DEFAULT_STAGE2_LAYOUT_MODE))
         )
@@ -1067,7 +1121,7 @@ class MainWindow(QMainWindow):
         card_output.addWidget(FormRow("Output Size:", dims_widget, "Width × Height in pixels"))
         card_output.addWidget(FormRow("Format:", self.stage2_format_combo))
         card_output.addWidget(FormRow("Frame Numbering:", self.stage2_numbering_combo, "Preserve extracted frame ids or renumber sequentially"))
-        card_output.addWidget(FormRow("Folder Layout:", self.stage2_layout_combo, "Keep all views flat or group them into per-camera folders"))
+        card_output.addWidget(FormRow("Folder Layout:", self.stage2_layout_combo, "Rig groups each virtual camera across frames. Station groups all views from the same source frame."))
         card_output.addWidget(FormRow("Input Folder:", stage2_input_widget, "Used when running Stage 2 without Stage 1; leave empty for auto-discovery"))
         self.stage2_output_group = card_output
         layout.addWidget(card_output)
@@ -1178,12 +1232,13 @@ class MainWindow(QMainWindow):
 
         self.cubemap_layout_combo = QComboBox()
         self.cubemap_layout_combo.addItem("Flat Folder", "flat")
-        self.cubemap_layout_combo.addItem("Separate By Tile", "by_camera")
+        self.cubemap_layout_combo.addItem("Grouped by Face (Rig)", "by_camera")
+        self.cubemap_layout_combo.addItem("Grouped by Frame (Station)", "by_frame")
         self.cubemap_layout_combo.setCurrentIndex(
             max(0, self.cubemap_layout_combo.findData(DEFAULT_STAGE2_LAYOUT_MODE))
         )
         self.cubemap_layout_combo.setMinimumWidth(220)
-        card_tiles.addWidget(FormRow("Folder Layout:", self.cubemap_layout_combo, "Keep all cubemap tiles together or group them into per-tile folders"))
+        card_tiles.addWidget(FormRow("Folder Layout:", self.cubemap_layout_combo, "Rig groups each face across frames. Station groups all faces from the same source frame."))
 
         cubemap_input_widget = QWidget()
         cubemap_input_layout = QHBoxLayout(cubemap_input_widget)
@@ -1236,9 +1291,124 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
         return self._scroll_wrap(page)
+
+    # ========================================================================
+    # PAGE 4: FISHEYE TO CUBEMAP
+    # ========================================================================
+    def _create_stage2_fisheye_page(self) -> QScrollArea:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(16)
+
+        layout.addWidget(StageHeader(
+            "Fisheye to Cubemap",
+            "Convert raw per-lens fisheye frames into five cubemap faces without calibration."
+        ))
+
+        layout.addWidget(StageSummaryStrip(
+            "Fisheye Cubemap",
+            "Use this with raw lens frames from Stage 1. PNG output supports mask-before-split workflows for fisheye images."
+        ))
+
+        card_output = CardWidget("Output Settings")
+
+        self.fisheye_face_size_spin = QSpinBox()
+        self.fisheye_face_size_spin.setRange(256, 4096)
+        self.fisheye_face_size_spin.setSingleStep(128)
+        self.fisheye_face_size_spin.setValue(DEFAULT_FISHEYE_FACE_SIZE)
+        self.fisheye_face_size_spin.setFixedWidth(120)
+
+        self.fisheye_format_combo = QComboBox()
+        self.fisheye_format_combo.addItem("PNG", "png")
+        self.fisheye_format_combo.addItem("JPEG", "jpg")
+        self.fisheye_format_combo.addItem("TIFF", "tiff")
+        self.fisheye_format_combo.setFixedWidth(120)
+
+        self.stage2_numbering_combo_fisheye = QComboBox()
+        for mode, label in STAGE2_NUMBERING_MODES.items():
+            self.stage2_numbering_combo_fisheye.addItem(label, mode)
+        self.stage2_numbering_combo_fisheye.setCurrentIndex(
+            max(0, self.stage2_numbering_combo_fisheye.findData(DEFAULT_STAGE2_NUMBERING_MODE))
+        )
+        self.stage2_numbering_combo_fisheye.setMinimumWidth(220)
+        self.stage2_numbering_combo_fisheye.currentIndexChanged.connect(
+            lambda _index: self._mirror_combo_selection(self.stage2_numbering_combo_fisheye, self.stage2_numbering_combo)
+        )
+        self.stage2_numbering_combo.currentIndexChanged.connect(
+            lambda _index: self._mirror_combo_selection(self.stage2_numbering_combo, self.stage2_numbering_combo_fisheye)
+        )
+
+        self.fisheye_layout_combo = QComboBox()
+        self.fisheye_layout_combo.addItem("Flat Folder", "flat")
+        self.fisheye_layout_combo.addItem("Grouped by Face (Rig)", "by_camera")
+        self.fisheye_layout_combo.addItem("Grouped by Frame (Station)", "by_frame")
+        self.fisheye_layout_combo.setCurrentIndex(
+            max(0, self.fisheye_layout_combo.findData(DEFAULT_STAGE2_LAYOUT_MODE))
+        )
+        self.fisheye_layout_combo.setMinimumWidth(220)
+
+        fisheye_input_widget = QWidget()
+        fisheye_input_layout = QHBoxLayout(fisheye_input_widget)
+        fisheye_input_layout.setContentsMargins(0, 0, 0, 0)
+        fisheye_input_layout.setSpacing(8)
+        self.stage2_input_dir_edit_fisheye = QLineEdit()
+        self.stage2_input_dir_edit_fisheye.setPlaceholderText("Optional: folder with raw per-lens fisheye images for split-only runs")
+        self.stage2_input_dir_edit_fisheye.textChanged.connect(self._on_stage2_input_dir_changed)
+        fisheye_input_layout.addWidget(self.stage2_input_dir_edit_fisheye)
+        self.stage2_input_browse_btn_fisheye = QPushButton("Browse…")
+        self.stage2_input_browse_btn_fisheye.setFixedWidth(92)
+        self.stage2_input_browse_btn_fisheye.clicked.connect(
+            lambda: self._browse_for_directory(self.stage2_input_dir_edit_fisheye, "Select Raw Fisheye Input Folder")
+        )
+        fisheye_input_layout.addWidget(self.stage2_input_browse_btn_fisheye)
+
+        card_output.addWidget(FormRow("Face Size:", self.fisheye_face_size_spin, "Output width and height for each face"))
+        card_output.addWidget(FormRow("Format:", self.fisheye_format_combo))
+        card_output.addWidget(FormRow("Frame Numbering:", self.stage2_numbering_combo_fisheye, "Preserve source ids or renumber sequentially"))
+        card_output.addWidget(FormRow("Folder Layout:", self.fisheye_layout_combo, "Metashape Rig = grouped by face. Metashape camera stations = grouped by frame."))
+        card_output.addWidget(FormRow("Input Folder:", fisheye_input_widget, "Raw per-lens fisheye frames only; stitched panoramas are not supported here"))
+        layout.addWidget(card_output)
+
+        card_model = CardWidget("Lens Model")
+        info_label = QLabel(
+            "This first version assumes a centered circular fisheye image and a generic lens model. "
+            "Choose the approximation that best matches your capture."
+        )
+        info_label.setWordWrap(True)
+        info_label.setProperty("role", "muted")
+        card_model.addWidget(info_label)
+
+        self.fisheye_lens_fov_spin = QDoubleSpinBox()
+        self.fisheye_lens_fov_spin.setRange(FISHEYE_LENS_FOV_MIN, FISHEYE_LENS_FOV_MAX)
+        self.fisheye_lens_fov_spin.setSingleStep(1.0)
+        self.fisheye_lens_fov_spin.setDecimals(1)
+        self.fisheye_lens_fov_spin.setValue(DEFAULT_FISHEYE_LENS_FOV)
+        self.fisheye_lens_fov_spin.setFixedWidth(120)
+        self.fisheye_lens_fov_spin.setSuffix("°")
+
+        self.fisheye_projection_combo = QComboBox()
+        for key, label in FISHEYE_PROJECTION_MODELS.items():
+            self.fisheye_projection_combo.addItem(label, key)
+        self.fisheye_projection_combo.setCurrentIndex(
+            max(0, self.fisheye_projection_combo.findData(DEFAULT_FISHEYE_PROJECTION_MODEL))
+        )
+        self.fisheye_projection_combo.setMinimumWidth(180)
+
+        card_model.addWidget(FormRow("Lens FOV:", self.fisheye_lens_fov_spin, "Approximate total fisheye lens field of view"))
+        card_model.addWidget(FormRow("Projection Model:", self.fisheye_projection_combo))
+        layout.addWidget(card_model)
+
+        fisheye_footer = StageActionFooter("Run Fisheye Cubemap Split")
+        fisheye_footer.primary_button.clicked.connect(self.run_stage_2_only)
+        fisheye_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(4))
+        layout.addWidget(fisheye_footer)
+
+        layout.addStretch()
+        return self._scroll_wrap(page)
     
     # ========================================================================
-    # PAGE 4: AI MASKING
+    # PAGE 5: AI MASKING
     # ========================================================================
     def _create_stage3_page(self) -> QScrollArea:
         page = QWidget()
@@ -1260,7 +1430,8 @@ class MainWindow(QMainWindow):
         card_model = CardWidget("Engine & Quality")
 
         self.masking_engine_combo = QComboBox()
-        self.masking_engine_combo.addItem("SAM 3", "sam3_cpp")
+        self.masking_engine_combo.addItem("DART (Fast SAM3 Open-Vocab)", "dart")
+        self.masking_engine_combo.addItem("SAM 3 (External SAM3.cpp)", "sam3_cpp")
         self.masking_engine_combo.addItem("YOLO Segmentation", "yolo")
         self.masking_engine_combo.setCurrentIndex(0)
         self.masking_engine_combo.setMinimumWidth(280)
@@ -1443,12 +1614,12 @@ class MainWindow(QMainWindow):
         sam3_sequence_layout = QHBoxLayout(sam3_sequence_row)
         sam3_sequence_layout.setContentsMargins(0, 0, 0, 0)
         sam3_sequence_layout.setSpacing(8)
-        self.sam3_sequence_mode_check = QCheckBox("Video mode")
+        self.sam3_sequence_mode_check = QCheckBox("Enable temporary video masking")
         self.sam3_sequence_mode_check.setChecked(True)
-        self.sam3_sequence_mode_check.setToolTip("Use tracker-based sequence masking for extracted frame folders. Disable to force normal per-frame masking.")
+        self.sam3_sequence_mode_check.setToolTip("Mask the extracted frame sequence before Stage 2 and reuse that result during the split step. This uses the SAM3 tracker over frame sequences in the current build.")
         self.sam3_sequence_mode_check.toggled.connect(self._on_sam3_config_changed)
         sam3_sequence_layout.addWidget(self.sam3_sequence_mode_check)
-        sam3_sequence_layout.addWidget(QLabel("Uses the SAM3 tracker on frame sequences and stays on CUDA."))
+        sam3_sequence_layout.addWidget(QLabel("Runs SAM3 on the extracted sequence before Stage 2 and keeps that tracking path on CUDA."))
         sam3_sequence_layout.addStretch()
         sam3_layout.addWidget(FormRow("Processing mode:", sam3_sequence_row))
 
@@ -1599,7 +1770,7 @@ class MainWindow(QMainWindow):
 
         stage3_footer = StageActionFooter("Run Masking")
         stage3_footer.primary_button.clicked.connect(self.run_stage_3_only)
-        stage3_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(4))
+        stage3_footer.validate_button.clicked.connect(lambda: self._validate_stage_config(5))
         layout.addWidget(stage3_footer)
         
         self.on_masking_engine_changed(self.masking_engine_combo.currentIndex())
@@ -1738,7 +1909,7 @@ class MainWindow(QMainWindow):
         output_path = self.output_dir_edit.text().strip()
         input_obj = Path(input_path) if input_path else None
         stage2_input_obj = self._get_stage2_input_path()
-        needs_global_input = not (stage_index in (2, 3) and not self.stage1_enable.isChecked() and stage2_input_obj is not None)
+        needs_global_input = not (stage_index in (2, 3, 4) and not self.stage1_enable.isChecked() and stage2_input_obj is not None)
 
         if stage_index in (0, 1, 2, 3, 4, 5, 6):
             if needs_global_input and not input_path:
@@ -1761,12 +1932,12 @@ class MainWindow(QMainWindow):
             self._set_control_status("Stage 1 requires a video file", "warn")
             return
 
-        if stage_index in (2, 3) and not self.stage2_enable.isChecked():
+        if stage_index in (2, 3, 4) and not self.stage2_enable.isChecked():
             self.log_message("[INFO] Split validation: Splitting is disabled — masking targets extracted frames directly.")
             self._set_control_status("Split disabled, masking extracted frames", "info")
             return
 
-        if stage_index in (2, 3) and stage2_input_obj is not None:
+        if stage_index in (2, 3, 4) and stage2_input_obj is not None:
             if not stage2_input_obj.exists() or not stage2_input_obj.is_dir():
                 self.log_message(f"[WARN] Split validation: Stage 2 input folder not found: {stage2_input_obj}")
                 self._set_control_status("Stage 2 input folder not found", "warn")
@@ -1776,8 +1947,19 @@ class MainWindow(QMainWindow):
                 self._set_control_status("No images in Stage 2 input folder", "warn")
                 return
 
+        if stage_index in (2, 3, 4) and self.stage2_method_combo.currentData() == 'fisheye_cubemap':
+            raw_methods = {'ffmpeg_dual_lens', 'ffmpeg_lens1', 'ffmpeg_lens2', 'dual_fisheye'}
+            if self.stage1_enable.isChecked() and self.extraction_method_combo.currentData() not in raw_methods:
+                self.log_message("[WARN] Fisheye split validation: raw lens extraction is required for Fisheye to Cubemap.")
+                self._set_control_status("Use a raw fisheye extraction method", "warn")
+                return
+            if stage2_input_obj is not None and not self._folder_looks_like_raw_fisheye(stage2_input_obj):
+                self.log_message("[WARN] Fisheye split validation: input folder does not look like raw per-lens fisheye frames.")
+                self._set_control_status("Raw fisheye frames required", "warn")
+                return
+
         stage3_input_obj = self._get_stage3_input_path()
-        if stage_index == 4 and stage3_input_obj is not None:
+        if stage_index == 5 and stage3_input_obj is not None:
             if not stage3_input_obj.exists() or not stage3_input_obj.is_dir():
                 self.log_message(f"[WARN] Masking validation: Stage 3 input folder not found: {stage3_input_obj}")
                 self._set_control_status("Stage 3 input folder not found", "warn")
@@ -1787,14 +1969,14 @@ class MainWindow(QMainWindow):
                 self._set_control_status("No images in Stage 3 input folder", "warn")
                 return
 
-        if stage_index == 4 and self._normalize_masking_engine(self.masking_engine_combo.currentData()) == 'yolo' and not (
+        if stage_index == 5 and self._normalize_masking_engine(self.masking_engine_combo.currentData()) == 'yolo' and not (
             self.persons_enable.isChecked() or self.objects_enable.isChecked() or self.animals_enable.isChecked()
         ):
             self.log_message("[WARN] Masking validation: No masking category group is enabled.")
             self._set_control_status("No masking categories enabled", "warn")
             return
 
-        if stage_index == 4 and self._normalize_masking_engine(self.masking_engine_combo.currentData()) == 'yolo':
+        if stage_index == 5 and self._normalize_masking_engine(self.masking_engine_combo.currentData()) == 'yolo':
             custom_model_text = self.yolo_model_path_edit.text().strip() if hasattr(self, 'yolo_model_path_edit') else ''
             if custom_model_text:
                 custom_model = Path(custom_model_text).expanduser()
@@ -1807,7 +1989,7 @@ class MainWindow(QMainWindow):
                     self._set_control_status("Custom YOLO model must be ONNX", "warn")
                     return
 
-        if stage_index == 4 and self.masking_engine_combo.currentData() == 'sam3_cpp':
+        if stage_index == 5 and self.masking_engine_combo.currentData() == 'sam3_cpp':
             segmenter_text = self._get_sam3_segmenter_text()
             model_text = self._get_sam3_model_text()
             segmenter = Path(segmenter_text) if segmenter_text else None
@@ -1925,7 +2107,7 @@ class MainWindow(QMainWindow):
                     yaw = (360 / cc) * i
                     cameras.append({'yaw': yaw, 'pitch': p, 'roll': 0, 'fov': f})
             return cameras
-        elif stage2_method == 'cubemap':
+        elif stage2_method in {'cubemap', 'fisheye_cubemap'}:
             return []
         else:
             return [{'yaw': (360/8)*i, 'pitch': 0, 'roll': 0, 'fov': 110} for i in range(8)]
@@ -1950,6 +2132,10 @@ class MainWindow(QMainWindow):
         export_simple_action = QAction("Export RealityScan (&Simple: Images + Masks)", self)
         export_simple_action.triggered.connect(self.export_realityscan_simple)
         file_menu.addAction(export_simple_action)
+
+        export_gps_action = QAction("Export &GPS Track from INSV...", self)
+        export_gps_action.triggered.connect(self.export_gps_manually)
+        file_menu.addAction(export_gps_action)
 
         file_menu.addSeparator()
         exit_action = QAction("E&xit", self)
@@ -2108,6 +2294,8 @@ class MainWindow(QMainWindow):
         stage2_method = self.stage2_method_combo.currentData()
         if stage2_method == 'cubemap':
             stage2_format = _normalize_image_format(self.cubemap_format_combo.currentData(), 'png')
+        elif stage2_method == 'fisheye_cubemap':
+            stage2_format = _normalize_image_format(self.fisheye_format_combo.currentData(), 'png')
         else:
             stage2_format = _normalize_image_format(self.stage2_format_combo.currentData(), 'png')
 
@@ -2115,6 +2303,9 @@ class MainWindow(QMainWindow):
             'input_file': self.input_file_edit.text(),
             'output_dir': self.output_dir_edit.text(),
             'stage1_enabled': self.stage1_enable.isChecked(),
+            'extract_gps_track': self.extract_gps_track_check.isChecked() if hasattr(self, 'extract_gps_track_check') else False,
+            'gps_capture_fps_override': float(self.gps_capture_fps_spin.value()) if hasattr(self, 'gps_capture_fps_spin') else 0.0,
+            'exiftool_path': self._get_exiftool_text(),
             'fps_interval': self.fps_spin.value(),
             'extraction_method': self.extraction_method_combo.currentData(),
             # Fisheye frame rotation: 0 | 90 | 180 | 270 (from preview rotate button)
@@ -2130,14 +2321,19 @@ class MainWindow(QMainWindow):
             'stage2_format': stage2_format,
             'stage2_format_perspective': _normalize_image_format(self.stage2_format_combo.currentData(), 'png'),
             'stage2_format_cubemap': _normalize_image_format(self.cubemap_format_combo.currentData(), 'png'),
+            'stage2_format_fisheye': _normalize_image_format(self.fisheye_format_combo.currentData(), 'png') if hasattr(self, 'fisheye_format_combo') else 'png',
             'stage2_numbering_mode': self.stage2_numbering_combo.currentData() if hasattr(self, 'stage2_numbering_combo') else DEFAULT_STAGE2_NUMBERING_MODE,
             'stage2_perspective_layout': self.stage2_layout_combo.currentData() if hasattr(self, 'stage2_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
             'stage2_cubemap_layout': self.cubemap_layout_combo.currentData() if hasattr(self, 'cubemap_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
+            'stage2_fisheye_layout': self.fisheye_layout_combo.currentData() if hasattr(self, 'fisheye_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
             'output_width': self.stage2_width_spin.value(),
             'output_height': self.stage2_height_spin.value(),
             'cubemap_tile_width': self.cubemap_tile_width_spin.value(),
             'cubemap_tile_height': self.cubemap_tile_height_spin.value(),
             'cubemap_fov': 90,
+            'fisheye_face_size': self.fisheye_face_size_spin.value() if hasattr(self, 'fisheye_face_size_spin') else DEFAULT_FISHEYE_FACE_SIZE,
+            'fisheye_lens_fov': self.fisheye_lens_fov_spin.value() if hasattr(self, 'fisheye_lens_fov_spin') else DEFAULT_FISHEYE_LENS_FOV,
+            'fisheye_projection_model': self.fisheye_projection_combo.currentData() if hasattr(self, 'fisheye_projection_combo') else DEFAULT_FISHEYE_PROJECTION_MODEL,
             'stage2_input_dir': self._get_stage2_input_dir(),
             'skip_transform': not self.stage2_enable.isChecked(),
             'stage3_enabled': self.stage3_enable.isChecked(),
@@ -2210,7 +2406,7 @@ class MainWindow(QMainWindow):
         return Path(value) if value else None
 
     def _get_stage2_input_dir(self) -> str:
-        for attr in ('stage2_input_dir_edit', 'stage2_input_dir_edit_cubemap'):
+        for attr in ('stage2_input_dir_edit', 'stage2_input_dir_edit_cubemap', 'stage2_input_dir_edit_fisheye'):
             widget = getattr(self, attr, None)
             if widget is not None:
                 value = widget.text().strip()
@@ -2220,7 +2416,7 @@ class MainWindow(QMainWindow):
 
     def _set_stage2_input_dir(self, value: str):
         normalized = str(value or '').strip()
-        for attr in ('stage2_input_dir_edit', 'stage2_input_dir_edit_cubemap'):
+        for attr in ('stage2_input_dir_edit', 'stage2_input_dir_edit_cubemap', 'stage2_input_dir_edit_fisheye'):
             widget = getattr(self, attr, None)
             if widget is None:
                 continue
@@ -2248,8 +2444,25 @@ class MainWindow(QMainWindow):
             return self.export_mask_source_combo.currentData()
         return 'auto'
 
+    def _folder_looks_like_raw_fisheye(self, folder: Path | None) -> bool:
+        if folder is None or not folder.exists() or not folder.is_dir():
+            return False
+        image_paths = []
+        for pattern in ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp'):
+            image_paths.extend(path for path in folder.rglob(pattern) if path.is_file())
+        for path in sorted(image_paths)[:40]:
+            name = path.stem.lower()
+            parent = path.parent.name.lower()
+            if '_lens1' in name or '_lens2' in name:
+                return True
+            if parent in {'lens_1', 'lens_2', 'lens1', 'lens2'}:
+                return True
+        return False
+
     def _legacy_mask_target_from_source(self, source: str) -> str:
-        if source in {'equirect', 'fisheye'}:
+        if source == 'fisheye':
+            return 'fisheye'
+        if source == 'equirect':
             return 'equirect'
         return 'split'
 
@@ -2306,6 +2519,10 @@ class MainWindow(QMainWindow):
         segmenter = self.settings.get_sam3_segmenter_path()
         return str(segmenter) if segmenter else ''
 
+    def _get_exiftool_text(self) -> str:
+        exiftool_path = self.settings.get_exiftool_path()
+        return str(exiftool_path) if exiftool_path else ''
+
     def _get_sam3_model_text(self) -> str:
         model = self.settings.get_sam3_model_path()
         return str(model) if model else ''
@@ -2324,6 +2541,16 @@ class MainWindow(QMainWindow):
             if engine != 'sam3_cpp':
                 return True
         return True
+
+    def _normalize_masking_engine(self, engine: str | None) -> str:
+        engine_value = str(engine or '').strip().lower()
+        if engine_value in {'dart', 'dart_masker'}:
+            return 'dart'
+        if engine_value in {'yolo', 'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
+            return 'yolo'
+        if engine_value in {'sam3_cpp', 'sam_vitb'}:
+            return 'sam3_cpp'
+        return 'dart'
 
     def _sync_sam3_backend_selector_from_settings(self):
         # Preserve settings normalization for old config files and force CUDA-only mode.
@@ -2349,16 +2576,6 @@ class MainWindow(QMainWindow):
         target.blockSignals(True)
         target.setCurrentIndex(index)
         target.blockSignals(False)
-
-    def _normalize_masking_engine(self, engine: str | None) -> str:
-        engine_value = str(engine or '').strip().lower()
-        if engine_value in {'yolo', 'yolo_onnx', 'yolo_pytorch', 'hybrid'}:
-            return 'yolo'
-        if engine_value == 'sam3_cpp':
-            return 'sam3_cpp'
-        if engine_value == 'sam_vitb':
-            return 'sam3_cpp'
-        return 'sam3_cpp'
 
     def _get_mask_output_mode(self) -> str:
         if hasattr(self, 'sam3_output_mode_combo'):
@@ -2587,6 +2804,10 @@ class MainWindow(QMainWindow):
                 self.output_dir_edit.setText(config['output_dir'])
             if 'stage1_enabled' in config:
                 self.stage1_enable.setChecked(config['stage1_enabled'])
+            if 'extract_gps_track' in config and hasattr(self, 'extract_gps_track_check'):
+                self.extract_gps_track_check.setChecked(bool(config['extract_gps_track']))
+            if 'gps_capture_fps_override' in config and hasattr(self, 'gps_capture_fps_spin'):
+                self.gps_capture_fps_spin.setValue(max(0.0, float(config.get('gps_capture_fps_override') or 0.0)))
             if 'fps_interval' in config:
                 self.fps_spin.setValue(config['fps_interval'])
             if 'extraction_method' in config:
@@ -2603,6 +2824,9 @@ class MainWindow(QMainWindow):
                     self.sdk_resolution_combo.setCurrentIndex(idx)
             if 'sdk_options' in config and hasattr(self, 'stage1_media_panel'):
                 self.stage1_media_panel.set_values(config.get('sdk_options') or {})
+            if 'exiftool_path' in config:
+                exiftool_text = (config.get('exiftool_path') or '').strip()
+                self.settings.set_exiftool_path(Path(exiftool_text) if exiftool_text else None)
             if 'output_format' in config:
                 idx = self.output_format_combo.findData(_normalize_image_format(config['output_format'], 'jpg'))
                 if idx >= 0:
@@ -2635,6 +2859,10 @@ class MainWindow(QMainWindow):
                 idx_c = self.cubemap_format_combo.findData(normalized_stage2)
                 if idx_c >= 0:
                     self.cubemap_format_combo.setCurrentIndex(idx_c)
+                if hasattr(self, 'fisheye_format_combo'):
+                    idx_f = self.fisheye_format_combo.findData(normalized_stage2)
+                    if idx_f >= 0:
+                        self.fisheye_format_combo.setCurrentIndex(idx_f)
             if 'stage2_format_perspective' in config:
                 idx = self.stage2_format_combo.findData(_normalize_image_format(config['stage2_format_perspective'], 'png'))
                 if idx >= 0:
@@ -2643,6 +2871,10 @@ class MainWindow(QMainWindow):
                 idx = self.cubemap_format_combo.findData(_normalize_image_format(config['stage2_format_cubemap'], 'png'))
                 if idx >= 0:
                     self.cubemap_format_combo.setCurrentIndex(idx)
+            if 'stage2_format_fisheye' in config and hasattr(self, 'fisheye_format_combo'):
+                idx = self.fisheye_format_combo.findData(_normalize_image_format(config['stage2_format_fisheye'], 'png'))
+                if idx >= 0:
+                    self.fisheye_format_combo.setCurrentIndex(idx)
             if 'stage2_numbering_mode' in config and hasattr(self, 'stage2_numbering_combo'):
                 idx = self.stage2_numbering_combo.findData(config['stage2_numbering_mode'])
                 if idx >= 0:
@@ -2657,6 +2889,18 @@ class MainWindow(QMainWindow):
                 idx = self.cubemap_layout_combo.findData(config['stage2_cubemap_layout'])
                 if idx >= 0:
                     self.cubemap_layout_combo.setCurrentIndex(idx)
+            if 'stage2_fisheye_layout' in config and hasattr(self, 'fisheye_layout_combo'):
+                idx = self.fisheye_layout_combo.findData(config['stage2_fisheye_layout'])
+                if idx >= 0:
+                    self.fisheye_layout_combo.setCurrentIndex(idx)
+            if 'fisheye_face_size' in config and hasattr(self, 'fisheye_face_size_spin'):
+                self.fisheye_face_size_spin.setValue(int(config['fisheye_face_size']))
+            if 'fisheye_lens_fov' in config and hasattr(self, 'fisheye_lens_fov_spin'):
+                self.fisheye_lens_fov_spin.setValue(float(config['fisheye_lens_fov']))
+            if 'fisheye_projection_model' in config and hasattr(self, 'fisheye_projection_combo'):
+                idx = self.fisheye_projection_combo.findData(config['fisheye_projection_model'])
+                if idx >= 0:
+                    self.fisheye_projection_combo.setCurrentIndex(idx)
             if 'stage3_enabled' in config:
                 self.stage3_enable.setChecked(config['stage3_enabled'])
             if 'stage3_image_source' in config and hasattr(self, 'mask_input_source_combo'):
@@ -2784,6 +3028,9 @@ class MainWindow(QMainWindow):
         elif method == 'cubemap':
             self.page_stack.setCurrentIndex(3)
             self.nav_buttons[3].setChecked(True)
+        elif method == 'fisheye_cubemap':
+            self.page_stack.setCurrentIndex(4)
+            self.nav_buttons[4].setChecked(True)
     
     def on_cubemap_type_changed(self, index: int):
         t = self.cubemap_type_combo.currentData()
@@ -2792,16 +3039,20 @@ class MainWindow(QMainWindow):
     def on_masking_engine_changed(self, index: int):
         engine = self._normalize_masking_engine(self.masking_engine_combo.currentData())
         is_sam3 = engine == "sam3_cpp"
+        is_dart = engine == "dart"
+        is_sam_family = is_sam3 or is_dart
         self._refresh_yolo_model_size_options()
         if hasattr(self, 'masking_categories_card'):
-            self.masking_categories_card.setVisible(not is_sam3)
-        self.model_size_container.setVisible(not is_sam3)
-        self.yolo_model_path_container.setVisible(not is_sam3)
-        self.confidence_container.setVisible(not is_sam3)
+            self.masking_categories_card.setVisible(not is_sam_family)
+        self.model_size_container.setVisible(not is_sam_family)
+        self.yolo_model_path_container.setVisible(not is_sam_family)
+        self.confidence_container.setVisible(True)
         self.mask_output_mode_container.setVisible(True)
-        self.sam3_options_container.setVisible(is_sam3)
-        self.sam3_preview_card.setVisible(is_sam3)
-        if is_sam3:
+        self.sam3_options_container.setVisible(is_sam_family)
+        self.sam3_preview_card.setVisible(is_sam_family)
+        if is_dart:
+            self.engine_description_label.setText("DART Fast SAM3 | Open-vocabulary detection & instance segmentation | PyTorch CUDA GPU accelerated")
+        elif is_sam3:
             self.engine_description_label.setText("Primary masking engine | extraction preview feeds SAM 3 automatically | bundled model and executable expected")
         else:
             self.confidence_spin.setEnabled(True)
@@ -3409,6 +3660,29 @@ class MainWindow(QMainWindow):
                 self._set_control_status("No images in Stage 3 input folder", "warn")
                 _clear_pending()
                 return
+
+        if self.stage2_enable.isChecked() and self.stage2_method_combo.currentData() == 'fisheye_cubemap':
+            raw_methods = {'ffmpeg_dual_lens', 'ffmpeg_lens1', 'ffmpeg_lens2', 'dual_fisheye'}
+            if self.stage1_enable.isChecked() and self.extraction_method_combo.currentData() not in raw_methods:
+                QMessageBox.warning(
+                    self,
+                    "Raw Fisheye Required",
+                    "Fisheye to Cubemap requires raw per-lens fisheye frames.\n"
+                    "Choose FFmpeg Dual-Lens or a single-lens fisheye extraction method."
+                )
+                self._set_control_status("Raw fisheye extraction required", "warn")
+                _clear_pending()
+                return
+            if stage2_input_dir and not self._folder_looks_like_raw_fisheye(Path(stage2_input_dir)):
+                QMessageBox.warning(
+                    self,
+                    "Raw Fisheye Required",
+                    "The selected Stage 2 input folder does not look like raw per-lens fisheye frames.\n"
+                    "Use extracted lens folders or frame names containing lens suffixes."
+                )
+                self._set_control_status("Raw fisheye frames required", "warn")
+                _clear_pending()
+                return
         
         stage2_method = self.stage2_method_combo.currentData()
         
@@ -3416,6 +3690,9 @@ class MainWindow(QMainWindow):
             'input_file': input_file,
             'output_dir': output_dir,
             'enable_stage1': self.stage1_enable.isChecked(),
+            'extract_gps_track': self.extract_gps_track_check.isChecked() if hasattr(self, 'extract_gps_track_check') else False,
+            'gps_capture_fps_override': float(self.gps_capture_fps_spin.value()) if hasattr(self, 'gps_capture_fps_spin') else 0.0,
+            'exiftool_path': self._get_exiftool_text(),
             'skip_transform': not self.stage2_enable.isChecked(),
             'enable_stage2': self.stage2_enable.isChecked(),
             'enable_stage3': self.stage3_enable.isChecked(),
@@ -3438,6 +3715,7 @@ class MainWindow(QMainWindow):
             'stage2_numbering_mode': self.stage2_numbering_combo.currentData() if hasattr(self, 'stage2_numbering_combo') else DEFAULT_STAGE2_NUMBERING_MODE,
             'stage2_perspective_layout': self.stage2_layout_combo.currentData() if hasattr(self, 'stage2_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
             'stage2_cubemap_layout': self.cubemap_layout_combo.currentData() if hasattr(self, 'cubemap_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
+            'stage2_fisheye_layout': self.fisheye_layout_combo.currentData() if hasattr(self, 'fisheye_layout_combo') else DEFAULT_STAGE2_LAYOUT_MODE,
             'camera_config': {'cameras': self._generate_camera_positions()},
             'sdk_options': self.stage1_media_panel.get_sdk_options() if hasattr(self, 'stage1_media_panel') else {},
         }
@@ -3469,6 +3747,30 @@ class MainWindow(QMainWindow):
                     'cubemap_type': ct, 'tile_width': tw, 'tile_height': th,
                     'fov': 90, 'layout': 'separate'
                 }
+            })
+        elif stage2_method == 'fisheye_cubemap':
+            face_size = self.fisheye_face_size_spin.value()
+            self.pipeline_config.update({
+                'output_width': face_size,
+                'output_height': face_size,
+                'stage2_format': _normalize_image_format(self.fisheye_format_combo.currentData(), 'png'),
+                'fisheye_params': {
+                    'face_size': face_size,
+                    'lens_fov': self.fisheye_lens_fov_spin.value(),
+                    'projection_model': self.fisheye_projection_combo.currentData(),
+                }
+            })
+
+        force_fisheye_pre_split_masking = (
+            stage2_method == 'fisheye_cubemap'
+            and self.stage3_enable.isChecked()
+            and not stage3_input_dir
+        )
+
+        if force_fisheye_pre_split_masking:
+            self.pipeline_config.update({
+                'stage3_image_source': 'fisheye',
+                'mask_target': 'fisheye',
             })
         
         # Masking classes
@@ -3537,8 +3839,8 @@ class MainWindow(QMainWindow):
                     'personal_objects': object_classes,
                     'animals': animal_classes,
                 },
-                'stage3_image_source': self._get_stage3_image_source(),
-                'mask_target': self._legacy_mask_target_from_source(self._get_stage3_image_source()),
+                'stage3_image_source': 'fisheye' if force_fisheye_pre_split_masking else self._get_stage3_image_source(),
+                'mask_target': 'fisheye' if force_fisheye_pre_split_masking else self._legacy_mask_target_from_source(self._get_stage3_image_source()),
             })
         
         # UI state
@@ -3658,7 +3960,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Images", f"No images in: {folder}")
             return
         
-        self.log_message(f"Found {len(images)} equirectangular images")
+        if self.stage2_method_combo.currentData() == 'fisheye_cubemap':
+            self.log_message(f"Found {len(images)} raw fisheye images")
+        else:
+            self.log_message(f"Found {len(images)} Stage 2 input images")
         self._auto_advance_enabled = True
         s1, s3 = self.stage1_enable.isChecked(), self.stage3_enable.isChecked()
         self.stage1_enable.setChecked(False)
@@ -3804,3 +4109,248 @@ class MainWindow(QMainWindow):
             self.theme_toggle_button.setChecked(mode == "dark")
             self.theme_toggle_button.setText("☾" if mode == "dark" else "☀")
             self.theme_toggle_button.blockSignals(False)
+
+    def export_gps_manually(self):
+        """Manually extract and export GPS track in multiple formats immediately."""
+        input_file = self.input_file_edit.text().strip()
+        if not input_file:
+            QMessageBox.warning(self, "No Input File", "Please select a source INSV/video file first.")
+            return
+
+        input_path = Path(input_file)
+        if not input_path.exists():
+            QMessageBox.warning(self, "File Not Found", f"Source file does not exist:\n{input_file}")
+            return
+
+        if input_path.suffix.lower() != '.insv':
+            QMessageBox.warning(self, "Invalid File Type", "GPS track extraction is only supported for Insta360 INSV files.")
+            return
+
+        # Check ExifTool path
+        exiftool_path = self._get_exiftool_text()
+        if not exiftool_path or not Path(exiftool_path).exists():
+            reply = QMessageBox.question(
+                self,
+                "ExifTool Missing",
+                "ExifTool is required for GPS extraction but is not configured.\n"
+                "Would you like to open Settings to configure it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_settings()
+            return
+
+        from PyQt6.QtWidgets import QDialog, QFormLayout
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Export GPS Track")
+        dialog.setMinimumWidth(450)
+        dialog_layout = QVBoxLayout(dialog)
+
+        # Checkboxes for formats
+        format_group = QGroupBox("Select Export Formats")
+        format_layout = QVBoxLayout()
+        gpx_check = QCheckBox("GPX (Standard XML track)")
+        gpx_check.setChecked(True)
+        csv_check = QCheckBox("CSV (Spreadsheet/Coordinates table)")
+        csv_check.setChecked(True)
+        json_check = QCheckBox("JSON (Structured developers format)")
+        json_check.setChecked(True)
+        kml_check = QCheckBox("KML (Google Earth/Maps path)")
+        kml_check.setChecked(True)
+
+        format_layout.addWidget(gpx_check)
+        format_layout.addWidget(csv_check)
+        format_layout.addWidget(json_check)
+        format_layout.addWidget(kml_check)
+        format_group.setLayout(format_layout)
+        dialog_layout.addWidget(format_group)
+
+        # Output folder selector
+        folder_group = QGroupBox("Destination Folder")
+        folder_layout = QHBoxLayout()
+        folder_edit = QLineEdit()
+        
+        out_dir = self.output_dir_edit.text().strip()
+        if out_dir:
+            folder_edit.setText(out_dir)
+        else:
+            folder_edit.setText(str(input_path.parent))
+            
+        folder_layout.addWidget(folder_edit)
+        
+        browse_btn = QPushButton("Browse...")
+        def browse_dest():
+            selected = QFileDialog.getExistingDirectory(self, "Select Destination Folder", folder_edit.text())
+            if selected:
+                folder_edit.setText(selected)
+        browse_btn.clicked.connect(browse_dest)
+        folder_layout.addWidget(browse_btn)
+        folder_group.setLayout(folder_layout)
+        dialog_layout.addWidget(folder_group)
+
+        # Outlier Filtering and Smoothing Settings inside the dialog
+        cleaning_group = QGroupBox("Outlier Filtering & Smoothing")
+        cleaning_layout = QFormLayout()
+        
+        clean_check = QCheckBox("Apply path outlier filtering and smoothing")
+        clean_check.setChecked(self.settings.get_gps_clean_path())
+        cleaning_layout.addRow("", clean_check)
+        
+        max_speed_spin = QDoubleSpinBox()
+        max_speed_spin.setRange(0.1, 100.0)
+        max_speed_spin.setValue(self.settings.get_gps_max_speed_m_s())
+        max_speed_spin.setSuffix(" m/s")
+        cleaning_layout.addRow("Max Plausible Speed:", max_speed_spin)
+
+        angle_spin = QDoubleSpinBox()
+        angle_spin.setRange(1.0, 180.0)
+        angle_spin.setValue(self.settings.get_gps_angle_min_deg())
+        angle_spin.setSuffix(" deg")
+        cleaning_layout.addRow("Sharp V-turn Min Angle:", angle_spin)
+
+        length_spin = QDoubleSpinBox()
+        length_spin.setRange(0.1, 1000.0)
+        length_spin.setValue(self.settings.get_gps_length_min_m())
+        length_spin.setSuffix(" m")
+        cleaning_layout.addRow("Sharp V-turn Min Excursion:", length_spin)
+
+        smooth_spin = QSpinBox()
+        smooth_spin.setRange(1, 99)
+        smooth_spin.setValue(self.settings.get_gps_smooth_window())
+        smooth_spin.setSuffix(" samples")
+        cleaning_layout.addRow("Smoothing Window Size:", smooth_spin)
+
+        # Elevation mode controls
+        from src.config.defaults import GPS_ELEVATION_MODES
+        ele_combo = QComboBox()
+        for mode_key, mode_label in GPS_ELEVATION_MODES.items():
+            ele_combo.addItem(mode_label, mode_key)
+        current_mode = self.settings.get_gps_elevation_mode()
+        mode_idx = ele_combo.findData(current_mode)
+        if mode_idx >= 0:
+            ele_combo.setCurrentIndex(mode_idx)
+        ele_combo.setToolTip(
+            "How to handle GPS altitude:\n"
+            "• Constant Median: Flattens Z-axis to a single value (best for flat floors).\n"
+            "• Smoothed: Applies a wide moving average to altitude.\n"
+            "• Raw: Keeps original altitude values."
+        )
+        cleaning_layout.addRow("Elevation Mode:", ele_combo)
+
+        ele_smooth_spin = QSpinBox()
+        ele_smooth_spin.setRange(3, 99)
+        ele_smooth_spin.setSingleStep(2)
+        ele_smooth_spin.setValue(self.settings.get_gps_elevation_smooth_window())
+        ele_smooth_spin.setSuffix(" samples")
+        ele_smooth_spin.setToolTip("Moving average window for altitude smoothing (only when Elevation Mode is 'Smoothed')")
+        cleaning_layout.addRow("Elevation Smooth Window:", ele_smooth_spin)
+
+        def _toggle_ele_smooth(idx):
+            ele_smooth_spin.setEnabled(ele_combo.currentData() == 'smooth')
+        ele_combo.currentIndexChanged.connect(_toggle_ele_smooth)
+        _toggle_ele_smooth(0)
+
+        def toggle_cleaning_ui(state):
+            enabled = (state == 2 or state == True)
+            max_speed_spin.setEnabled(enabled)
+            angle_spin.setEnabled(enabled)
+            length_spin.setEnabled(enabled)
+            smooth_spin.setEnabled(enabled)
+            ele_combo.setEnabled(enabled)
+            ele_smooth_spin.setEnabled(enabled and ele_combo.currentData() == 'smooth')
+        clean_check.stateChanged.connect(toggle_cleaning_ui)
+        toggle_cleaning_ui(clean_check.isChecked())
+
+        cleaning_group.setLayout(cleaning_layout)
+        dialog_layout.addWidget(cleaning_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        export_btn = QPushButton("Export Now")
+        export_btn.setDefault(True)
+        export_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(export_btn)
+        dialog_layout.addLayout(button_layout)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        dest_dir = Path(folder_edit.text().strip())
+        if not dest_dir.exists():
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                QMessageBox.critical(self, "Error Creating Directory", f"Could not create destination directory:\n{e}")
+                return
+
+        # Show wait cursor
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QCursor
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        
+        try:
+            from src.gps import GPSExtractor
+            gps_extractor = GPSExtractor(exiftool_path=exiftool_path)
+            
+            temp_gpx_path = dest_dir / f"{input_path.stem}_raw_track.gpx"
+            
+            res, samples = gps_extractor.extract_track(
+                input_path,
+                temp_gpx_path,
+                clean_path=clean_check.isChecked(),
+                max_speed_m_s=max_speed_spin.value(),
+                angle_min_deg=angle_spin.value(),
+                length_min_m=length_spin.value(),
+                smooth_window=smooth_spin.value(),
+                elevation_mode=ele_combo.currentData() if clean_check.isChecked() else 'raw',
+                elevation_smooth_window=ele_smooth_spin.value(),
+            )
+            
+            if not res.get('success') or not samples:
+                QApplication.restoreOverrideCursor()
+                QMessageBox.critical(self, "GPS Extraction Failed", f"Failed to extract GPS track:\n{res.get('error', 'No GPS data found')}")
+                if temp_gpx_path.exists():
+                    temp_gpx_path.unlink()
+                return
+
+            exported_paths = []
+            
+            if gpx_check.isChecked():
+                gpx_path = dest_dir / f"{input_path.stem}_track.gpx"
+                gps_extractor.write_gpx(samples, gpx_path)
+                exported_paths.append(str(gpx_path))
+                
+            if csv_check.isChecked():
+                csv_path = dest_dir / f"{input_path.stem}_track.csv"
+                gps_extractor.write_csv(samples, csv_path)
+                exported_paths.append(str(csv_path))
+                
+            if json_check.isChecked():
+                json_path = dest_dir / f"{input_path.stem}_track.json"
+                gps_extractor.write_json(samples, json_path)
+                exported_paths.append(str(json_path))
+                
+            if kml_check.isChecked():
+                kml_path = dest_dir / f"{input_path.stem}_track.kml"
+                gps_extractor.write_kml(samples, kml_path)
+                exported_paths.append(str(kml_path))
+
+            if temp_gpx_path.exists():
+                temp_gpx_path.unlink()
+
+            QApplication.restoreOverrideCursor()
+            
+            msg = f"GPS track successfully extracted and exported to {dest_dir.name}!\n\n"
+            msg += "Exported files:\n" + "\n".join(f"  • {Path(p).name}" for p in exported_paths)
+            QMessageBox.information(self, "GPS Export Successful", msg)
+            self.log_message(f"[GPS] Manually exported track in {len(exported_paths)} formats to {dest_dir}")
+            
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            logger.error("Manual GPS export failed: %s", e, exc_info=True)
+            QMessageBox.critical(self, "GPS Export Error", f"An unexpected error occurred during manual GPS export:\n{e}")

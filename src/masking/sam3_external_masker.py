@@ -555,6 +555,27 @@ class SAM3ExternalMasker:
                 unique.append(p)
         return unique or ['person']
 
+    def _has_rich_prompt_selection(self) -> bool:
+        if self.custom_prompts:
+            return True
+        return any(
+            bool(self.enabled_categories.get(key, False))
+            for key in ('bags', 'phones', 'hats', 'helmets', 'sky')
+        )
+
+    def _should_use_sequence_mode(self, image_paths: List[Path]) -> bool:
+        if self._has_rich_prompt_selection():
+            logger.info('[SAM3] Sequence mode disabled because non-person/custom prompts are enabled')
+            return False
+
+        return (
+            self.enable_sequence_mode
+            and not self._sequence_mode_unavailable
+            and len(image_paths) >= self.sequence_mode_min_frames
+            and self._looks_like_frame_sequence(image_paths)
+            and self._resolve_tracker_segmenter_path() is not None
+        )
+
     def request_cancellation(self) -> None:
         self.cancelled = True
 
@@ -1571,13 +1592,7 @@ class SAM3ExternalMasker:
         successful = 0
         failed = 0
 
-        sequence_mode = (
-            self.enable_sequence_mode
-            and not self._sequence_mode_unavailable
-            and len(proc_paths) >= self.sequence_mode_min_frames
-            and self._looks_like_frame_sequence(proc_paths)
-            and self._resolve_tracker_segmenter_path() is not None
-        )
+        sequence_mode = self._should_use_sequence_mode(proc_paths)
 
         runner_name = '_run_tracker_sequence_exe' if sequence_mode else '_run_batch_exe'
         logger.info("[SAM3] [START] Calling %s() with %d images...", runner_name, len(proc_paths))
@@ -1633,6 +1648,23 @@ class SAM3ExternalMasker:
                         logger.info("[SAM3] No prompt detections for %s; wrote fisheye circle-only mask", orig_img.name)
                         successful += 1
                         continue
+                fallback_mask = self._generate_onnx_fallback_mask(orig_img)
+                if fallback_mask is not None:
+                    base_img = _read_image_unicode(orig_img, cv2.IMREAD_UNCHANGED)
+                    final_mask_path = self._write_rs_mask_outputs(
+                        fallback_mask,
+                        base_img,
+                        orig_img,
+                        output_path,
+                        input_path,
+                    )
+                    if save_visualization and base_img is not None:
+                        vis_dest = build_related_output_path(orig_img, input_path, output_path, '_vis.png')
+                        vis_dest.parent.mkdir(parents=True, exist_ok=True)
+                        self._save_overlay(base_img, fallback_mask, vis_dest)
+                    logger.info('[SAM3] Used ONNX fallback detections for %s -> %s', orig_img.name, final_mask_path.name)
+                    successful += 1
+                    continue
                 logger.warning("[SAM3] No mask for %s", orig_img.name)
                 failed += 1
                 continue
@@ -1642,6 +1674,19 @@ class SAM3ExternalMasker:
                     oh, ow = tmp.shape[:2]
             try:
                 final_mask_path, rs_mask = self._postprocess_mask(raw_mask, ow, oh, orig_img, output_path, input_path)
+                if not self._rs_mask_has_detections(rs_mask):
+                    fallback_mask = self._generate_onnx_fallback_mask(orig_img)
+                    if fallback_mask is not None:
+                        base_img = _read_image_unicode(orig_img, cv2.IMREAD_UNCHANGED)
+                        final_mask_path = self._write_rs_mask_outputs(
+                            fallback_mask,
+                            base_img,
+                            orig_img,
+                            output_path,
+                            input_path,
+                        )
+                        rs_mask = fallback_mask
+                        logger.info('[SAM3] Replaced empty SAM3 mask with ONNX fallback for %s', orig_img.name)
                 if save_visualization:
                     vis_dest = build_related_output_path(orig_img, input_path, output_path, '_vis.png')
                     vis_dest.parent.mkdir(parents=True, exist_ok=True)
